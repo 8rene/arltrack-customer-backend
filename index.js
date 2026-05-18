@@ -29,17 +29,18 @@ app.use("/api/reviews",  reviewsRoutes);
 app.use("/api/location", locationRoutes);
 app.use("/api/admin",    adminRoutes);
 
-// Firebase connection test
-const testFirebaseConnection = async () => {
-  try {
-    const snapshot = await db.collection("user").limit(1).get();
-    console.log("✅ Firebase Connected! Docs found:", snapshot.size);
-  } catch (error) {
-    console.error("❌ Firebase NOT Connected:", error.message);
-  }
-};
-
-testFirebaseConnection();
+// Firebase connection test — only runs in local development, not in production
+// FIX: removed unconditional call; every cold start was firing an unnecessary Firestore read
+if (process.env.NODE_ENV !== "production") {
+  (async () => {
+    try {
+      const snapshot = await db.collection("user").limit(1).get();
+      console.log("✅ Firebase Connected! Docs found:", snapshot.size);
+    } catch (error) {
+      console.error("❌ Firebase NOT Connected:", error.message);
+    }
+  })();
+}
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

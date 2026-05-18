@@ -302,7 +302,7 @@ const getUserBookings = async (req, res) => {
         cancellationReason:   b.cancellationReason        || "",
         modeOfDriving:        b.modeOfDriving             || "",
         location:             b.location                  || "",
-        destination:          b.location                  || "",
+        destination:          b.destination               || "",
         passengerName:        b.passengerName             || "",
         createdAt:            b.createdAt                 || null,
       };

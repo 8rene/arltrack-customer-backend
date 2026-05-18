@@ -46,15 +46,23 @@ const updateReview = async (req, res) => {
   const { reviewID } = req.params;
   const { userID, rating, comment } = req.body;
   if (!reviewID || !userID) return res.status(400).json({ message: "reviewID and userID are required." });
+
+  // FIX: validate rating before converting — Number(undefined) = NaN which Firestore silently stores
+  const parsedRating = Number(rating);
+  if (rating !== undefined && (isNaN(parsedRating) || parsedRating < 1 || parsedRating > 5)) {
+    return res.status(400).json({ message: "rating must be a number between 1 and 5." });
+  }
+
   try {
     const doc = await db.collection("reviews").doc(reviewID).get();
     if (!doc.exists) return res.status(404).json({ message: "Review not found." });
     if (doc.data().userID !== userID) return res.status(403).json({ message: "Not authorized." });
-    await db.collection("reviews").doc(reviewID).update({
-      rating:    Number(rating),
-      comment:   comment || "",
-      updatedAt: new Date(),
-    });
+
+    const updateData = { comment: comment || "", updatedAt: new Date() };
+    // Only overwrite rating if one was actually provided
+    if (rating !== undefined) updateData.rating = parsedRating;
+
+    await db.collection("reviews").doc(reviewID).update(updateData);
     return res.status(200).json({ message: "Review updated." });
   } catch (err) {
     console.error("updateReview error:", err);
