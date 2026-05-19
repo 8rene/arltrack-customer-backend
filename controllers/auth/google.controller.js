@@ -13,24 +13,27 @@ const googleLogin = async (req, res) => {
     const decoded = await auth.verifyIdToken(idToken);
     const { uid, email } = decoded;
 
-    // 2. Check if this user exists in your Firestore "user" collection
-    const userDoc = await db.collection("user").doc(uid).get();
+    // 2. Query Firestore by email (not UID)
+    const userQuery = await db.collection("user")
+      .where("email", "==", email)
+      .limit(1)
+      .get();
 
-    if (!userDoc.exists) {
-      // Delete the Firebase Auth entry para hindi mag-conflict sa email/password login
+    if (userQuery.empty) {
+      // Clean up the Google Firebase Auth entry
       await auth.deleteUser(uid);
-
       return res.status(403).json({
         message: "No account found for this Google email. Please register first.",
       });
     }
 
-    const userData = userDoc.data();
+    const userData = userQuery.docs[0].data();
+    const userID   = userQuery.docs[0].id; // original UID from email signup
 
-    // 3. Issue your app JWT (same shape as the normal login)
+    // 3. Issue JWT using the original UID
     const token = jwt.sign(
       {
-        userID:   uid,
+        userID:   userID,
         email:    userData.email,
         roleID:   userData.roleID,
         username: userData.username || "",
@@ -43,7 +46,7 @@ const googleLogin = async (req, res) => {
       message: "Login successful",
       token,
       user: {
-        userID:       uid,
+        userID:       userID,
         email:        userData.email,
         phone:        userData.phone        || "",
         username:     userData.username     || "",
