@@ -30,11 +30,11 @@ const sendOTP = async (req, res) => {
     if (!response.ok) {
       const errText = await response.text();
       console.error("EmailJS error:", errText);
-      // Still return the OTP so registration can proceed even if email fails
-      return res.status(200).json({ otp, emailSent: false, emailError: errText });
+      // Still allow registration to proceed even if email fails
+      return res.status(200).json({ emailSent: false, emailError: errText });
     }
 
-    return res.status(200).json({ otp, emailSent: true });
+    return res.status(200).json({ emailSent: true });
 
   } catch (err) {
     console.error("sendOTP error:", err);
