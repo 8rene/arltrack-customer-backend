@@ -147,7 +147,7 @@ const createBooking = async (req, res) => {
         }
         return null;
       } catch (e) {
-        console.warn("Coding rule check skipped:", e.message);
+
         return null;
       }
     })();
@@ -499,12 +499,6 @@ const checkCodingRule = async (req, res) => {
       return hours * 60 + mins;
     };
 
-    // DEBUG — log what we're checking so we can see the data in server logs
-    console.log("[checkCodingRule] plateNumber:", plateNumber, "lastDigit:", lastDigit);
-    console.log("[checkCodingRule] dayOfWeek (JS 0=Sun):", dayOfWeek, "bookingStartMins:", bookingStartMins, "bookingEndMins:", bookingEndMins);
-    console.log("[checkCodingRule] destination:", destination);
-    console.log("[checkCodingRule] total rules to check:", rulesSnap.size);
-
     // 4. Check each rule
     for (const ruleDoc of rulesSnap.docs) {
       const rule = ruleDoc.data();
@@ -523,7 +517,6 @@ const checkCodingRule = async (req, res) => {
       // JS: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
       const ruleDayOfWeek = Number(rule.dayOfWeek);
       if (isNaN(ruleDayOfWeek) || ruleDayOfWeek !== dayOfWeek) {
-        console.log("[checkCodingRule] → SKIP: dayOfWeek mismatch (rule:", ruleDayOfWeek, "booking:", dayOfWeek, ")");
         continue;
       }
 
@@ -533,7 +526,6 @@ const checkCodingRule = async (req, res) => {
         const ruleCity = rule.city.toLowerCase().trim();
         const dest     = (destination || "").toLowerCase();
         if (!dest.includes(ruleCity)) {
-          console.log("[checkCodingRule] → SKIP: city mismatch (rule city:", ruleCity, "dest:", dest, ")");
           continue;
         }
       }
@@ -542,12 +534,10 @@ const checkCodingRule = async (req, res) => {
       const ruleStart = parseTime(rule.startTime);
       const ruleEnd   = parseTime(rule.endTime);
       if (ruleStart === null || ruleEnd === null) {
-        console.log("[checkCodingRule] → SKIP: could not parse rule times:", rule.startTime, rule.endTime);
         continue;
       }
 
       const overlaps = bookingStartMins < ruleEnd && bookingEndMins > ruleStart;
-      console.log("[checkCodingRule] ruleStart:", ruleStart, "ruleEnd:", ruleEnd, "overlaps:", overlaps);
       if (!overlaps) continue;
 
       // d. Banned digit check — handle array of strings OR numbers from Firestore
@@ -560,7 +550,6 @@ const checkCodingRule = async (req, res) => {
         if (!isNaN(single)) bannedDigits = [single];
       }
 
-      console.log("[checkCodingRule] bannedDigits (parsed):", bannedDigits, "lastDigit:", lastDigit, "isBlocked:", bannedDigits.includes(lastDigit));
 
       if (bannedDigits.includes(lastDigit)) {
         return res.status(200).json({
@@ -577,7 +566,6 @@ const checkCodingRule = async (req, res) => {
       }
     }
 
-    console.log("[checkCodingRule] → No rule blocked this booking.");
     return res.status(200).json({ blocked: false });
 
   } catch (error) {
@@ -585,5 +573,6 @@ const checkCodingRule = async (req, res) => {
     return res.status(500).json({ message: "Failed to check coding rules." });
   }
 };
+
 
 module.exports = { createBooking, getUserBookings, cancelBooking, checkCodingRule };
