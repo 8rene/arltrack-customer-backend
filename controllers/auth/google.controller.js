@@ -17,6 +17,9 @@ const googleLogin = async (req, res) => {
     const userDoc = await db.collection("user").doc(uid).get();
 
     if (!userDoc.exists) {
+      // Delete the Firebase Auth entry para hindi mag-conflict sa email/password login
+      await auth.deleteUser(uid);
+
       return res.status(403).json({
         message: "No account found for this Google email. Please register first.",
       });
@@ -65,4 +68,3 @@ const googleLogin = async (req, res) => {
 };
 
 module.exports = { googleLogin };
-
