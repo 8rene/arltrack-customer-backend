@@ -15,7 +15,22 @@ const adminRoutes    = require("./routes/admin.routes");
 
 const app = express();
 
-app.use(cors());
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",").map(o => o.trim())
+  : ["http://localhost:5173", "http://localhost:3000"];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS blocked: ${origin}`));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+}));
+
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ limit: "20mb", extended: true }));
 
@@ -30,7 +45,6 @@ app.use("/api/location", locationRoutes);
 app.use("/api/admin",    adminRoutes);
 
 // Firebase connection test — only runs in local development, not in production
-// FIX: removed unconditional call; every cold start was firing an unnecessary Firestore read
 if (process.env.NODE_ENV !== "production") {
   (async () => {
     try {
@@ -46,6 +60,5 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
-
 
 module.exports = app;
