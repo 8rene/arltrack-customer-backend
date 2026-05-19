@@ -295,9 +295,9 @@ const getUserBookings = async (req, res) => {
         startDateTime: b.startDateTime             || null,
         endDateTime:   b.endDateTime               || null,
         totalDays:     b.totalDays                 || 1,
-        totalFee:      b.totalFee                  || 0,
-        depositFee:    b.depositFee                || 0,
-        rentalFee:            b.rentalFee                 || 0,
+        totalFee:      0,
+        depositFee:    0,
+        rentalFee:     0,
         status:               (b.status || "pending").toLowerCase(),
         cancellationReason:   b.cancellationReason        || "",
         modeOfDriving:        b.modeOfDriving             || "",
@@ -333,6 +333,10 @@ const getUserBookings = async (req, res) => {
           proofUrl:        p.proofUrl         || "",
           status:          p.status           || "",
         };
+        // Fix: fees are stored in payments, not in the booking doc
+        result[i].totalFee   = p.amount      || 0;
+        result[i].rentalFee  = p.rentalFee   || 0;
+        result[i].depositFee = p.depositFee  || 0;
       } else {
         result[i].payment = null;
       }
