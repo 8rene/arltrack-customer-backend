@@ -13,6 +13,5 @@ const auth   = admin.auth();
 const db     = admin.firestore();
 const bucket = admin.storage().bucket();
 
-console.log("🪣  Storage bucket:", bucket.name);
 
 module.exports = { auth, db, bucket };

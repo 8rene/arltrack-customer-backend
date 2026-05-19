@@ -20,8 +20,6 @@ const googleLogin = async (req, res) => {
       .get();
 
     if (userQuery.empty) {
-      // Clean up the Google Firebase Auth entry
-      await auth.deleteUser(uid);
       return res.status(403).json({
         message: "No account found for this Google email. Please register first.",
       });
