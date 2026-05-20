@@ -8,7 +8,7 @@ const createUser = (userID, data) => ({
   isVerified:   false,             // always false on signup — admin verifies manually
   isFlagged:    false,
   profileImage: "",
-  roleID:       "9vD6ZU1s2qUtmyu0RXKD",
+  roleID:       process.env.DEFAULT_ROLE_ID || "9vD6ZU1s2qUtmyu0RXKD",
   createdAt:    new Date(),
 });
 
