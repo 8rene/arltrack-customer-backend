@@ -104,47 +104,66 @@ const getAllCars = async (req, res) => {
 // GET /api/cars/featured
 const getFeaturedCars = async (req, res) => {
   try {
-    const reviewsSnap  = await db.collection("reviews").get();
-    const bookingsSnap = await db.collection("bookings").get();
+    // 1. Get all cars first to know valid carIDs (Firestore `in` needs explicit IDs)
+    const carsSnap = await db.collection("cars").get();
+    if (carsSnap.empty) {
+      return res.status(200).json({ mostReviewed: [], mostBooked: [] });
+    }
+
+    const carDataMap = {};
+    const brandIDs   = new Set();
+    const modelIDs   = new Set();
+    const allCarIDs  = [];
+
+    carsSnap.docs.forEach((doc) => {
+      carDataMap[doc.id] = doc.data();
+      allCarIDs.push(doc.id);
+      if (doc.data().brandID) brandIDs.add(doc.data().brandID);
+      if (doc.data().modelID) modelIDs.add(doc.data().modelID);
+    });
+
+    // 2. Query only reviews and bookings for known cars (max 30 per `in` query — safe for a car fleet)
+    const carIDChunks = [];
+    for (let i = 0; i < allCarIDs.length; i += 30) {
+      carIDChunks.push(allCarIDs.slice(i, i + 30));
+    }
+
+    const [reviewsDocs, bookingsDocs] = await Promise.all([
+      Promise.all(carIDChunks.map(chunk =>
+        db.collection("reviews").where("carID", "in", chunk).get()
+      )),
+      Promise.all(carIDChunks.map(chunk =>
+        db.collection("bookings").where("carID", "in", chunk).get()
+      )),
+    ]);
 
     const reviewCount  = {};
     const bookingCount = {};
 
-    reviewsSnap.docs.forEach((doc) => {
-      const cid = doc.data().carID;
-      if (cid) reviewCount[cid]  = (reviewCount[cid]  || 0) + 1;
-    });
-    bookingsSnap.docs.forEach((doc) => {
-      const cid = doc.data().carID;
-      if (cid) bookingCount[cid] = (bookingCount[cid] || 0) + 1;
-    });
+    reviewsDocs.flat().forEach(snap =>
+      snap.docs.forEach(doc => {
+        const cid = doc.data().carID;
+        if (cid) reviewCount[cid] = (reviewCount[cid] || 0) + 1;
+      })
+    );
+    bookingsDocs.flat().forEach(snap =>
+      snap.docs.forEach(doc => {
+        const cid = doc.data().carID;
+        if (cid) bookingCount[cid] = (bookingCount[cid] || 0) + 1;
+      })
+    );
 
     const top3Reviewed = Object.entries(reviewCount)
       .sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id]) => id);
     const top3Booked   = Object.entries(bookingCount)
       .sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id]) => id);
 
-    const allCarIDs = [...new Set([...top3Reviewed, ...top3Booked])];
-    if (allCarIDs.length === 0) {
+    const featuredIDs = [...new Set([...top3Reviewed, ...top3Booked])];
+    if (featuredIDs.length === 0) {
       return res.status(200).json({ mostReviewed: [], mostBooked: [] });
     }
 
-    const carDocs = await Promise.all(
-      allCarIDs.map((id) => db.collection("cars").doc(id).get())
-    );
-
-    const carDataMap = {};
-    const brandIDs   = new Set();
-    const modelIDs   = new Set();
-
-    carDocs.forEach((doc) => {
-      if (doc.exists) {
-        carDataMap[doc.id] = doc.data();
-        if (doc.data().brandID) brandIDs.add(doc.data().brandID);
-        if (doc.data().modelID) modelIDs.add(doc.data().modelID);
-      }
-    });
-
+    // 3. Resolve brand/model names
     const [brandDocs, modelDocs] = await Promise.all([
       Promise.all([...brandIDs].map((id) => db.collection("brand").doc(id).get())),
       Promise.all([...modelIDs].map((id) => db.collection("model").doc(id).get())),
@@ -155,9 +174,10 @@ const getFeaturedCars = async (req, res) => {
     const modelMap = {};
     modelDocs.forEach((d) => { if (d.exists) modelMap[d.id] = d.data().modelName || ""; });
 
+    // 4. Resolve full car details for featured cars only
     const resolvedMap = {};
     await Promise.all(
-      allCarIDs.filter((id) => carDataMap[id]).map(async (id) => {
+      featuredIDs.filter((id) => carDataMap[id]).map(async (id) => {
         resolvedMap[id] = await resolveCarDetails(id, carDataMap[id], brandMap, modelMap);
       })
     );
