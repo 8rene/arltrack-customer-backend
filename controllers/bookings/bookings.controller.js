@@ -8,6 +8,15 @@ const codingCache = {
   codingRules: null, // full rules array
 };
 
+// Helper: detect MIME type from base64 magic bytes
+const getMimeType = (base64) => {
+  if (base64.startsWith("/9j/"))   return "image/jpeg";
+  if (base64.startsWith("iVBOR"))  return "image/png";
+  if (base64.startsWith("UklGR"))  return "image/webp";
+  if (base64.startsWith("JVBERi")) return "application/pdf";
+  return "image/jpeg"; // fallback
+};
+
 // POST /api/bookings/create
 const createBooking = async (req, res) => {
   const {
@@ -193,7 +202,7 @@ const createBooking = async (req, res) => {
 
     // If screenshot was sent as base64, save it
     // (In production you'd upload to Firebase Storage first)
-    const proofUrl = proofBase64 ? `data:image/jpeg;base64,${proofBase64}` : "";
+    const proofUrl = proofBase64 ? `data:${getMimeType(proofBase64)};base64,${proofBase64}` : "";
 
     await paymentRef.set({
       paymentID,
