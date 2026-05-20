@@ -1,5 +1,13 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 
+// In-memory cache for stable data used by checkCodingRule.
+// cars: keyed by carID (plateNumber almost never changes)
+// codingRules: full collection, rarely updated
+const codingCache = {
+  cars:        {},   // { [carID]: plateNumber }
+  codingRules: null, // full rules array
+};
+
 // POST /api/bookings/create
 const createBooking = async (req, res) => {
   const {
@@ -427,11 +435,15 @@ const checkCodingRule = async (req, res) => {
   }
 
   try {
-    // 1. Get the car's plate number
-    const carDoc = await db.collection("cars").doc(carID).get();
-    if (!carDoc.exists) return res.status(404).json({ message: "Car not found." });
+    // 1. Get the car's plate number (cached by carID)
+    let plateNumber = codingCache.cars[carID];
+    if (!plateNumber) {
+      const carDoc = await db.collection("cars").doc(carID).get();
+      if (!carDoc.exists) return res.status(404).json({ message: "Car not found." });
+      plateNumber = (carDoc.data().plateNumber || "").trim().toUpperCase();
+      if (plateNumber) codingCache.cars[carID] = plateNumber;
+    }
 
-    const plateNumber = (carDoc.data().plateNumber || "").trim().toUpperCase();
     if (!plateNumber) {
       return res.status(200).json({ blocked: false });
     }
@@ -486,9 +498,12 @@ const checkCodingRule = async (req, res) => {
       });
     }
 
-    // 4. Fetch all codingRules
-    const rulesSnap = await db.collection("codingRules").get();
-    if (rulesSnap.empty) return res.status(200).json({ blocked: false });
+    // 4. Fetch all codingRules (cached — rules rarely change)
+    if (!codingCache.codingRules) {
+      const rulesSnap = await db.collection("codingRules").get();
+      codingCache.codingRules = rulesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    }
+    if (!codingCache.codingRules.length) return res.status(200).json({ blocked: false });
 
     // Helper: parse "7:00 AM" → minutes from midnight
     const parseTime = (timeStr) => {
@@ -512,11 +527,11 @@ const checkCodingRule = async (req, res) => {
     }
 
     // 4. Check each rule
-    for (const ruleDoc of rulesSnap.docs) {
-      const rule = ruleDoc.data();
+    for (const rule of codingCache.codingRules) {
+      const ruleDoc = { id: rule.id };
 
       if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] rule:", JSON.stringify({
-        id: ruleDoc.id,
+        id: rule.id,
         dayOfWeek: rule.dayOfWeek,
         city: rule.city,
         startTime: rule.startTime,
