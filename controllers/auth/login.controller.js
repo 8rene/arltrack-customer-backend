@@ -34,6 +34,13 @@ const login = async (req, res) => {
 
     const userData = userDoc.data();
 
+    // 2a. Check if account is pending admin approval
+    if (userData.status === "locked") {
+      return res.status(403).json({
+        message: "Your account is pending approval. Please wait for admin verification.",
+      });
+    }
+
     // 3. Issue JWT
     const token = jwt.sign(
       {
