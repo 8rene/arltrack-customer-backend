@@ -1,17 +1,30 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 
+// In-memory cache — location data almost never changes.
+// Cache is cleared only on server restart/cold start (acceptable on Vercel).
+const cache = {
+  regions:        null,
+  provinces:      {},   // keyed by regionID
+  municipalities: {},   // keyed by provinceID
+  barangays:      {},   // keyed by municipalityID
+};
+
 /**
  * GET /api/location/regions
  * Returns all regions from Firestore.
  */
 const getRegions = async (req, res) => {
   try {
+    if (cache.regions) return res.json(cache.regions);
+
     const snapshot = await db.collection("regions").get();
     const regions = snapshot.docs.map((doc) => ({
-      regionID: doc.data().regionID,
+      regionID:   doc.data().regionID,
       regionName: doc.data().regionName,
     }));
     regions.sort((a, b) => a.regionName.localeCompare(b.regionName));
+
+    cache.regions = regions;
     res.json(regions);
   } catch (error) {
     console.error("getRegions error:", error);
@@ -28,17 +41,21 @@ const getProvinces = async (req, res) => {
   if (!regionID) return res.status(400).json({ error: "regionID is required" });
 
   try {
+    if (cache.provinces[regionID]) return res.json(cache.provinces[regionID]);
+
     const snapshot = await db
       .collection("provinces")
       .where("regionID", "==", regionID)
       .get();
 
     const provinces = snapshot.docs.map((doc) => ({
-      provinceID: doc.data().provinceID,
+      provinceID:   doc.data().provinceID,
       provinceName: doc.data().provinceName,
-      regionID: doc.data().regionID,
+      regionID:     doc.data().regionID,
     }));
     provinces.sort((a, b) => a.provinceName.localeCompare(b.provinceName));
+
+    cache.provinces[regionID] = provinces;
     res.json(provinces);
   } catch (error) {
     console.error("getProvinces error:", error);
@@ -55,17 +72,21 @@ const getMunicipalities = async (req, res) => {
   if (!provinceID) return res.status(400).json({ error: "provinceID is required" });
 
   try {
+    if (cache.municipalities[provinceID]) return res.json(cache.municipalities[provinceID]);
+
     const snapshot = await db
       .collection("municipalities")
       .where("provinceID", "==", provinceID)
       .get();
 
     const municipalities = snapshot.docs.map((doc) => ({
-      municipalityID: doc.data().municipalityID,
+      municipalityID:   doc.data().municipalityID,
       municipalityName: doc.data().municipalityName,
-      provinceID: doc.data().provinceID,
+      provinceID:       doc.data().provinceID,
     }));
     municipalities.sort((a, b) => a.municipalityName.localeCompare(b.municipalityName));
+
+    cache.municipalities[provinceID] = municipalities;
     res.json(municipalities);
   } catch (error) {
     console.error("getMunicipalities error:", error);
@@ -82,17 +103,21 @@ const getBarangays = async (req, res) => {
   if (!municipalityID) return res.status(400).json({ error: "municipalityID is required" });
 
   try {
+    if (cache.barangays[municipalityID]) return res.json(cache.barangays[municipalityID]);
+
     const snapshot = await db
       .collection("barangays")
       .where("municipalityID", "==", municipalityID)
       .get();
 
     const barangays = snapshot.docs.map((doc) => ({
-      barangayID: doc.data().barangayID,
-      barangayName: doc.data().barangayName,
+      barangayID:     doc.data().barangayID,
+      barangayName:   doc.data().barangayName,
       municipalityID: doc.data().municipalityID,
     }));
     barangays.sort((a, b) => a.barangayName.localeCompare(b.barangayName));
+
+    cache.barangays[municipalityID] = barangays;
     res.json(barangays);
   } catch (error) {
     console.error("getBarangays error:", error);
