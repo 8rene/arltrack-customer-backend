@@ -1,4 +1,4 @@
-const { db } = require("../../config/firebaseConnection/firebase");
+const { db, bucket } = require("../../config/firebaseConnection/firebase");
 
 // In-memory cache for stable data used by checkCodingRule.
 // cars: keyed by carID (plateNumber almost never changes)
@@ -200,9 +200,19 @@ const createBooking = async (req, res) => {
     const paymentRef = db.collection("payments").doc();
     const paymentID  = paymentRef.id;
 
-    // If screenshot was sent as base64, save it
-    // (In production you'd upload to Firebase Storage first)
-    const proofUrl = proofBase64 ? `data:${getMimeType(proofBase64)};base64,${proofBase64}` : "";
+    // Upload proof of payment to Firebase Storage and save the URL
+    let proofUrl = "";
+    if (proofBase64) {
+      const mimeType   = getMimeType(proofBase64);
+      const extension  = mimeType.split("/")[1] || "jpg";
+      const filePath   = `proofs/${paymentID}.${extension}`;
+      const file       = bucket.file(filePath);
+      const buffer     = Buffer.from(proofBase64, "base64");
+
+      await file.save(buffer, { contentType: mimeType });
+      await file.makePublic();
+      proofUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+    }
 
     await paymentRef.set({
       paymentID,
