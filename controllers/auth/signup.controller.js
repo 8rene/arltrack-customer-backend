@@ -60,7 +60,7 @@ const signup = async (req, res) => {
     middleName,
     lastName,
     suffix,
-    birthdate,
+    birthDate: birthdate, // map incoming birthdate → normalized birthDate
     address,
     referralCode,
     // Document fields
@@ -95,10 +95,10 @@ const signup = async (req, res) => {
     const userRef = db.collection("user").doc(userID);
     batch.set(userRef, createUser(userID, { username, email, phone, referralCode }));
 
-    // ── "userDetails" collection (own unique userDetailsID) ──
-    const userDetailsRef = db.collection("userDetails").doc();
+    // ── "userDetails" collection (keyed by userID for easy lookup) ──
+    const userDetailsRef = db.collection("userDetails").doc(userID);
     batch.set(userDetailsRef, createUserDetails(userID, {
-      firstName, middleName, lastName, suffix, birthdate,
+      firstName, middleName, lastName, suffix, birthDate: birthdate,
     }));
 
     // ── "userAddress" collection (own unique userAddressID) ──
@@ -173,4 +173,3 @@ const checkAvailability = async (req, res) => {
 
 const checkEmail = checkAvailability;
 module.exports = { signup, checkEmail, checkAvailability };
-
