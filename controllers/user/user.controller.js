@@ -130,6 +130,7 @@ const getFullProfile = async (req, res) => {
       birthDate:         details.birthDate      || "",
       // primary address (flat — for profile page display)
       userAddressID:     primaryAddress.userAddressID || "",
+      region:            primaryAddress.region        || "",
       province:          primaryAddress.province      || "",
       city:              primaryAddress.city          || "",
       municipality:      primaryAddress.municipality  || "",

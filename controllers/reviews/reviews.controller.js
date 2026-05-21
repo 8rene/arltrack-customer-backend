@@ -79,6 +79,9 @@ const updateReview = async (req, res) => {
 const getUserReviews = async (req, res) => {
   const { userID } = req.params;
   if (!userID) return res.status(400).json({ message: "userID is required." });
+  if (req.user.userID !== userID) {
+    return res.status(403).json({ message: "Access denied." });
+  }
   try {
     const snap = await db.collection("reviews").where("userID", "==", userID).get();
     const reviews = snap.docs.map(doc => doc.data());

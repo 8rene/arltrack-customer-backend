@@ -27,7 +27,6 @@ const uploadBase64Image = async (base64DataUrl, destPath) => {
     });
     await file.makePublic();
     const url = `https://storage.googleapis.com/${bucket.name}/${destPath}`;
-    console.log(`✅ Uploaded ${destPath} → ${url}`);
     return url;
   } catch (err) {
     // Log the FULL error so it's visible in the backend console
