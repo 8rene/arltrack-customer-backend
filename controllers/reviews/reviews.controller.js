@@ -49,8 +49,9 @@ const createReview = async (req, res) => {
 // PUT /api/reviews/:reviewID
 const updateReview = async (req, res) => {
   const { reviewID } = req.params;
-  const { userID, rating, comment } = req.body;
-  if (!reviewID || !userID) return res.status(400).json({ message: "reviewID and userID are required." });
+  const userID = req.user.userID; // from verified JWT — never trust body
+  const { rating, comment } = req.body;
+  if (!reviewID) return res.status(400).json({ message: "reviewID is required." });
 
   // FIX: validate rating before converting — Number(undefined) = NaN which Firestore silently stores
   const parsedRating = Number(rating);

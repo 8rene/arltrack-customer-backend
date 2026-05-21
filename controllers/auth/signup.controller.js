@@ -59,7 +59,7 @@ const signup = async (req, res) => {
     middleName,
     lastName,
     suffix,
-    birthDate: birthdate, // map incoming birthdate → normalized birthDate
+    birthdate,
     address,
     referralCode,
     // Document fields
