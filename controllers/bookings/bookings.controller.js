@@ -126,9 +126,12 @@ const createBooking = async (req, res) => {
           return h * 60 + mn;
         };
 
-        const rulesSnap = await db.collection("codingRules").get();
-        for (const ruleDoc of rulesSnap.docs) {
-          const rule = ruleDoc.data();
+        // Use shared cache — same rules array as checkCodingRule endpoint
+        if (!codingCache.codingRules) {
+          const rulesSnap = await db.collection("codingRules").get();
+          codingCache.codingRules = rulesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        }
+        for (const rule of codingCache.codingRules) {
 
           // Day-of-week match (JS: 0=Sun,1=Mon,...6=Sat)
           const ruleDayOfWeek = Number(rule.dayOfWeek);
