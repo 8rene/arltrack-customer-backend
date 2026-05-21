@@ -5,6 +5,9 @@ const { db } = require("../../config/firebaseConnection/firebase");
 // ─────────────────────────────────────────────────────────────
 const getUserDetails = async (req, res) => {
   const { userID } = req.params;
+  if (req.user.userID !== userID) {
+    return res.status(403).json({ message: "Access denied." });
+  }
   try {
     const [userDoc, detailsDoc] = await Promise.all([
       db.collection("user").doc(userID).get(),
@@ -38,6 +41,9 @@ const getUserDetails = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 const updateUserDetails = async (req, res) => {
   const { userID } = req.params;
+  if (req.user.userID !== userID) {
+    return res.status(403).json({ message: "Access denied." });
+  }
   const { firstName, lastName, middleName, suffix, birthDate } = req.body;
 
   // suffix is optional (can be empty string to clear it) — not included in required check
@@ -67,6 +73,9 @@ const updateUserDetails = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 const getFullProfile = async (req, res) => {
   const { userID } = req.params;
+  if (req.user.userID !== userID) {
+    return res.status(403).json({ message: "Access denied." });
+  }
   try {
     // Fetch user, userDetails (stored by userID as doc id)
     const [userDoc, detailsDoc] = await Promise.all([
@@ -157,6 +166,9 @@ const getFullProfile = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 const updateFullProfile = async (req, res) => {
   const { userID } = req.params;
+  if (req.user.userID !== userID) {
+    return res.status(403).json({ message: "Access denied." });
+  }
   const {
     // user
     phone, username, profileImage,
@@ -238,6 +250,9 @@ const updateFullProfile = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 const updateAvatar = async (req, res) => {
   const { userID } = req.params;
+  if (req.user.userID !== userID) {
+    return res.status(403).json({ message: "Access denied." });
+  }
   const { profileImage } = req.body;
   if (!profileImage)
     return res.status(400).json({ message: "profileImage is required." });

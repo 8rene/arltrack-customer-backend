@@ -263,6 +263,9 @@ const createBooking = async (req, res) => {
 // GET /api/bookings/user/:userID — get all bookings for a user with car details
 const getUserBookings = async (req, res) => {
   const { userID } = req.params;
+  if (req.user.userID !== userID) {
+    return res.status(403).json({ message: "Access denied." });
+  }
   try {
     const snap = await db.collection("bookings").where("userID", "==", userID).get();
     if (snap.empty) return res.status(200).json([]);
