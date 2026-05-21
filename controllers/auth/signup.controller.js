@@ -100,8 +100,8 @@ const signup = async (req, res) => {
       firstName, middleName, lastName, suffix, birthDate: birthdate,
     }));
 
-    // ── "userAddress" collection (own unique userAddressID) ──
-    const userAddressRef = db.collection("userAddress").doc();
+    // ── "userAddress" collection (keyed by userID for easy lookup) ──
+    const userAddressRef = db.collection("userAddress").doc(userID);
     batch.set(userAddressRef, createUserAddress(userID, {
       region:       address?.region       || "",
       province:     address?.province     || "",
