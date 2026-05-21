@@ -39,14 +39,22 @@ const getUserDetails = async (req, res) => {
 const updateUserDetails = async (req, res) => {
   const { userID } = req.params;
   const { firstName, lastName, middleName, suffix, birthDate } = req.body;
-  if (!firstName && !lastName)
-    return res.status(400).json({ message: "At least firstName or lastName is required." });
+
+  // suffix is optional (can be empty string to clear it) — not included in required check
+  const hasAtLeastOneField = firstName || lastName || middleName || birthDate || suffix !== undefined;
+  if (!hasAtLeastOneField)
+    return res.status(400).json({ message: "At least one field is required to update." });
+
   try {
-    await db.collection("userDetails").doc(userID).set(
-      { firstName: firstName || "", lastName: lastName || "", middleName: middleName || "",
-        suffix: suffix || "", birthDate: birthDate || "", updatedAt: new Date() },
-      { merge: true }
-    );
+    // Build update object with only the fields present in the request
+    const updates = { updatedAt: new Date() };
+    if (firstName  !== undefined) updates.firstName  = firstName;
+    if (lastName   !== undefined) updates.lastName   = lastName;
+    if (middleName !== undefined) updates.middleName = middleName;
+    if (birthDate  !== undefined) updates.birthDate  = birthDate;
+    if (suffix     !== undefined) updates.suffix     = suffix; // allow "" to clear suffix
+
+    await db.collection("userDetails").doc(userID).set(updates, { merge: true });
     return res.status(200).json({ message: "User details updated." });
   } catch (error) {
     console.error("updateUserDetails error:", error);
