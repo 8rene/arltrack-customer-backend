@@ -109,7 +109,7 @@ const getFullProfile = async (req, res) => {
       email:             user.email             || "",
       phone:             user.phone             || "",
       username:          user.username          || "",
-      profileImageUrl:   user.profileImageUrl   || user.profileImage || "",
+      profileImage:      user.profileImage      || "",
       roleID:            user.roleID            || "",
       isVerified:        user.isVerified        || false,
       status:            user.status            || "",
@@ -159,7 +159,7 @@ const updateFullProfile = async (req, res) => {
   const { userID } = req.params;
   const {
     // user
-    phone, username, profileImageUrl,
+    phone, username, profileImage,
     // userDetails
     firstName, lastName, middleName, suffix, birthDate,
     // userAddress (include userAddressID to update specific doc)
@@ -175,7 +175,7 @@ const updateFullProfile = async (req, res) => {
     const userFields = {};
     if (phone           !== undefined) userFields.phone           = phone;
     if (username        !== undefined) userFields.username        = username;
-    if (profileImageUrl !== undefined) userFields.profileImageUrl = profileImageUrl;
+    if (profileImage !== undefined) userFields.profileImage = profileImage;
     if (Object.keys(userFields).length) {
       userFields.updatedAt = now;
       batch.set(db.collection("user").doc(userID), userFields, { merge: true });
@@ -234,19 +234,19 @@ const updateFullProfile = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────
 // POST /api/user/profile/:userID/avatar — upload profile photo URL
-// (Expects { profileImageUrl } in body after client uploads to storage)
+// (Expects { profileImage } in body after client uploads to storage)
 // ─────────────────────────────────────────────────────────────
 const updateAvatar = async (req, res) => {
   const { userID } = req.params;
-  const { profileImageUrl } = req.body;
-  if (!profileImageUrl)
-    return res.status(400).json({ message: "profileImageUrl is required." });
+  const { profileImage } = req.body;
+  if (!profileImage)
+    return res.status(400).json({ message: "profileImage is required." });
   try {
     await db.collection("user").doc(userID).set(
-      { profileImageUrl, updatedAt: new Date() },
+      { profileImage, updatedAt: new Date() },
       { merge: true }
     );
-    return res.status(200).json({ message: "Avatar updated.", profileImageUrl });
+    return res.status(200).json({ message: "Avatar updated.", profileImage });
   } catch (error) {
     console.error("updateAvatar error:", error);
     return res.status(500).json({ message: "Failed to update avatar." });
