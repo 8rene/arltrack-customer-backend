@@ -546,7 +546,7 @@ const checkCodingRule = async (req, res) => {
       console.log("[checkCodingRule] plateNumber:", plateNumber, "lastDigit:", lastDigit);
       console.log("[checkCodingRule] dayOfWeek (JS 0=Sun):", dayOfWeek, "bookingStartMins:", bookingStartMins, "bookingEndMins:", bookingEndMins);
       console.log("[checkCodingRule] destination:", destination);
-      console.log("[checkCodingRule] total rules to check:", rulesSnap.size);
+      console.log("[checkCodingRule] total rules to check:", codingCache.codingRules.length);
     }
 
     // 4. Check each rule
