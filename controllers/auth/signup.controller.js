@@ -106,6 +106,7 @@ const signup = async (req, res) => {
     batch.set(userAddressRef, createUserAddress(userID, {
       region:       address?.region       || "",
       province:     address?.province     || "",
+      city:         address?.city         || "",
       municipality: address?.municipality || "",
       barangay:     address?.barangay     || "",
       street:       address?.street       || "",
