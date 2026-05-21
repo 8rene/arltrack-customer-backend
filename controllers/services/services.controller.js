@@ -26,13 +26,11 @@ const getCarBookings = async (req, res) => {
     const bookings = snap.docs.map((doc) => {
       const d = doc.data();
       return {
-        bookingID:  doc.id,
-        carID:      d.carID,
-        status:     d.status     || "pending",
-        startDate:  d.startDate  || null,
-        endDate:    d.endDate    || null,
-        startTime:  d.startTime  || null,
-        endTime:    d.endTime    || null,
+        bookingID:     doc.id,
+        carID:         d.carID,
+        status:        d.status        || "pending",
+        startDateTime: d.startDateTime || null,
+        endDateTime:   d.endDateTime   || null,
       };
     });
 
