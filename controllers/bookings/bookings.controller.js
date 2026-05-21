@@ -390,10 +390,11 @@ const getUserBookings = async (req, res) => {
 // PATCH /api/bookings/:bookingID/cancel — user can cancel only their own PENDING bookings
 const cancelBooking = async (req, res) => {
   const { bookingID } = req.params;
-  const { userID, reason } = req.body;
+  const userID = req.user.userID; // from verified JWT — never trust body
+  const { reason } = req.body;
 
-  if (!bookingID || !userID) {
-    return res.status(400).json({ message: "bookingID and userID are required." });
+  if (!bookingID) {
+    return res.status(400).json({ message: "bookingID is required." });
   }
 
   try {

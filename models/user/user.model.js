@@ -10,6 +10,7 @@ const createUser = (userID, data) => ({
   profileImage: "",
   roleID:       process.env.DEFAULT_ROLE_ID || "9vD6ZU1s2qUtmyu0RXKD",
   createdAt:    new Date(),
+  updatedAt:    new Date(),
 });
 
 module.exports = createUser;

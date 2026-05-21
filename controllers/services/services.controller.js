@@ -15,19 +15,20 @@ const getServiceTypes = async (req, res) => {
   }
 };
 
-// GET /api/services/car-bookings/:carID — returns all bookings for a car
+// GET /api/services/car-bookings/:carID — returns booked time windows for availability checking
+// NOTE: intentionally omits bookingID and userID — only time/status data is needed by the client
 const getCarBookings = async (req, res) => {
   const { carID } = req.params;
   try {
     const snap = await db.collection("bookings")
       .where("carID", "==", carID)
+      .where("status", "in", ["pending", "confirmed", "active"])
       .get();
 
     const bookings = snap.docs.map((doc) => {
       const d = doc.data();
       return {
-        bookingID:     doc.id,
-        carID:         d.carID,
+        // bookingID intentionally excluded — not needed by client and avoids ID enumeration
         status:        d.status        || "pending",
         startDateTime: d.startDateTime || null,
         endDateTime:   d.endDateTime   || null,
