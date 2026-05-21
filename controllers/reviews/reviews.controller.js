@@ -3,18 +3,23 @@ const { v4: uuidv4 } = require("uuid");
 
 // POST /api/reviews/create
 const createReview = async (req, res) => {
-  const { userID, carID, bookingID, rating, comment } = req.body;
-  if (!userID || !carID || !rating) {
-    return res.status(400).json({ message: "userID, carID, and rating are required." });
+  const userID = req.user.userID; // from verified JWT — never trust body
+  const { carID, bookingID, rating, comment } = req.body;
+  if (!carID || !rating) {
+    return res.status(400).json({ message: "carID and rating are required." });
   }
   try {
     // Validate that the booking exists and is completed
     if (bookingID) {
-      const bookingDoc = await db.collection("bookings").doc(bookingID).get();
-      if (!bookingDoc.exists) {
+      // Use .where() query — Firestore doc ID !== bookingID field
+      const bookingSnap = await db.collection("bookings")
+        .where("bookingID", "==", bookingID)
+        .limit(1)
+        .get();
+      if (bookingSnap.empty) {
         return res.status(404).json({ message: "Booking not found." });
       }
-      const bookingData = bookingDoc.data();
+      const bookingData = bookingSnap.docs[0].data();
       if ((bookingData.status || "").toLowerCase() !== "completed") {
         return res.status(403).json({ message: "You can only review completed bookings." });
       }

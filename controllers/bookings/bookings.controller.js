@@ -19,8 +19,8 @@ const getMimeType = (base64) => {
 
 // POST /api/bookings/create
 const createBooking = async (req, res) => {
+  const userID = req.user.userID; // from verified JWT — never trust body
   const {
-    userID,
     carID,
     serviceType,
     duration,
@@ -53,8 +53,8 @@ const createBooking = async (req, res) => {
     proofBase64,
   } = req.body;
 
-  if (!carID || !userID) {
-    return res.status(400).json({ message: "carID and userID are required." });
+  if (!carID) {
+    return res.status(400).json({ message: "carID is required." });
   }
 
   try {
