@@ -1,25 +1,42 @@
 const { db }      = require("../../config/firebaseConnection/firebase");
 const generateOTP = require("../../utils/generateOTP");
 
-const OTP_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
+const OTP_EXPIRY_MS  = 5 * 60 * 1000;  // 5 minutes
+const OTP_COOLDOWN_MS = 60 * 1000;     // 1 minute cooldown between requests
+const MAX_ATTEMPTS   = 5;              // max wrong guesses before lockout
 
 // POST /api/auth/send-otp
 const sendOTP = async (req, res) => {
   const { email, name, template_id } = req.body;
   if (!email) return res.status(400).json({ message: "Email is required." });
 
-  const otp  = generateOTP();
-  const time = new Date().toLocaleTimeString();
-
   try {
-    // 1. Store OTP in Firestore with expiry (keyed by email)
+    // Bug 4 fix: cooldown check — block if OTP was requested less than 1 minute ago
+    const existing = await db.collection("otpCodes").doc(email).get();
+    if (existing.exists) {
+      const createdAt = existing.data().createdAt?.toDate?.() || new Date(0);
+      const elapsed   = Date.now() - createdAt.getTime();
+      if (elapsed < OTP_COOLDOWN_MS) {
+        const secondsLeft = Math.ceil((OTP_COOLDOWN_MS - elapsed) / 1000);
+        return res.status(429).json({
+          message: `Please wait ${secondsLeft} seconds before requesting a new OTP.`,
+        });
+      }
+    }
+
+    const otp  = generateOTP();
+    const time = new Date().toLocaleTimeString();
+
+    // Store OTP in Firestore with expiry, cooldown timestamp, and attempt counter
     await db.collection("otpCodes").doc(email).set({
       otp,
-      expiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
-      verified:  false,
+      createdAt:  new Date(),
+      expiresAt:  new Date(Date.now() + OTP_EXPIRY_MS),
+      attempts:   0,
+      verified:   false,
     });
 
-    // 2. Send OTP via EmailJS
+    // Send OTP via EmailJS
     const response = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -74,9 +91,24 @@ const verifyOTP = async (req, res) => {
       return res.status(400).json({ message: "OTP has expired. Please request a new one." });
     }
 
+    // Bug 5 fix: check attempt count before validating
+    if (data.attempts >= MAX_ATTEMPTS) {
+      await db.collection("otpCodes").doc(email).delete();
+      return res.status(429).json({
+        message: "Too many failed attempts. Please request a new OTP.",
+      });
+    }
+
     // Check OTP match
     if (data.otp !== otp) {
-      return res.status(400).json({ message: "Invalid OTP. Please try again." });
+      // Increment attempt counter
+      await db.collection("otpCodes").doc(email).update({
+        attempts: data.attempts + 1,
+      });
+      const remaining = MAX_ATTEMPTS - (data.attempts + 1);
+      return res.status(400).json({
+        message: `Invalid OTP. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`,
+      });
     }
 
     // OTP is valid — delete it so it can't be reused
