@@ -206,11 +206,12 @@ const createBooking = async (req, res) => {
     // Upload proof of payment to Firebase Storage and save the URL
     let proofUrl = "";
     if (proofBase64) {
-      const mimeType   = getMimeType(proofBase64);
+      const rawBase64  = proofBase64.includes(",") ? proofBase64.split(",")[1] : proofBase64;
+      const mimeType   = getMimeType(rawBase64);
       const extension  = mimeType.split("/")[1] || "jpg";
       const filePath   = `proofs/${paymentID}.${extension}`;
       const file       = bucket.file(filePath);
-      const buffer     = Buffer.from(proofBase64, "base64");
+      const buffer     = Buffer.from(rawBase64, "base64");
 
       await file.save(buffer, { contentType: mimeType });
       await file.makePublic();
