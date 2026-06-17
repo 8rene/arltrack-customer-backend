@@ -67,6 +67,8 @@ const createPaymentLink = async (req, res) => {
           currency:    "PHP",
           description: description || `ARLTrack Booking #${bookingID}`,
           remarks:     `bookingID:${bookingID}|paymentID:${paymentID}`,
+          // Restrict to QRPH only (your active channel). Add "gcash","paymaya","card" later when enabled.
+          payment_method_types: ["qrph"],
         },
       },
     };
