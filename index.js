@@ -4,14 +4,15 @@ const express = require("express");
 const cors = require("cors");
 
 const { db } = require("./config/firebaseConnection/firebase");
-const authRoutes     = require("./routes/auth.routes");
-const servicesRoutes = require("./routes/services.routes");
-const carsRoutes     = require("./routes/cars.routes");
-const userRoutes     = require("./routes/user.routes");
-const bookingsRoutes = require("./routes/bookings.routes");
-const reviewsRoutes  = require("./routes/reviews.routes");
-const locationRoutes = require("./routes/location.routes");
-const adminRoutes    = require("./routes/admin.routes");
+const authRoutes      = require("./routes/auth.routes");
+const servicesRoutes  = require("./routes/services.routes");
+const carsRoutes      = require("./routes/cars.routes");
+const userRoutes      = require("./routes/user.routes");
+const bookingsRoutes  = require("./routes/bookings.routes");
+const reviewsRoutes   = require("./routes/reviews.routes");
+const locationRoutes  = require("./routes/location.routes");
+const adminRoutes     = require("./routes/admin.routes");
+const paymongoRoutes  = require("./routes/paymongo.routes"); // ← NEW
 
 const app = express();
 
@@ -35,16 +36,17 @@ app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ limit: "20mb", extended: true }));
 
 // Routes
-app.use("/api/auth",     authRoutes);
-app.use("/api/services", servicesRoutes);
-app.use("/api/cars",     carsRoutes);
-app.use("/api/user",     userRoutes);
-app.use("/api/bookings", bookingsRoutes);
-app.use("/api/reviews",  reviewsRoutes);
-app.use("/api/location", locationRoutes);
-app.use("/api/admin",    adminRoutes);
+app.use("/api/auth",      authRoutes);
+app.use("/api/services",  servicesRoutes);
+app.use("/api/cars",      carsRoutes);
+app.use("/api/user",      userRoutes);
+app.use("/api/bookings",  bookingsRoutes);
+app.use("/api/reviews",   reviewsRoutes);
+app.use("/api/location",  locationRoutes);
+app.use("/api/admin",     adminRoutes);
+app.use("/api/paymongo",  paymongoRoutes); // ← NEW
 
-// Firebase connection test — only runs in local development, not in production
+// Firebase connection test — only runs in local development
 if (process.env.NODE_ENV !== "production") {
   (async () => {
     try {
