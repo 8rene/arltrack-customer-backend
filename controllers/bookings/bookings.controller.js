@@ -57,6 +57,30 @@ const createBooking = async (req, res) => {
     return res.status(400).json({ message: "carID is required." });
   }
 
+  // ── Server-side guard: never trust the client's date fields ─────
+  // The frontend calendar blocks past dates, but a request can still
+  // reach this endpoint directly (stale localStorage draft, bypassed
+  // UI, manual API call, etc). Reject anything dated before "today"
+  // at the booking-day granularity so legit same-day bookings still work.
+  if (startDate) {
+    const todayDateOnly = new Date();
+    todayDateOnly.setHours(0, 0, 0, 0);
+    const requestedStartDateOnly = new Date(`${startDate}T00:00:00`);
+
+    if (isNaN(requestedStartDateOnly.getTime()) || requestedStartDateOnly < todayDateOnly) {
+      return res.status(400).json({ message: "startDate cannot be in the past." });
+    }
+  }
+  if (endDate) {
+    const todayDateOnly = new Date();
+    todayDateOnly.setHours(0, 0, 0, 0);
+    const requestedEndDateOnly = new Date(`${endDate}T00:00:00`);
+
+    if (isNaN(requestedEndDateOnly.getTime()) || requestedEndDateOnly < todayDateOnly) {
+      return res.status(400).json({ message: "endDate cannot be in the past." });
+    }
+  }
+
   try {
     const now = new Date();
 
