@@ -253,7 +253,7 @@ const createBooking = async (req, res) => {
       driversFee:      drivers,
       gatewayFee:      gateway,
       depositFee:      depositPaid,
-      methodOfPayment: methodOfPayment || (paymentAmount === 'deposit' ? 'Deposit' : paymentAmount === 'partial' ? 'Partial' : 'Full'),
+      methodOfPayment: methodOfPayment || (paymentAmount === 'partial' ? 'Partial' : 'Full'),
       paymentMethod:   paymentMethod  || "",
       referenceNumber: referenceNumber || "N/A",
       proofUrl,
