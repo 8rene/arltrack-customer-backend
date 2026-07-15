@@ -22,13 +22,25 @@ const paymongoHeaders = () => ({
 //   3. Store the paymongoLinkID + checkout URL on the payments doc.
 //   4. Return the checkout URL so the frontend can redirect the user.
 // ─────────────────────────────────────────────────────────────────────────────
+// Maps our internal paymentMethod key -> PayMongo Link payment_method_types.
+// "paymongo" (the QRPH tile in the UI) stays qrph; gcash/maya now go straight
+// to their own channel so the hosted checkout skips PayMongo's own selector
+// and drops the customer straight into the GCash/Maya flow.
+const CHANNEL_MAP = {
+  gcash:    ["gcash"],
+  maya:     ["paymaya"],
+  paymongo: ["qrph"],
+};
+
 const createPaymentLink = async (req, res) => {
   const userID = req.user.userID;
-  const { bookingID, paymentID, amount, description } = req.body;
+  const { bookingID, paymentID, amount, description, paymentMethod } = req.body;
 
   if (!bookingID || !paymentID || !amount) {
     return res.status(400).json({ message: "bookingID, paymentID, and amount are required." });
   }
+
+  const paymentMethodTypes = CHANNEL_MAP[paymentMethod] || ["qrph"];
 
   const amountInCentavos = Math.round(Number(amount) * 100);
   if (isNaN(amountInCentavos) || amountInCentavos < 2000) {
@@ -67,8 +79,7 @@ const createPaymentLink = async (req, res) => {
           currency:    "PHP",
           description: description || `ARLTrack Booking #${bookingID}`,
           remarks:     `bookingID:${bookingID}|paymentID:${paymentID}`,
-          // Restrict to QRPH only (your active channel). Add "gcash","paymaya","card" later when enabled.
-          payment_method_types: ["qrph"],
+          payment_method_types: paymentMethodTypes,
         },
       },
     };
@@ -86,6 +97,7 @@ const createPaymentLink = async (req, res) => {
     // 3. Save linkID + checkoutUrl to Firestore
     await paymentDoc.ref.update({
       paymongoLinkID: linkID,
+      paymongoChannel: paymentMethodTypes[0],
       checkoutUrl,
       updatedAt: new Date(),
     });
