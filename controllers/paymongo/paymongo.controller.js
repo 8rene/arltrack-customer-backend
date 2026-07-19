@@ -69,7 +69,7 @@ const createPaymentLink = async (req, res) => {
 
     // 2. Build return URLs — success_url carries paymentID so the frontend
     //    can immediately poll /paymongo/status/:paymentID on return.
-    const successUrl = `${FRONTEND_URL}/payment-return?paymentID=${paymentID}&bookingID=${bookingID}`;
+    const successUrl = `${FRONTEND_URL}/booking/payment-status?paymentID=${paymentID}&bookingID=${bookingID}`;
     const cancelUrl   = `${FRONTEND_URL}/booking?step=4&paymentID=${paymentID}`;
 
     // 3. Create PayMongo Checkout Session (v2)
@@ -192,19 +192,7 @@ const handleWebhook = async (req, res) => {
       const payment    = paymentDoc.data();
       const bID        = payment.bookingID;
 
-      // Capture the actual PayMongo Payment resource id (pay_xxx) from the
-      // checkout session's payments array — this is what /v1/refunds needs,
-      // NOT the checkout session id (cs_xxx) we already store.
-      const paidRecord      = (session?.attributes?.payments || [])
-        .find(pay => pay.attributes?.status === "paid");
-      const paymongoPaymentID = paidRecord?.id || null;
-
-      await paymentDoc.ref.update({
-        status: "paid",
-        paidAt: now,
-        updatedAt: now,
-        ...(paymongoPaymentID ? { paymongoPaymentID } : {}),
-      });
+      await paymentDoc.ref.update({ status: "paid", paidAt: now, updatedAt: now });
 
       if (bID) {
         const bookingSnap = await db.collection("bookings")
@@ -281,17 +269,11 @@ const getPaymentStatus = async (req, res) => {
           { headers: paymongoHeaders() }
         );
         const payments = pmRes.data?.data?.attributes?.payments || [];
-        const paidRecord = payments.find(pay => pay.attributes?.status === "paid");
-        const paid = !!paidRecord;
+        const paid = payments.some(pay => pay.attributes?.status === "paid");
 
         if (paid && p.status !== "paid") {
           const now = new Date();
-          await snap.docs[0].ref.update({
-            status: "paid",
-            paidAt: now,
-            updatedAt: now,
-            ...(paidRecord?.id ? { paymongoPaymentID: paidRecord.id } : {}),
-          });
+          await snap.docs[0].ref.update({ status: "paid", paidAt: now, updatedAt: now });
 
           const bSnap = await db.collection("bookings")
             .where("bookingID", "==", p.bookingID)
