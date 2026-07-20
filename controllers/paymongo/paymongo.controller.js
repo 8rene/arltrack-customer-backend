@@ -3,8 +3,10 @@ const { db } = require("../../config/firebaseConnection/firebase");
 
 // ─── PayMongo base config ────────────────────────────────────────────────────
 const PAYMONGO_SECRET = process.env.PAYMONGO_SECRET_KEY;
+// Per PayMongo's current API reference (Create/Retrieve a Checkout Session),
+// checkout_sessions live under v1, not v2 — this was previously wrong here
+// and silently broke the status poll (see getPaymentStatus below).
 const PAYMONGO_V1      = "https://api.paymongo.com/v1";
-const PAYMONGO_V2      = "https://api.paymongo.com/v2"; // Checkout Sessions live on v2
 
 // Base URL of your frontend, e.g. https://arltrack.com — used to build success_url/cancel_url
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
@@ -69,7 +71,7 @@ const createPaymentLink = async (req, res) => {
 
     // 2. Build return URLs — success_url carries paymentID so the frontend
     //    can immediately poll /paymongo/status/:paymentID on return.
-    const successUrl = `${FRONTEND_URL}/booking/payment-status?paymentID=${paymentID}&bookingID=${bookingID}`;
+    const successUrl = `${FRONTEND_URL}/payment-return?paymentID=${paymentID}&bookingID=${bookingID}`;
     const cancelUrl   = `${FRONTEND_URL}/booking?step=4&paymentID=${paymentID}`;
 
     // 3. Create PayMongo Checkout Session (v2)
@@ -93,7 +95,7 @@ const createPaymentLink = async (req, res) => {
     };
 
     const pmRes = await axios.post(
-      `${PAYMONGO_V2}/checkout_sessions`,
+      `${PAYMONGO_V1}/checkout_sessions`,
       sessionPayload,
       { headers: paymongoHeaders() }
     );
@@ -265,7 +267,7 @@ const getPaymentStatus = async (req, res) => {
     if (p.status === "pending" && p.paymongoSessionID) {
       try {
         const pmRes = await axios.get(
-          `${PAYMONGO_V2}/checkout_sessions/${p.paymongoSessionID}`,
+          `${PAYMONGO_V1}/checkout_sessions/${p.paymongoSessionID}`,
           { headers: paymongoHeaders() }
         );
         const payments = pmRes.data?.data?.attributes?.payments || [];
@@ -286,7 +288,15 @@ const getPaymentStatus = async (req, res) => {
         }
         return res.status(200).json({ status: p.status, bookingID: p.bookingID });
       } catch (e) {
-        // Fall through to Firestore status if PayMongo API call fails
+        // Previously swallowed silently, which is exactly why a real failure
+        // here (e.g. the v1/v2 endpoint mismatch this fixes) went unnoticed
+        // and just looked like "payment stuck pending" forever. Log it so a
+        // future failure here is actually visible, then fall through to the
+        // last-known Firestore status rather than erroring the request.
+        console.error(
+          "getPaymentStatus: PayMongo checkout_sessions lookup failed —",
+          e?.response?.status, e?.response?.data || e.message
+        );
       }
     }
 

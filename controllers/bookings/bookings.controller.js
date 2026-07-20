@@ -1,4 +1,6 @@
 const { db, bucket } = require("../../config/firebaseConnection/firebase");
+const createBookingSession = require("../../models/bookingSession/bookingsession.model");
+const { makeZone } = createBookingSession;
 
 // In-memory cache for stable data used by checkCodingRule.
 // cars: keyed by carID (plateNumber almost never changes)
@@ -49,6 +51,17 @@ const createBooking = async (req, res) => {
     serviceFee,
     gatewayFee,
     grandTotal,
+    // Coordinates the frontend already sends for geofencing, previously
+    // never read here — this is why pickupLocation/geofenceZones were
+    // always saving as null on the bookingSessions doc.
+    pickupLat,
+    pickupLng,
+    dropoffLat,
+    dropoffLng,
+    destinationLat,
+    destinationLng,
+    destinationCity,
+    extraDestinations,
     // screenshot handled separately (base64 or URL)
     proofBase64,
   } = req.body;
@@ -161,11 +174,18 @@ const createBooking = async (req, res) => {
           const ruleDayOfWeek = Number(rule.dayOfWeek);
           if (isNaN(ruleDayOfWeek) || ruleDayOfWeek !== dayOfWeek) continue;
 
-          // City match — if rule has a city, destination must contain it
+          // City match — prefer exact match on the structured city (from the
+          // map pin) over the fuzzy substring search on the free-text address.
           if (rule.city && rule.city.trim() !== "") {
             const ruleCity = rule.city.toLowerCase().trim();
-            const dest     = (destination || "").toLowerCase();
-            if (!dest.includes(ruleCity)) continue;
+            let cityMatches;
+            if (destinationCity && destinationCity.trim() !== "") {
+              cityMatches = destinationCity.toLowerCase().trim() === ruleCity;
+            } else {
+              const dest = (destination || "").toLowerCase();
+              cityMatches = dest.includes(ruleCity);
+            }
+            if (!cityMatches) continue;
           }
 
           // Overlap check
@@ -262,7 +282,46 @@ const createBooking = async (req, res) => {
       updatedAt:       now,
     });
 
-    // ── 3. Save firstName/lastName to userDetails if empty ──
+    // ── 3. Save to bookingSessions collection (own doc ID; bookingID is FK only) ──
+    // This is the piece that was missing entirely: pickupLocation,
+    // geofenceZones, pickupTime, returnTime, and the codingCheck audit
+    // were always saving as null because nothing ever wrote this doc.
+    const pickupZone      = makeZone("Pickup", { lat: pickupLat, lng: pickupLng });
+    const destinationZone = makeZone(destination || "Destination", { lat: destinationLat, lng: destinationLng });
+    const extraZones      = Array.isArray(extraDestinations)
+      ? extraDestinations
+          .filter(d => d && typeof d.lat === "number" && typeof d.lng === "number")
+          .map((d, i) => makeZone(d.address || `Destination ${i + 2}`, { lat: d.lat, lng: d.lng }))
+      : [];
+    // Order: pickup first, then the primary destination, then any extra
+    // stops — matches the order the customer actually visits them in.
+    const geofenceZones = [pickupZone, destinationZone, ...extraZones].filter(Boolean);
+
+    const bookingSessionRef = db.collection("bookingSessions").doc(); // own auto-generated PK
+    const bookingSessionID  = bookingSessionRef.id;
+
+    await bookingSessionRef.set(
+      createBookingSession(bookingSessionID, bookingID, {
+        pickupLocation: pickupLat != null && pickupLng != null
+          ? { address: pickupLocation || "", lat: pickupLat, lng: pickupLng }
+          : null,
+        dropoffLocation: dropoffLat != null && dropoffLng != null
+          ? { address: dropoffLocation || "", lat: dropoffLat, lng: dropoffLng }
+          : null,
+        geofenceZones,
+        pickupTime:  startDateTime,
+        returnTime:  endDateTime,
+        codingCheck: {
+          blocked:   false, // we only ever reach here when NOT blocked — the 400 above returns early otherwise
+          reason:    null,
+          city:      destinationCity || null,
+          dayOfWeek: startDateTime.getDay(),
+          checkedAt: now,
+        },
+      })
+    );
+
+    // ── 4. Save firstName/lastName to userDetails if empty ──
     if (userID && (firstName || lastName)) {
       const detailsDoc = await db.collection("userDetails").doc(userID).get();
       const existing   = detailsDoc.exists ? detailsDoc.data() : {};
@@ -479,7 +538,7 @@ const cancelBooking = async (req, res) => {
 //      d. The plate's last digit must be in rule.bannedDigits
 // ─────────────────────────────────────────────────────────────────────────────
 const checkCodingRule = async (req, res) => {
-  const { carID, startDateTime, endDateTime, destination } = req.body;
+  const { carID, startDateTime, endDateTime, destination, destinationCity } = req.body;
 
   if (!carID || !startDateTime) {
     return res.status(400).json({ message: "carID and startDateTime are required." });
@@ -599,13 +658,21 @@ const checkCodingRule = async (req, res) => {
         continue;
       }
 
-      // b. City check — destination must contain the rule's city name (case-insensitive)
-      // If rule has no city set, it applies to ALL destinations
+      // b. City check — prefer an exact match against the structured city
+      // (from the map pin) over a fuzzy substring search on the free-text
+      // address. Falls back to the old behavior when no structured city
+      // was sent (a typed address with no pin used).
       if (rule.city && rule.city.trim() !== "") {
         const ruleCity = rule.city.toLowerCase().trim();
-        const dest     = (destination || "").toLowerCase();
-        if (!dest.includes(ruleCity)) {
-          if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] → SKIP: city mismatch (rule city:", ruleCity, "dest:", dest, ")");
+        let cityMatches;
+        if (destinationCity && destinationCity.trim() !== "") {
+          cityMatches = destinationCity.toLowerCase().trim() === ruleCity;
+        } else {
+          const dest = (destination || "").toLowerCase();
+          cityMatches = dest.includes(ruleCity);
+        }
+        if (!cityMatches) {
+          if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] → SKIP: city mismatch (rule city:", ruleCity, "dest:", destinationCity || destination, ")");
           continue;
         }
       }
