@@ -512,6 +512,21 @@ const cancelBooking = async (req, res) => {
       updatedAt:          now,
     });
 
+
+    // Keep bookingSessions in sync — Car Tracking reads session.status, not
+    // booking.status, so a cancelled booking has to cancel its session too
+    // or it'll keep showing as an "upcoming" card with nowhere to go.
+    // Wrapped separately so a missing/already-mutated session doc can't
+    // block the booking cancellation itself from succeeding.
+    try {
+      await db.collection("bookingSessions").doc(bookingID).update({
+        status:    "cancelled",
+        updatedAt: now,
+      });
+    } catch (sessionErr) {
+      console.error("cancelBooking: failed to sync bookingSessions status:", sessionErr.message);
+    }
+    
     return res.status(200).json({ message: "Booking cancelled successfully." });
   } catch (error) {
     console.error("cancelBooking error:", error);
