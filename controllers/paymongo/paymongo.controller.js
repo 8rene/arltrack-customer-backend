@@ -197,15 +197,7 @@ const handleWebhook = async (req, res) => {
       await paymentDoc.ref.update({ status: "paid", paidAt: now, updatedAt: now });
 
       if (bID) {
-        const bookingSnap = await db.collection("bookings")
-          .where("bookingID", "==", bID)
-          .limit(1)
-          .get();
-
-        if (!bookingSnap.empty) {
-          await bookingSnap.docs[0].ref.update({ status: "confirmed", updatedAt: now });
-          console.log("[PayMongo Webhook] ✅ Booking confirmed:", bID);
-        }
+        console.log("[PayMongo Webhook] ✅ Payment settled for booking:", bID);
       }
 
       return res.status(200).json({ received: true });
@@ -276,13 +268,6 @@ const getPaymentStatus = async (req, res) => {
         if (paid && p.status !== "paid") {
           const now = new Date();
           await snap.docs[0].ref.update({ status: "paid", paidAt: now, updatedAt: now });
-
-          const bSnap = await db.collection("bookings")
-            .where("bookingID", "==", p.bookingID)
-            .limit(1).get();
-          if (!bSnap.empty) {
-            await bSnap.docs[0].ref.update({ status: "confirmed", updatedAt: now });
-          }
 
           return res.status(200).json({ status: "paid", bookingID: p.bookingID });
         }

@@ -224,6 +224,20 @@ const createBooking = async (req, res) => {
     const bookingRef = db.collection("bookings").doc();
     const bookingID  = bookingRef.id;
 
+    // Does this car already have a GPS device assigned? hasDevice needs to
+    // start correct at creation — otherwise a car that already had a device
+    // before this booking existed would wrongly show the "no device" badge
+    // until someone re-assigns it in DeviceTrack.
+    let hasDevice = false;
+    if (carID) {
+      const deviceSnap = await db.collection("gpsDevice")
+        .where("carID", "==", carID)
+        .where("assigned", "==", true)
+        .limit(1)
+        .get();
+      hasDevice = !deviceSnap.empty;
+    }
+
     // ── bookings collection: booking details ONLY — no fee/payment fields ──
     await bookingRef.set({
       bookingID,
@@ -238,7 +252,8 @@ const createBooking = async (req, res) => {
       notesUser:     specialNotes || "",
       notesAdmin:    "",
       isReviewed:    false,
-      status:        "pending",
+      status:        "upcoming",
+      hasDevice,
       createdAt:     now,
       updatedAt:     now,
     });
@@ -415,7 +430,7 @@ const getUserBookings = async (req, res) => {
         totalFee:      0,
         depositFee:    0,
         rentalFee:     0,
-        status:               (b.status || "pending").toLowerCase(),
+        status:               (b.status || "upcoming").toLowerCase(),
         cancellationReason:   b.cancellationReason        || "",
         modeOfDriving:        b.modeOfDriving             || "",
         location:             b.location                  || "",
@@ -500,9 +515,9 @@ const cancelBooking = async (req, res) => {
       return res.status(403).json({ message: "You are not allowed to cancel this booking." });
     }
 
-    // Only pending bookings can be cancelled by the user
-    if (booking.status !== "pending") {
-      return res.status(400).json({ message: "Only pending bookings can be cancelled." });
+    // Only upcoming (not yet picked up) bookings can be cancelled by the user
+    if (booking.status !== "upcoming") {
+      return res.status(400).json({ message: "Only upcoming bookings can be cancelled." });
     }
 
     const now = new Date();
@@ -512,21 +527,27 @@ const cancelBooking = async (req, res) => {
       updatedAt:          now,
     });
 
-
-    // Keep bookingSessions in sync — Car Tracking reads session.status, not
-    // booking.status, so a cancelled booking has to cancel its session too
-    // or it'll keep showing as an "upcoming" card with nowhere to go.
-    // Wrapped separately so a missing/already-mutated session doc can't
-    // block the booking cancellation itself from succeeding.
+    // Mirror the cancellation onto the bookingSession doc — otherwise this
+    // self-service cancel path leaves an "upcoming" ghost card in admin's
+    // Car Tracking, same failure mode the admin-side cancel already fixes.
     try {
-      await db.collection("bookingSessions").doc(bookingID).update({
-        status:    "cancelled",
-        updatedAt: now,
-      });
+      const sessionSnap = await db.collection("bookingSessions")
+        .where("bookingID", "==", bookingID)
+        .limit(1)
+        .get();
+
+      if (!sessionSnap.empty) {
+        await sessionSnap.docs[0].ref.update({
+          sessionStatus: "cancelled",
+          updatedAt:     now,
+        });
+      }
     } catch (sessionErr) {
-      console.error("cancelBooking: failed to sync bookingSessions status:", sessionErr.message);
+      // Booking is already cancelled at this point — log and move on rather
+      // than fail the whole request over the session-side mirror.
+      console.error("cancelBooking: failed to sync bookingSession:", sessionErr.message);
     }
-    
+
     return res.status(200).json({ message: "Booking cancelled successfully." });
   } catch (error) {
     console.error("cancelBooking error:", error);

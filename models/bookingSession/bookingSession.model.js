@@ -11,7 +11,11 @@ const GEOFENCE_RADIUS_METERS = 500;
 const createBookingSession = (bookingSessionID, bookingID, data = {}) => ({
   bookingSessionID, // primary key (Firestore doc ID) — own identity, not derived from the booking
   bookingID,        // foreign key only — links back to bookings/{bookingID}, never used as this doc's ID
-  status: data.status || "upcoming",
+  // upcoming | active | ended | cancelled | stolen — same field admin's
+  // markSessionActive/Ended/Cancelled/Stolen write to. Was called `status`
+  // here before, which silently didn't match admin's `sessionStatus` and
+  // left two different fields on the same doc — renamed to line up.
+  sessionStatus: data.sessionStatus || "upcoming",
   pickupLocation:  data.pickupLocation  || null, // { address, lat, lng } — raw pin, not a geofence zone
   dropoffLocation: data.dropoffLocation || null, // { address, lat, lng }
   geofenceZones:   Array.isArray(data.geofenceZones) ? data.geofenceZones : [],
