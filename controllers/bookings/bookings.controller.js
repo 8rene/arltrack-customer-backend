@@ -538,8 +538,8 @@ const cancelBooking = async (req, res) => {
 
       if (!sessionSnap.empty) {
         await sessionSnap.docs[0].ref.update({
-          sessionStatus: "cancelled",
-          updatedAt:     now,
+          status:    "cancelled",
+          updatedAt: now,
         });
       }
     } catch (sessionErr) {
