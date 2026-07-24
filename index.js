@@ -20,14 +20,11 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",").map(o => o.trim())
   : ["http://localhost:5173", "http://localhost:3000"];
 
-console.log("allowedOrigins from env:", allowedOrigins);
-
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      console.error(`CORS blocked. Incoming origin: "${origin}" | Allowed:`, allowedOrigins);
       callback(new Error(`CORS blocked: ${origin}`));
     }
   },
@@ -64,6 +61,7 @@ if (process.env.NODE_ENV !== "production") {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  console.log("allowedOrigins from env:", allowedOrigins);
 });
 
 module.exports = app;
