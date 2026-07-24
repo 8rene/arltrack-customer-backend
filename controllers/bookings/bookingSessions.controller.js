@@ -89,6 +89,39 @@ const getBookingDetails = async (req, res) => {
       .get();
     const session = sessionSnap.empty ? null : sessionSnap.docs[0].data();
 
+    // Payment record — same collection/shape getUserBookings already reads
+    // for MyBookings.jsx. This page never fetched it before, which is why
+    // it never showed anything about payment (pending, paid, cancelled, etc).
+    const paymentSnap = await db.collection("payments")
+      .where("bookingID", "==", bookingID)
+      .limit(1)
+      .get();
+
+    let payment = null;
+    if (!paymentSnap.empty) {
+      const p = paymentSnap.docs[0].data();
+      payment = {
+        paymentID:         p.paymentID        || paymentSnap.docs[0].id,
+        amount:            p.amount           || 0,
+        depositFee:        p.depositFee       || 0,
+        rentalFee:         p.rentalFee        || 0,
+        serviceFee:        p.serviceFee       || 0,
+        extraFee:          p.extraFee         || 0,
+        driversFee:        p.driversFee       || 0,
+        gatewayFee:        p.gatewayFee       || 0,
+        methodOfPayment:   p.methodOfPayment  || p.paymentMethod || "",
+        paymentMethod:     p.paymentMethod    || p.methodOfPayment || "",
+        referenceNumber:   p.referenceNumber  || "",
+        proofUrl:          p.proofUrl         || "",
+        status:            p.status           || "pending",
+        // Lets the frontend offer a "Complete Payment" link while a
+        // PayMongo checkout session is still open for this payment.
+        checkoutUrl:       p.checkoutUrl      || null,
+        createdAt:         p.createdAt        || null,
+        paidAt:            p.paidAt           || null,
+      };
+    }
+
     return res.status(200).json({
       booking: {
         bookingID,
@@ -108,6 +141,7 @@ const getBookingDetails = async (req, res) => {
       pickupLocation:     session?.pickupLocation  || null,
       dropoffLocation:    session?.dropoffLocation || null, // always == pickupLocation now, but session was written before that rule in older bookings
       geofenceZones:      session?.geofenceZones  || [],
+      payment,
     });
   } catch (error) {
     console.error("getBookingDetails error:", error);
