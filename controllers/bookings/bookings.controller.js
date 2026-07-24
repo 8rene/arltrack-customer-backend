@@ -1,5 +1,5 @@
 const { db, bucket } = require("../../config/firebaseConnection/firebase");
-const createBookingSession = require("../../models/bookingSession/bookingsession.model");
+const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { makeZone } = createBookingSession;
 
 // In-memory cache for stable data used by checkCodingRule.
