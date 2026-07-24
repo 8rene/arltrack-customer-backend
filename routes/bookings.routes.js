@@ -2,7 +2,7 @@ const express = require("express");
 const router  = express.Router();
 
 const { createBooking, getUserBookings, cancelBooking, checkCodingRule } = require("../controllers/bookings/bookings.controller");
-const { getBookingTraceback, getBookingDetails } = require("../controllers/bookings/bookingsessions.controller");
+const { getBookingTraceback, getBookingDetails } = require("../controllers/bookings/bookingSessions.controller");
 const verifyToken = require("../middlewares/auth.middleware");
 
 router.post("/create",              verifyToken, createBooking);
