@@ -18,9 +18,9 @@ const paymongoHeaders = () => ({
 
 // Maps our internal paymentMethod key -> PayMongo payment_method_types
 const CHANNEL_MAP = {
-  gcash:    ["gcash"],
-  maya:     ["paymaya"],
-  paymongo: ["qrph"],
+  gcash: ["gcash"],
+  maya:  ["paymaya"],
+  qrph:  ["qrph"],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
