@@ -1,4 +1,5 @@
 const { db } = require("../../config/firebaseConnection/firebase");
+const { derivePaymentStatus } = require("../../utils/pricing");
 
 // Shared ownership check — same pattern as cancelBooking in bookings.controller.js.
 // Returns the booking data if the requester owns it, or null and writes the
@@ -100,6 +101,7 @@ const getBookingDetails = async (req, res) => {
     let payment = null;
     if (!paymentSnap.empty) {
       const p = paymentSnap.docs[0].data();
+      const { balance } = derivePaymentStatus(p);
       payment = {
         paymentID:         p.paymentID        || paymentSnap.docs[0].id,
         amount:            p.amount           || 0,
@@ -119,6 +121,10 @@ const getBookingDetails = async (req, res) => {
         checkoutUrl:       p.checkoutUrl      || null,
         createdAt:         p.createdAt        || null,
         paidAt:            p.paidAt           || null,
+        // Was previously computed inline in BookingDetails.jsx as
+        // Math.max(0, amount - depositFee) — now the server's own math.
+        paymentStatus:     derivePaymentStatus(p),
+        balanceDue:        balance,
       };
     }
 

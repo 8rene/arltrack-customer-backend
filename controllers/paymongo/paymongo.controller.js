@@ -1,5 +1,6 @@
 const axios = require("axios");
 const { db } = require("../../config/firebaseConnection/firebase");
+const { computePaymentSplit } = require("../../utils/pricing");
 
 // ─── PayMongo base config ────────────────────────────────────────────────────
 const PAYMONGO_SECRET = process.env.PAYMONGO_SECRET_KEY;
@@ -32,18 +33,19 @@ const CHANNEL_MAP = {
 // ─────────────────────────────────────────────────────────────────────────────
 const createPaymentLink = async (req, res) => {
   const userID = req.user.userID;
-  const { bookingID, paymentID, amount, description, paymentMethod } = req.body;
+  // NOTE: `amount` used to be trusted straight from the client (the browser
+  // ran getPayNow() and sent the peso figure directly) — meaning anyone
+  // could open devtools and check out for ₱20 instead of the real total.
+  // It is intentionally no longer read from the request body: the charge
+  // amount is now always derived below from the payment doc's own stored
+  // grandTotal + methodOfPayment.
+  const { bookingID, paymentID, description, paymentMethod } = req.body;
 
-  if (!bookingID || !paymentID || !amount) {
-    return res.status(400).json({ message: "bookingID, paymentID, and amount are required." });
+  if (!bookingID || !paymentID) {
+    return res.status(400).json({ message: "bookingID and paymentID are required." });
   }
 
   const paymentMethodTypes = CHANNEL_MAP[paymentMethod] || ["qrph"];
-
-  const amountInCentavos = Math.round(Number(amount) * 100);
-  if (isNaN(amountInCentavos) || amountInCentavos < 2000) {
-    return res.status(400).json({ message: "Amount must be at least ₱20.00." });
-  }
 
   try {
     // 1. Verify the payment doc belongs to this user
@@ -59,6 +61,13 @@ const createPaymentLink = async (req, res) => {
 
     const paymentDoc = paymentSnap.docs[0];
     const payment    = paymentDoc.data();
+
+    // Server-computed charge amount — the only amount PayMongo ever sees.
+    const { payNow } = computePaymentSplit(payment.amount, payment.methodOfPayment);
+    const amountInCentavos = Math.round(payNow * 100);
+    if (isNaN(amountInCentavos) || amountInCentavos < 2000) {
+      return res.status(400).json({ message: "Amount must be at least ₱20.00." });
+    }
 
     // Prevent duplicate sessions if one already exists and is still pending
     if (payment.paymongoSessionID && payment.status === "pending") {

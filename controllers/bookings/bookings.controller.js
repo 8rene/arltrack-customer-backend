@@ -1,6 +1,21 @@
 const { db, bucket } = require("../../config/firebaseConnection/firebase");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { makeZone } = createBookingSession;
+const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require("../../utils/pricing");
+
+// Look up a car's price-per-day for a given durationType straight from
+// Firestore — this is the one place pricing numbers are allowed to come
+// from. Never trust a price sent by the client.
+const getPricePerDay = async (carID, durationType) => {
+  if (!carID || !durationType) return 0;
+  const snap = await db.collection("carPricing")
+    .where("carID", "==", carID)
+    .where("durationType", "==", durationType)
+    .limit(1)
+    .get();
+  if (snap.empty) return 0;
+  return Number(snap.docs[0].data().price) || 0;
+};
 
 // In-memory cache for stable data used by checkCodingRule.
 // cars: keyed by carID (plateNumber almost never changes)
@@ -19,6 +34,48 @@ const getMimeType = (base64) => {
   return "image/jpeg"; // fallback
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/bookings/quote
+// Body: { carID, duration, startDate, startTime, endDate, endTime, destination, driveType, paymentAmount }
+//
+// Server-side pricing preview for the booking form (Step 2-5 live summary).
+// No auth required — same reasoning as /bookings/check-coding: it's called
+// before the user necessarily has an account/session, and it doesn't write
+// anything. This is what replaced the frontend's own calcDays()/fee math —
+// the browser now just displays whatever this endpoint returns instead of
+// computing pricing itself.
+// ─────────────────────────────────────────────────────────────────────────────
+const getBookingQuote = async (req, res) => {
+  const { carID, duration, startDate, startTime, endDate, endTime, destination, driveType, paymentAmount } = req.body;
+
+  if (!carID || !duration) {
+    return res.status(400).json({ message: "carID and duration are required." });
+  }
+
+  try {
+    const pricePerDay = await getPricePerDay(carID, duration);
+
+    const startDateTime = startDate && startTime ? new Date(`${startDate}T${startTime}:00`) : null;
+    const endDateTime    = endDate && endTime     ? new Date(`${endDate}T${endTime}:00`)     : null;
+
+    const fees = computeBookingFees({
+      pricePerDay,
+      startDateTime,
+      endDateTime,
+      durationType: duration,
+      destination,
+      driveType,
+    });
+
+    const split = computePaymentSplit(fees.grandTotal, paymentAmount);
+
+    return res.status(200).json({ ...fees, ...split, pricePerDay });
+  } catch (error) {
+    console.error("getBookingQuote error:", error);
+    return res.status(500).json({ message: "Failed to compute quote." });
+  }
+};
+
 // POST /api/bookings/create
 const createBooking = async (req, res) => {
   const userID = req.user.userID; // from verified JWT — never trust body
@@ -30,8 +87,6 @@ const createBooking = async (req, res) => {
     startTime,
     endDate,
     endTime,
-    totalDays,
-    rentalFee,
     pickupLocation,
     dropoffLocation,
     destination,
@@ -43,14 +98,15 @@ const createBooking = async (req, res) => {
     specialNotes,
     paymentAmount,
     paymentMethod,
-    methodOfPayment,
     referenceNumber,
-    depositFee,
-    extraFee,
-    driversFee,
-    serviceFee,
-    gatewayFee,
-    grandTotal,
+    // NOTE: totalDays / rentalFee / extraFee / driversFee / serviceFee /
+    // gatewayFee / grandTotal / depositFee / methodOfPayment are intentionally
+    // NOT read from the request body anymore. Those used to be computed in
+    // the browser (Booking.jsx) and simply trusted here (`Number(x) || 0`),
+    // which meant anyone could edit the request and book a car for ₱0. They
+    // are now recomputed below from the car's own Firestore pricing doc and
+    // the booking's start/end times — the only numbers that matter are the
+    // ones this server calculates itself.
     // Coordinates the frontend already sends for geofencing, previously
     // never read here — this is why pickupLocation/geofenceZones were
     // always saving as null on the bookingSessions doc.
@@ -105,13 +161,25 @@ const createBooking = async (req, res) => {
       ? new Date(`${endDate}T${endTime}:00`)
       : startDateTime;
 
-    const totalFee    = Number(rentalFee) || 0;
-    const depositPaid = 1000;                   // deposit fee is always ₱1,000
-    const extra       = Number(extraFee)   || 0;
-    const drivers     = Number(driversFee) || 0;
-    const service     = Number(serviceFee) || 0;
-    const gateway     = Number(gatewayFee) || 0;
-    const totalAmount = Number(grandTotal) || (totalFee + extra + drivers + service + gateway);
+    // ── Authoritative fee calculation — never trust client-sent totals ──
+    const pricePerDay = await getPricePerDay(carID, duration);
+    const fees = computeBookingFees({
+      pricePerDay,
+      startDateTime,
+      endDateTime,
+      durationType: duration,
+      destination,
+      driveType,
+    });
+    const { payNow, methodOfPayment: computedMethod } = computePaymentSplit(fees.grandTotal, paymentAmount);
+
+    const totalFee    = fees.rentalFee;
+    const depositPaid = fees.depositFee; // always ₱1,000
+    const extra       = fees.extraFee;
+    const drivers     = fees.driversFee;
+    const service     = fees.serviceFee;
+    const gateway     = fees.gatewayFee;
+    const totalAmount = fees.grandTotal;
 
     // ── 0. Coding rule check (server-side enforcement) ──────────
     // Blocks booking if the booking window (startDateTime → endDateTime)
@@ -246,7 +314,7 @@ const createBooking = async (req, res) => {
       serviceType:   serviceType || "",
       startDateTime,
       endDateTime,
-      totalDays:     Number(totalDays) || 1,
+      totalDays:     fees.days || 1,
       location:      destination || "",
       modeOfDriving: driveType === "chauffeur" ? "With Chauffeur" : "Self Drive",
       notesUser:     specialNotes || "",
@@ -288,7 +356,7 @@ const createBooking = async (req, res) => {
       driversFee:      drivers,
       gatewayFee:      gateway,
       depositFee:      depositPaid,
-      methodOfPayment: methodOfPayment || (paymentAmount === 'partial' ? 'Partial' : 'Full'),
+      methodOfPayment: computedMethod,
       paymentMethod:   paymentMethod  || "",
       referenceNumber: referenceNumber || "N/A",
       proofUrl,
@@ -353,6 +421,14 @@ const createBooking = async (req, res) => {
       message:   "Booking confirmed!",
       bookingID,
       paymentID,
+      totalDays: fees.days,
+      rentalFee: totalFee,
+      extraFee:  extra,
+      driversFee: drivers,
+      serviceFee: service,
+      gatewayFee: gateway,
+      grandTotal: totalAmount,
+      payNow,
     });
 
   } catch (error) {
@@ -464,6 +540,10 @@ const getUserBookings = async (req, res) => {
           referenceNumber: p.referenceNumber  || "",
           proofUrl:        p.proofUrl         || "",
           status:          p.status           || "",
+          // Was previously recomputed in MyBookings.jsx (getPaymentInfo) —
+          // now computed once, here, so it can't drift from the admin
+          // dashboard's own version of the same math.
+          paymentStatus:   derivePaymentStatus(p),
         };
         // Fix: fees are stored in payments, not in the booking doc
         result[i].totalFee   = p.amount      || 0;
@@ -761,4 +841,4 @@ const checkCodingRule = async (req, res) => {
   }
 };
 
-module.exports = { createBooking, getUserBookings, cancelBooking, checkCodingRule };
+module.exports = { createBooking, getUserBookings, cancelBooking, checkCodingRule, getBookingQuote };
