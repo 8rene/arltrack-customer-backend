@@ -203,10 +203,25 @@ const handleWebhook = async (req, res) => {
       const payment    = paymentDoc.data();
       const bID        = payment.bookingID;
 
-      await paymentDoc.ref.update({ status: "paid", paidAt: now, updatedAt: now });
+      // The checkout_session payload embeds the underlying PayMongo payment
+      // object(s) under attributes.payments — that payment's own `id` is
+      // what the Refunds API needs (POST /v1/refunds requires payment_id,
+      // NOT the checkout_session id). We grab and store it here so refunds
+      // are possible later without an extra lookup.
+      const paidPayments   = session?.attributes?.payments || [];
+      const paymongoPaymentID = paidPayments[0]?.id || null;
+
+      const updatePayload = { status: "paid", paidAt: now, updatedAt: now };
+      if (paymongoPaymentID) {
+        updatePayload.paymongoPaymentID = paymongoPaymentID;
+      } else {
+        console.warn("[PayMongo Webhook] payment.paid event had no payments[0].id — refunds for this payment will need a manual lookup.");
+      }
+
+      await paymentDoc.ref.update(updatePayload);
 
       if (bID) {
-        console.log("[PayMongo Webhook] ✅ Payment settled for booking:", bID);
+        console.log("[PayMongo Webhook] ✅ Payment settled for booking:", bID, "paymongoPaymentID:", paymongoPaymentID);
       }
 
       return res.status(200).json({ received: true });
@@ -230,6 +245,68 @@ const handleWebhook = async (req, res) => {
       if (paymentSnap && !paymentSnap.empty) {
         await paymentSnap.docs[0].ref.update({ status: "failed", updatedAt: now });
       }
+      return res.status(200).json({ received: true });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // refund.updated — PayMongo confirming a refund we created (via the
+    // Refunds API from the admin backend after an admin approves a
+    // RefundRequest) has settled, one way or another.
+    // The refund object's own `payment_id` field is what we'd match on,
+    // but we actually match by the refund's own `id` since that's what
+    // the admin backend stores on the RefundRequest right after creating
+    // it — NOT paymentID/sessionID like the events above, since this
+    // event isn't about the checkout_session at all.
+    // ─────────────────────────────────────────────────────────────────────
+    if (eventType === "refund.updated") {
+      const refund       = event?.data?.attributes?.data; // refund object
+      const refundStatus = refund?.attributes?.status;    // pending | succeeded | failed
+      const refundID     = refund?.id;
+      const now = new Date();
+
+      if (!refundID || !refundStatus) {
+        console.warn("[PayMongo Webhook] refund.updated missing refund id/status.");
+        return res.status(200).json({ received: true });
+      }
+
+      // Only act on terminal states — "pending" just means still processing.
+      if (refundStatus !== "succeeded" && refundStatus !== "failed") {
+        return res.status(200).json({ received: true });
+      }
+
+      const refundReqSnap = await db.collection("refundRequests")
+        .where("paymongoRefundID", "==", refundID)
+        .limit(1)
+        .get();
+
+      if (refundReqSnap.empty) {
+        console.warn("[PayMongo Webhook] refund.updated — no matching refundRequest for refundID:", refundID);
+        return res.status(200).json({ received: true });
+      }
+
+      const refundReqDoc = refundReqSnap.docs[0];
+      const refundReq    = refundReqDoc.data();
+
+      if (refundStatus === "succeeded") {
+        await refundReqDoc.ref.update({ status: "Refunded", updatedAt: now });
+
+        // Also flip the underlying payment to Refunded so admin Payments
+        // pages reflect it without a separate manual step.
+        if (refundReq.paymentID) {
+          const paymentSnap = await db.collection("payments")
+            .where("paymentID", "==", refundReq.paymentID)
+            .limit(1)
+            .get();
+          if (!paymentSnap.empty) {
+            await paymentSnap.docs[0].ref.update({ status: "Refunded", updatedAt: now });
+          }
+        }
+        console.log("[PayMongo Webhook] ✅ Refund succeeded for refundRequest:", refundReq.refundRequestID);
+      } else {
+        await refundReqDoc.ref.update({ status: "Failed", updatedAt: now });
+        console.log("[PayMongo Webhook] ❌ Refund failed for refundRequest:", refundReq.refundRequestID);
+      }
+
       return res.status(200).json({ received: true });
     }
 
@@ -272,11 +349,16 @@ const getPaymentStatus = async (req, res) => {
           { headers: paymongoHeaders() }
         );
         const payments = pmRes.data?.data?.attributes?.payments || [];
-        const paid = payments.some(pay => pay.attributes?.status === "paid");
+        const paidPayment = payments.find(pay => pay.attributes?.status === "paid");
 
-        if (paid && p.status !== "paid") {
+        if (paidPayment && p.status !== "paid") {
           const now = new Date();
-          await snap.docs[0].ref.update({ status: "paid", paidAt: now, updatedAt: now });
+          await snap.docs[0].ref.update({
+            status: "paid",
+            paidAt: now,
+            updatedAt: now,
+            paymongoPaymentID: paidPayment.id,
+          });
 
           return res.status(200).json({ status: "paid", bookingID: p.bookingID });
         }
