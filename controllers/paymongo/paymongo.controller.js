@@ -388,4 +388,124 @@ const getPaymentStatus = async (req, res) => {
   }
 };
 
-module.exports = { createPaymentLink, handleWebhook, getPaymentStatus };
+const VALID_REFUND_REASONS = [
+  "Cancelled trip",
+  "Overcharged",
+  "Service issue",
+  "Duplicate payment",
+  "Other",
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/paymongo/refunds
+// Customer submits a refund request for one of their own paid payments —
+// the "Confirm & Send" step. This only writes a Pending refundRequests doc;
+// it never calls PayMongo directly. That only happens once an admin
+// approves it from the admin backend.
+// ─────────────────────────────────────────────────────────────────────────────
+const requestRefund = async (req, res) => {
+  const userID = req.user.userID;
+  const { paymentID, reason, notes } = req.body;
+
+  if (!paymentID || !reason) {
+    return res.status(400).json({ message: "paymentID and reason are required." });
+  }
+  if (!VALID_REFUND_REASONS.includes(reason)) {
+    return res.status(400).json({ message: "Invalid reason." });
+  }
+
+  try {
+    const paymentSnap = await db.collection("payments")
+      .where("paymentID", "==", paymentID)
+      .where("userID", "==", userID)
+      .limit(1)
+      .get();
+
+    if (paymentSnap.empty) {
+      return res.status(404).json({ message: "Payment not found or access denied." });
+    }
+
+    const paymentDoc = paymentSnap.docs[0];
+    const payment    = paymentDoc.data();
+
+    if (payment.status !== "paid") {
+      return res.status(400).json({ message: "Only paid payments can be refunded." });
+    }
+    if (!payment.paymongoPaymentID) {
+      // Settled before the webhook fix that captures the real PayMongo
+      // payment id — flag it instead of creating a request that can
+      // never actually be refunded via PayMongo.
+      return res.status(400).json({
+        message: "This payment can't be auto-refunded yet — please contact support.",
+      });
+    }
+
+    const existingSnap = await db.collection("refundRequests")
+      .where("paymentID", "==", paymentID)
+      .where("status", "in", ["Pending", "Approved"])
+      .limit(1)
+      .get();
+
+    if (!existingSnap.empty) {
+      return res.status(409).json({ message: "A refund request for this payment is already in progress." });
+    }
+
+    const refundRef = db.collection("refundRequests").doc();
+    const now = new Date();
+    const refundRequest = {
+      refundRequestID: refundRef.id,
+      bookingID: payment.bookingID || null,
+      paymentID,
+      userID,
+      reason,
+      notes: notes || "",
+      amount: payment.amount || 0,
+      status: "Pending",
+      paymongoRefundID: null,
+      processedBy: null,
+      processedAt: null,
+      rejectReason: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await refundRef.set(refundRequest);
+
+    return res.status(201).json({
+      message: "Refund request sent. We'll notify you once it's reviewed.",
+      refundRequest,
+    });
+  } catch (error) {
+    console.error("requestRefund error:", error.message);
+    return res.status(500).json({ message: "Failed to submit refund request." });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/paymongo/refunds/mine
+// Lists the logged-in customer's own refund requests (newest first).
+// ─────────────────────────────────────────────────────────────────────────────
+const getMyRefundRequests = async (req, res) => {
+  const userID = req.user.userID;
+
+  try {
+    const snap = await db.collection("refundRequests")
+      .where("userID", "==", userID)
+      .get();
+
+    const requests = snap.docs
+      .map(d => d.data())
+      .sort((a, b) => {
+        const aT = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
+        const bT = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);
+        return bT - aT;
+      });
+
+    return res.status(200).json({ data: requests });
+  } catch (error) {
+    console.error("getMyRefundRequests error:", error.message);
+    return res.status(500).json({ message: "Failed to fetch refund requests." });
+  }
+};
+
+module.exports = { createPaymentLink, handleWebhook, getPaymentStatus, requestRefund, getMyRefundRequests };
