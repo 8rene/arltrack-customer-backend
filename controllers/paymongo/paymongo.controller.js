@@ -403,6 +403,24 @@ const VALID_REFUND_REASONS = [
 // it never calls PayMongo directly. That only happens once an admin
 // approves it from the admin backend.
 // ─────────────────────────────────────────────────────────────────────────────
+// Mirrors getPaymentInfo() in MyBookings.jsx (customer) and computeAmounts()
+// in payments.service.js (admin) — so refunds are capped at what was
+// ACTUALLY paid (e.g. a 50% down payment), not the full booking total.
+// PayMongo will reject a refund amount greater than what it actually
+// received on that payment_id.
+const computeAmountPaid = (payment) => {
+  const amount     = Number(payment.amount) || 0;
+  const depositFee = Number(payment.depositFee) || 0;
+  const method     = (payment.methodOfPayment || "").toLowerCase();
+  const status     = (payment.status || "").toLowerCase();
+
+  if (method.includes("full")) return amount;
+  if (method.includes("down")) return Math.round(amount / 2);
+  if (method.includes("deposit") || method.includes("partial")) return depositFee;
+  if (status === "paid" || status === "approved") return amount;
+  return depositFee;
+};
+
 const requestRefund = async (req, res) => {
   const userID = req.user.userID;
   const { paymentID, reason, notes } = req.body;
@@ -452,6 +470,7 @@ const requestRefund = async (req, res) => {
 
     const refundRef = db.collection("refundRequests").doc();
     const now = new Date();
+    const amountPaid = computeAmountPaid(payment);
     const refundRequest = {
       refundRequestID: refundRef.id,
       bookingID: payment.bookingID || null,
@@ -459,7 +478,7 @@ const requestRefund = async (req, res) => {
       userID,
       reason,
       notes: notes || "",
-      amount: payment.amount || 0,
+      amount: amountPaid, // ← what was actually paid, not the full booking total
       status: "Pending",
       paymongoRefundID: null,
       processedBy: null,
