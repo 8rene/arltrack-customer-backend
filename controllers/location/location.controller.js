@@ -127,11 +127,12 @@ const getBarangays = async (req, res) => {
 };
 
 /**
- * GET /api/location/postal-code?municipality=xxx
- * Looks up the postal/ZIP code for a given municipality/city name.
- * Used to auto-fill the Postal Code field once a Municipality/City is
- * selected during registration or profile editing — the value stays
- * editable on the frontend since some areas span more than one code.
+ * GET /api/location/postal-code?municipality=xxx&barangay=yyy
+ * Looks up the postal/ZIP code, preferring barangay-level precision when
+ * available (mainly NCR, where each barangay/district has its own code)
+ * and falling back to the municipality/city-wide code otherwise.
+ * Used to auto-fill the Postal Code field once a Barangay is selected
+ * during registration — the value stays editable on the frontend.
  */
 const postalPH = usePostalPH();
 
@@ -141,7 +142,7 @@ const postalPH = usePostalPH();
 const stripCityWrapping = (name) =>
   name.replace(/^city of\s+/i, "").replace(/\s+city$/i, "").trim();
 
-const lookupPostalCode = (rawName) => {
+const lookupMunicipalityCode = (rawName) => {
   const name = rawName.trim();
   if (!name) return null;
 
@@ -169,12 +170,30 @@ const lookupPostalCode = (rawName) => {
   return null;
 };
 
+const lookupBarangayCode = (municipalityName, barangayName) => {
+  const city     = municipalityName.trim();
+  const barangay = barangayName.trim();
+  if (!city || !barangay) return null;
+
+  // Barangay/district-level entries live under `municipality` scoped to a
+  // `location` (city) in this dataset — try both the raw and de-wrapped
+  // city name so "City of Manila" / "Manila" both work as the scope.
+  for (const cityCandidate of [city, stripCityWrapping(city)]) {
+    const result = postalPH.fetchDataLists({ location: cityCandidate, municipality: barangay });
+    if (result?.data?.length === 1) return result.data[0].post_code;
+  }
+  return null;
+};
+
 const getPostalCode = async (req, res) => {
-  const { municipality } = req.query;
+  const { municipality, barangay } = req.query;
   if (!municipality) return res.status(400).json({ error: "municipality is required" });
 
   try {
-    const postCode = lookupPostalCode(municipality);
+    const postCode =
+      (barangay && lookupBarangayCode(municipality, barangay)) ??
+      lookupMunicipalityCode(municipality);
+
     if (postCode == null) return res.json({ postalCode: "", found: false });
 
     res.json({ postalCode: String(postCode), found: true });
