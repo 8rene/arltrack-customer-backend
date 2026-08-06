@@ -32,7 +32,10 @@ app.use(cors({
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 }));
 
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({
+  limit: "20mb",
+  verify: (req, res, buf) => { req.rawBody = buf; } // save raw bytes for PayMongo webhook signature check
+}));
 app.use(express.urlencoded({ limit: "20mb", extended: true }));
 
 // Routes

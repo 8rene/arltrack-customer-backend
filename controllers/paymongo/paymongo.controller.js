@@ -152,7 +152,11 @@ const handleWebhook = async (req, res) => {
       parts[k] = v;
     });
 
-    const rawBody = JSON.stringify(req.body);
+    // Must sign the EXACT bytes PayMongo sent — re-stringifying the parsed
+    // req.body can produce different key order/spacing and will silently
+    // never match. req.rawBody is captured by the express.json({ verify })
+    // hook in index.js; fall back to JSON.stringify only if that's missing.
+    const rawBody = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body);
     const toSign  = `${parts.t}.${rawBody}`;
     const hmac    = crypto.createHmac("sha256", webhookSecret).update(toSign).digest("hex");
     const isValid = hmac === parts.te || hmac === parts.li;
@@ -418,8 +422,14 @@ const computeAmountPaid = (payment) => {
   const status     = (payment.status || "").toLowerCase();
 
   if (method.includes("full")) return amount;
-  if (method.includes("down")) return Math.round(amount / 2);
-  if (method.includes("deposit") || method.includes("partial")) return depositFee;
+  // "Partial" is what computePaymentSplit() actually produces, and it charges
+  // 50% of the grand total via PayMongo (payNow = Math.floor(total * 0.5)).
+  // This branch used to fall through to the flat depositFee (₱1,000) below,
+  // which meant a refund request only asked back ₱1,000 even though the
+  // customer had actually paid ~50% of the total — undercharging every
+  // partial-payment refund. Keep it in sync with computePaymentSplit's math.
+  if (method.includes("partial") || method.includes("down")) return Math.round(amount / 2);
+  if (method.includes("deposit")) return depositFee; // true deposit-only flow, if ever used
   if (status === "paid" || status === "approved") return amount;
   return depositFee;
 };
