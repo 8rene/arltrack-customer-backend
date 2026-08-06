@@ -55,7 +55,9 @@ const recordLogout = async (uID) => {
     });
   } catch (err) {
     console.error("recordLogout error:", err.message);
+    
   }
 };
 
 module.exports = { recordLogin, recordLogout };
+
