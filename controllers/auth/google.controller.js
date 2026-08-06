@@ -1,5 +1,6 @@
 const { auth, db } = require("../../config/firebaseConnection/firebase");
 const jwt          = require("jsonwebtoken");
+const { recordLogin } = require("../../utils/userLogs/userLogs.util");
 
 const googleLogin = async (req, res) => {
   const { idToken } = req.body;
@@ -44,8 +45,10 @@ const googleLogin = async (req, res) => {
         username: userData.username || "",
       },
       process.env.JWT_SECRET,
-      { expiresIn: "7d" }
+      { expiresIn: "1d" }
     );
+
+    recordLogin(userID, userData.username || "");
 
     return res.status(200).json({
       message: "Login successful",

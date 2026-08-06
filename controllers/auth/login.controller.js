@@ -1,6 +1,7 @@
 const axios = require("axios");
 const { db }  = require("../../config/firebaseConnection/firebase");
 const jwt     = require("jsonwebtoken");
+const { recordLogin } = require("../../utils/userLogs/userLogs.util");
 
 const login = async (req, res) => {
   const { email, password } = req.body;
@@ -50,8 +51,12 @@ const login = async (req, res) => {
         username: userData.username || "",
       },
       process.env.JWT_SECRET,
-      { expiresIn: "7d" }
+      { expiresIn: "1d" }
     );
+
+    // Log this session for the admin's User Logs page — fire without
+    // blocking the response; a logging hiccup should never fail a login.
+    recordLogin(uid, userData.username || "");
 
     return res.status(200).json({
       message: "Login successful",
