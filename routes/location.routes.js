@@ -6,11 +6,13 @@ const {
   getProvinces,
   getMunicipalities,
   getBarangays,
+  getPostalCode,
 } = require("../controllers/location/location.controller");
 
 router.get("/regions",        getRegions);
 router.get("/provinces",      getProvinces);
 router.get("/municipalities", getMunicipalities);
 router.get("/barangays",      getBarangays);
+router.get("/postal-code",    getPostalCode);
 
 module.exports = router;

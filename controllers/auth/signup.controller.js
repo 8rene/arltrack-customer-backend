@@ -109,6 +109,7 @@ const signup = async (req, res) => {
       municipality: address?.municipality || "",
       barangay:     address?.barangay     || "",
       street:       address?.street       || "",
+      postalCode:   address?.postalCode   || "",
     }));
 
     // ── "userDocument" collection (own unique userDocumentID) ─

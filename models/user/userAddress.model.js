@@ -6,6 +6,7 @@ const createUserAddress = (userID, data = {}) => ({
   municipality: data.municipality || "",
   barangay:     data.barangay     || "",
   street:       data.street       || "",
+  postalCode:   data.postalCode   || "",
   createdAt:    new Date(),
 });
 

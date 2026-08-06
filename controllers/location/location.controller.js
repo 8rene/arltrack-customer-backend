@@ -1,4 +1,5 @@
 const { db } = require("../../config/firebaseConnection/firebase");
+const usePostalPH = require("use-postal-ph").default || require("use-postal-ph");
 
 // In-memory cache — location data almost never changes.
 // Cache is cleared only on server restart/cold start (acceptable on Vercel).
@@ -125,4 +126,62 @@ const getBarangays = async (req, res) => {
   }
 };
 
-module.exports = { getRegions, getProvinces, getMunicipalities, getBarangays };
+/**
+ * GET /api/location/postal-code?municipality=xxx
+ * Looks up the postal/ZIP code for a given municipality/city name.
+ * Used to auto-fill the Postal Code field once a Municipality/City is
+ * selected during registration or profile editing — the value stays
+ * editable on the frontend since some areas span more than one code.
+ */
+const postalPH = usePostalPH();
+
+// PSGC names sometimes wrap the city name ("City of Malolos", "Taguig City")
+// while the postal dataset stores it plain ("Malolos", "Taguig City" as location).
+// This tries a few reasonable variants before giving up.
+const stripCityWrapping = (name) =>
+  name.replace(/^city of\s+/i, "").replace(/\s+city$/i, "").trim();
+
+const lookupPostalCode = (rawName) => {
+  const name = rawName.trim();
+  if (!name) return null;
+
+  // 1. Direct municipality/town match (covers most provinces)
+  let result = postalPH.fetchDataLists({ municipality: name });
+  if (result?.data?.length === 1) return result.data[0].post_code;
+
+  // 2. Retry without "City of " / " City" wrapping
+  const stripped = stripCityWrapping(name);
+  if (stripped !== name) {
+    result = postalPH.fetchDataLists({ municipality: stripped });
+    if (result?.data?.length === 1) return result.data[0].post_code;
+  }
+
+  // 3. NCR-style cities are split into many district post offices —
+  //    match by "location" and prefer the Central Post Office (CPO) entry
+  for (const candidate of [name, stripped]) {
+    result = postalPH.fetchDataLists({ location: candidate });
+    if (result?.data?.length) {
+      const cpo = result.data.find((d) => /cpo/i.test(d.municipality));
+      return (cpo || result.data[0]).post_code;
+    }
+  }
+
+  return null;
+};
+
+const getPostalCode = async (req, res) => {
+  const { municipality } = req.query;
+  if (!municipality) return res.status(400).json({ error: "municipality is required" });
+
+  try {
+    const postCode = lookupPostalCode(municipality);
+    if (postCode == null) return res.json({ postalCode: "", found: false });
+
+    res.json({ postalCode: String(postCode), found: true });
+  } catch (error) {
+    console.error("getPostalCode error:", error);
+    res.status(500).json({ error: "Failed to look up postal code" });
+  }
+};
+
+module.exports = { getRegions, getProvinces, getMunicipalities, getBarangays, getPostalCode };
