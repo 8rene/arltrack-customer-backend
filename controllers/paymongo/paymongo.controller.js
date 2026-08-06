@@ -249,23 +249,26 @@ const handleWebhook = async (req, res) => {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // refund.updated — PayMongo confirming a refund we created (via the
+    // payment.refund.updated — PayMongo confirming a refund we created (via the
     // Refunds API from the admin backend after an admin approves a
     // RefundRequest) has settled, one way or another.
+    // NOTE: the actual event name PayMongo sends is "payment.refund.updated"
+    // (per their webhook docs — "refund.updated" on its own does not exist
+    // and will never match, silently leaving requests stuck on "Approved").
     // The refund object's own `payment_id` field is what we'd match on,
     // but we actually match by the refund's own `id` since that's what
     // the admin backend stores on the RefundRequest right after creating
     // it — NOT paymentID/sessionID like the events above, since this
     // event isn't about the checkout_session at all.
     // ─────────────────────────────────────────────────────────────────────
-    if (eventType === "refund.updated") {
+    if (eventType === "payment.refund.updated") {
       const refund       = event?.data?.attributes?.data; // refund object
       const refundStatus = refund?.attributes?.status;    // pending | succeeded | failed
       const refundID     = refund?.id;
       const now = new Date();
 
       if (!refundID || !refundStatus) {
-        console.warn("[PayMongo Webhook] refund.updated missing refund id/status.");
+        console.warn("[PayMongo Webhook] payment.refund.updated missing refund id/status.");
         return res.status(200).json({ received: true });
       }
 
@@ -280,7 +283,7 @@ const handleWebhook = async (req, res) => {
         .get();
 
       if (refundReqSnap.empty) {
-        console.warn("[PayMongo Webhook] refund.updated — no matching refundRequest for refundID:", refundID);
+        console.warn("[PayMongo Webhook] payment.refund.updated — no matching refundRequest for refundID:", refundID);
         return res.status(200).json({ received: true });
       }
 
