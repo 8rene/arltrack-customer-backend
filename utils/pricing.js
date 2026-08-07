@@ -47,6 +47,15 @@ const DEPOSIT_FEE  = 1000; // reservation deposit is always ₱1,000
 // caller using carID + durationType) — never from the client.
 const computeBookingFees = ({ pricePerDay, startDateTime, endDateTime, durationType, destination, driveType }) => {
   const { days, diffHrs } = calcBillableDays(startDateTime, endDateTime, durationType);
+
+  // No valid date range selected yet — nothing should be charged at all,
+  // not even the "flat" fees (service/gateway/driver's), since those used
+  // to slip through even with days === 0 and show a phantom price before
+  // the customer had picked any dates.
+  if (days === 0) {
+    return { days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, grandTotal: 0, depositFee: DEPOSIT_FEE };
+  }
+
   const rentalFee = days * (Number(pricePerDay) || 0);
 
   const baseArea = isBaseArea(destination);
