@@ -2,6 +2,13 @@ const { auth, db } = require("../../config/firebaseConnection/firebase");
 const jwt          = require("jsonwebtoken");
 const { recordLogin } = require("../../utils/userLogs/userLogs.util");
 
+// See login.controller.js for details — same admin roleIDs are blocked here.
+const BLOCKED_ADMIN_ROLE_IDS = new Set([
+  "1BX4V7M43t6barbPd4BP", // Owner
+  "5bhRYMrDkjrs9VlFFY4u", // Admin
+  "fFA8G2R2ANLbVsH00jlv", // Supervisor
+]);
+
 const googleLogin = async (req, res) => {
   const { idToken } = req.body;
 
@@ -33,6 +40,14 @@ const googleLogin = async (req, res) => {
     if (userData.status === "locked") {
       return res.status(403).json({
         message: "Your account is pending approval. Please wait for admin verification.",
+      });
+    }
+
+    // 2b. Block admin-side accounts (Owner/Admin/Supervisor) from logging
+    // into the customer-facing site via Google too.
+    if (userData.roleID && BLOCKED_ADMIN_ROLE_IDS.has(userData.roleID)) {
+      return res.status(403).json({
+        message: "This account is an admin account and can't be used to log in here. Please use the admin panel.",
       });
     }
 
