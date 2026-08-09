@@ -55,9 +55,12 @@ const login = async (req, res) => {
 
     // 2b. Block admin-side accounts (Owner/Admin/Supervisor) from logging
     // into the customer-facing site — they belong on the admin panel only.
+    // Message is intentionally generic ("does not exist") rather than
+    // confirming this is an admin account, so login attempts here don't
+    // leak which emails belong to staff accounts.
     if (userData.roleID && BLOCKED_ADMIN_ROLE_IDS.has(userData.roleID)) {
-      return res.status(403).json({
-        message: "This account is an admin account and can't be used to log in here. Please use the admin panel.",
+      return res.status(404).json({
+        message: "The user does not exist.",
       });
     }
 
