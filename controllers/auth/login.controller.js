@@ -3,16 +3,42 @@ const { db }  = require("../../config/firebaseConnection/firebase");
 const jwt     = require("jsonwebtoken");
 const { recordLogin } = require("../../utils/userLogs/userLogs.util");
 
-// Admin-side roleIDs (from the shared 'roles' Firestore collection) — these
-// accounts manage the fleet/bookings and should never be able to log into
-// the customer-facing site. Driver is intentionally NOT blocked here since
-// drivers may also need customer-side access depending on how the business
-// uses that role; only Owner/Admin/Supervisor are blocked.
-const BLOCKED_ADMIN_ROLE_IDS = new Set([
-  "1BX4V7M43t6barbPd4BP", // Owner
-  "5bhRYMrDkjrs9VlFFY4u", // Admin
-  "fFA8G2R2ANLbVsH00jlv", // Supervisor
-]);
+// Admin-side role NAMES (from the shared 'roles' Firestore collection) —
+// these accounts manage the fleet/bookings and should never be able to log
+// into the customer-facing site. Driver is intentionally NOT blocked here
+// since drivers may also need customer-side access depending on how the
+// business uses that role; only Owner/Admin/Supervisor are blocked.
+//
+// NOTE: this checks the role doc's "name" field (confirmed in Firestore),
+// NOT "roleName" — that mismatch was the root cause of the earlier bypass.
+const BLOCKED_ADMIN_ROLE_NAMES = new Set(["Owner", "Admin", "Supervisor"]);
+
+// Looks up the role document for a given roleID and reports whether it's
+// one of the blocked admin-side roles.
+//
+// Fail-closed by design: if the roles collection can't be read, or the
+// roleID doesn't resolve to a role doc, we treat it as blocked rather than
+// silently letting the request through. A user with a roleID is expected
+// to have a matching role doc — if that lookup breaks, that's a data/
+// permissions problem to fix, not something we should fail open on for a
+// security-relevant check. (Accounts with no roleID at all are unaffected
+// by this — they never enter this check.)
+const isBlockedAdminRole = async (roleID) => {
+  try {
+    const roleSnap = await db.collection("roles").doc(roleID).get();
+
+    if (!roleSnap.exists) {
+      console.error(`Role lookup failed: no roles doc for roleID "${roleID}". Failing closed (blocking login).`);
+      return true;
+    }
+
+    const roleName = roleSnap.data().name;
+    return BLOCKED_ADMIN_ROLE_NAMES.has(roleName);
+  } catch (err) {
+    console.error(`Role lookup error for roleID "${roleID}":`, err.message, "— failing closed (blocking login).");
+    return true;
+  }
+};
 
 const login = async (req, res) => {
   const { email, password } = req.body;
@@ -58,7 +84,7 @@ const login = async (req, res) => {
     // Message is intentionally generic ("does not exist") rather than
     // confirming this is an admin account, so login attempts here don't
     // leak which emails belong to staff accounts.
-    if (userData.roleID && BLOCKED_ADMIN_ROLE_IDS.has(userData.roleID)) {
+    if (userData.roleID && await isBlockedAdminRole(userData.roleID)) {
       return res.status(404).json({
         message: "The user does not exist.",
       });
