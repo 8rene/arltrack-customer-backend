@@ -3,16 +3,26 @@ const { db }  = require("../../config/firebaseConnection/firebase");
 const jwt     = require("jsonwebtoken");
 const { recordLogin } = require("../../utils/userLogs/userLogs.util");
 
-// Admin-side roleIDs (from the shared 'roles' Firestore collection) — these
-// accounts manage the fleet/bookings and should never be able to log into
-// the customer-facing site. Driver is intentionally NOT blocked here since
-// drivers may also need customer-side access depending on how the business
-// uses that role; only Owner/Admin/Supervisor are blocked.
-const BLOCKED_ADMIN_ROLE_IDS = new Set([
-  "1BX4V7M43t6barbPd4BP", // Owner
-  "5bhRYMrDkjrs9VlFFY4u", // Admin
-  "fFA8G2R2ANLbVsH00jlv", // Supervisor
-]);
+// Admin-side role names (from the shared 'roles' Firestore collection) —
+// these accounts manage the fleet/bookings and should never be able to log
+// into the customer-facing site. Driver is intentionally NOT blocked here
+// since drivers may also need customer-side access depending on how the
+// business uses that role; only Owner/Admin/Supervisor are blocked.
+// Looked up dynamically by roleID -> roles/{roleID}.roleName, so this stays
+// correct even if roleIDs ever change/differ between environments.
+const BLOCKED_ADMIN_ROLE_NAMES = new Set(["Owner", "Admin", "Supervisor"]);
+
+const isBlockedAdminRole = async (roleID) => {
+  if (!roleID) return false;
+  try {
+    const roleSnap = await db.collection("roles").doc(roleID).get();
+    if (!roleSnap.exists) return false;
+    return BLOCKED_ADMIN_ROLE_NAMES.has(roleSnap.data().roleName);
+  } catch (err) {
+    console.error("isBlockedAdminRole lookup failed:", err.message);
+    return false; // fail open — don't lock everyone out if the roles lookup itself breaks
+  }
+};
 
 const login = async (req, res) => {
   const { email, password } = req.body;
@@ -55,7 +65,7 @@ const login = async (req, res) => {
 
     // 2b. Block admin-side accounts (Owner/Admin/Supervisor) from logging
     // into the customer-facing site — they belong on the admin panel only.
-    if (userData.roleID && BLOCKED_ADMIN_ROLE_IDS.has(userData.roleID)) {
+    if (await isBlockedAdminRole(userData.roleID)) {
       return res.status(403).json({
         message: "This account is an admin account and can't be used to log in here. Please use the admin panel.",
       });
