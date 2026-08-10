@@ -26,4 +26,3 @@ router.get("/edit-requests/mine",         verifyToken, getMyEditRequests);
 router.patch("/edit-requests/:id/cancel", verifyToken, cancelEditRequest);
 
 module.exports = router;
-
