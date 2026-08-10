@@ -12,7 +12,7 @@ const {
   createEditRequest,
   getMyEditRequests,
   cancelEditRequest,
-} = require("../controllers/user/editRequest.controller");
+} = require("../controllers/editRequest/editRequest.controller");
 const verifyToken = require("../middlewares/auth.middleware");
 
 router.get("/details/:userID",        verifyToken, getUserDetails);
