@@ -1,165 +1,161 @@
+const admin = require("firebase-admin");
 const { db } = require("../../config/firebaseConnection/firebase");
-const admin  = require("firebase-admin");
 
-// Every field a customer is allowed to request an edit for, and where its
-// current value + label come from. Mirrors the ReadOnlyField entries on
-// the customer ProfilePage, and matches the admin's own EDITABLE_FIELDS /
-// EditProfileModal pattern (Account.jsx) so a single "editRequests"
-// collection + review UI (Users.jsx > Edit Request tab) works for both
-// staff and customers without any changes on the admin side.
-const FIELD_CONFIG = {
-  email:          { label: "Email",             collection: "user" },
-  phone:          { label: "Phone",              collection: "user" },
-  birthDate:      { label: "Birth Date",         collection: "userDetails" },
-  province:       { label: "Province",           collection: "userAddress" },
-  municipality:   { label: "Municipality",       collection: "userAddress" },
-  barangay:       { label: "Barangay",           collection: "userAddress" },
-  documentType:   { label: "Document Type",      collection: "userDocument" },
-  documentNumber: { label: "Document Number",    collection: "userDocument" },
+// Human-readable labels + which Firestore collection each field actually
+// lives in. Kept in the exact same shape the ADMIN frontend already reads
+// (Users.jsx → EditRequestsTab → applyProfileChanges expects
+// changes[].collection to be "user" | "userDetails" | "userAddress"),
+// so requests submitted here show up and get approved there with zero
+// changes needed on the admin side.
+//
+// NOTE: documentType/documentNumber are intentionally NOT included —
+// admin's applyProfileChanges only buckets into user/userDetails/userAddress,
+// so bundling a "userDocument" field would crash the admin's approve button.
+const FIELD_META = {
+  email:        { label: "Email",               collection: "user" },
+  phone:        { label: "Phone",                collection: "user" },
+  birthDate:    { label: "Birth Date",           collection: "userDetails" },
+  province:     { label: "Province",             collection: "userAddress" },
+  municipality: { label: "Municipality / City",  collection: "userAddress" },
+  barangay:     { label: "Barangay",             collection: "userAddress" },
 };
 
-const getCurrentValue = async (userID, field, collection) => {
-  if (collection === "user") {
-    const doc = await db.collection("user").doc(userID).get();
-    return doc.exists ? (doc.data()[field] || "") : "";
-  }
-  if (collection === "userDetails") {
-    const doc = await db.collection("userDetails").doc(userID).get();
-    return doc.exists ? (doc.data()[field] || "") : "";
-  }
-  if (collection === "userAddress") {
-    const snap = await db.collection("userAddress").where("userID", "==", userID).get();
-    const primary = snap.docs.find(d => d.data().isDefault) || snap.docs[0];
-    return primary ? (primary.data()[field] || "") : "";
-  }
-  if (collection === "userDocument") {
-    const snap = await db.collection("userDocument").where("userID", "==", userID).get();
-    const primary = snap.docs[0];
-    return primary ? (primary.data()[field] || "") : "";
-  }
-  return "";
+const toMillis = (t) => t?.toDate?.() ? t.toDate().getTime() : (t ? new Date(t).getTime() : 0);
+
+// Snapshot the user's current values right now, from the same three
+// collections — used both to fill in "oldValue" and to drop no-op changes.
+const getCurrentValues = async (userID) => {
+  const [userDoc, detailsSnap, addressSnap] = await Promise.all([
+    db.collection("user").doc(userID).get(),
+    db.collection("userDetails").where("userID", "==", userID).get(),
+    db.collection("userAddress").where("userID", "==", userID).get(),
+  ]);
+
+  const user    = userDoc.exists ? userDoc.data() : {};
+  const details = detailsSnap.docs[0]?.data() || {};
+  const addresses = addressSnap.docs.map((d) => d.data());
+  const primaryAddress = addresses.find((a) => a.isDefault) || addresses[0] || {};
+
+  return {
+    email:        user.email                || "",
+    phone:        user.phone                || "",
+    birthDate:    details.birthDate         || "",
+    province:     primaryAddress.province     || "",
+    municipality: primaryAddress.municipality || "",
+    barangay:     primaryAddress.barangay     || "",
+  };
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 // POST /api/user/edit-requests
-// body: { changes: [{ field, requestedValue }], reason? }
-// Bundles every submitted field change into ONE editRequests doc — matches
-// the admin's own EditProfileModal ("every field goes in, not just the
-// changed ones" so review is a plain old-vs-requested comparison).
-// ─────────────────────────────────────────────────────────────────────────────
-const requestEdit = async (req, res) => {
+// body: { changes: [{ field, requestedValue }], reason }
+// One pending bundle per user at a time — mirrors editRequests exactly
+// as written by the admin app's own EditProfileModal (Account.jsx),
+// just issued server-side (Admin SDK) since the customer app doesn't
+// keep a live Firebase Auth session in the browser the way admin does.
+// ─────────────────────────────────────────────────────────────
+const createEditRequest = async (req, res) => {
   const userID = req.user.userID;
   const { changes, reason } = req.body;
 
   if (!Array.isArray(changes) || changes.length === 0) {
-    return res.status(400).json({ message: "No changes submitted." });
+    return res.status(400).json({ message: "No changes were submitted." });
   }
 
   try {
-    // Only one active bundle at a time — matches the admin/staff flow
-    // ("You already have a pending edit request. Cancel it below...").
-    const existingSnap = await db.collection("editRequests")
+    const existing = await db.collection("editRequests")
       .where("userID", "==", userID)
       .where("status", "==", "pending")
-      .limit(1)
       .get();
-    if (!existingSnap.empty) {
-      return res.status(409).json({ message: "You already have a pending edit request. Cancel it first to submit different changes." });
+    if (!existing.empty) {
+      return res.status(409).json({ message: "You already have a pending edit request." });
     }
 
-    const builtChanges = [];
-    for (const c of changes) {
-      const config = FIELD_CONFIG[c.field];
-      if (!config) continue; // silently skip unknown/disallowed fields
-      const requestedValue = String(c.requestedValue ?? "").trim();
-      if (!requestedValue) continue;
+    const current = await getCurrentValues(userID);
 
-      const oldValue = await getCurrentValue(userID, c.field, config.collection);
-      builtChanges.push({
-        field: c.field,
-        label: config.label,
-        collection: config.collection,
-        oldValue,
-        newValue: requestedValue,
-      });
+    const cleanChanges = changes
+      .filter((c) => c && FIELD_META[c.field])
+      .map((c) => ({
+        field:      c.field,
+        label:      FIELD_META[c.field].label,
+        collection: FIELD_META[c.field].collection,
+        oldValue:   current[c.field] || "",
+        newValue:   (c.requestedValue || "").trim(),
+      }))
+      .filter((c) => c.newValue !== c.oldValue);
+
+    if (cleanChanges.length === 0) {
+      return res.status(400).json({ message: "No valid changes were submitted." });
     }
 
-    if (builtChanges.length === 0) {
-      return res.status(400).json({ message: "No valid changes to submit." });
-    }
-
-    const ref = db.collection("editRequests").doc();
     const now = admin.firestore.FieldValue.serverTimestamp();
-    const editRequest = {
+    const docRef = await db.collection("editRequests").add({
       userID,
-      role: "Customer",
-      status: "pending",
-      changes: builtChanges,
-      reason: reason || "",
+      role:        "Customer",
+      status:      "pending",
+      changes:     cleanChanges,
+      reason:      (reason || "").trim(),
       requestedBy: userID,
-      reviewedBy: null,
-      reviewedAt: null,
-      reviewNote: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    await ref.set(editRequest);
+      reviewedBy:  null,
+      reviewedAt:  null,
+      reviewNote:  null,
+      createdAt:   now,
+      updatedAt:   now,
+    });
 
     return res.status(201).json({
-      message: "Edit request sent. We'll notify you once it's reviewed.",
-      editRequestID: ref.id,
+      message: "Edit request sent. An admin will review it shortly.",
+      id: docRef.id,
     });
   } catch (error) {
-    console.error("requestEdit error:", error.message);
-    return res.status(500).json({ message: "Failed to submit edit request." });
+    console.error("createEditRequest error:", error);
+    return res.status(500).json({ message: "Failed to send edit request." });
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 // GET /api/user/edit-requests/mine
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 const getMyEditRequests = async (req, res) => {
   const userID = req.user.userID;
+
   try {
-    const snap = await db.collection("editRequests").where("userID", "==", userID).get();
-    const requests = snap.docs
-      .map(d => ({ id: d.id, ...d.data() }))
-      .sort((a, b) => {
-        const aT = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
-        const bT = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);
-        return bT - aT;
-      });
-    return res.status(200).json({ data: requests });
+    const snap = await db.collection("editRequests")
+      .where("userID", "==", userID)
+      .get();
+
+    const data = snap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+
+    return res.status(200).json({ data });
   } catch (error) {
-    console.error("getMyEditRequests error:", error.message);
+    console.error("getMyEditRequests error:", error);
     return res.status(500).json({ message: "Failed to fetch edit requests." });
   }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 // PATCH /api/user/edit-requests/:id/cancel
-// Customer cancels their own still-pending bundle — matches the admin's
-// handleCancelRequest (just flips status, never touches actual data).
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 const cancelEditRequest = async (req, res) => {
   const userID = req.user.userID;
-  const { id } = req.params;
+  const { id }  = req.params;
+
   try {
     const ref = db.collection("editRequests").doc(id);
-    const snap = await ref.get();
-    if (!snap.exists || snap.data().userID !== userID) {
-      return res.status(404).json({ message: "Request not found." });
-    }
-    if (snap.data().status !== "pending") {
-      return res.status(409).json({ message: `Request is already ${snap.data().status}.` });
-    }
+    const doc = await ref.get();
+
+    if (!doc.exists)                     return res.status(404).json({ message: "Edit request not found." });
+    if (doc.data().userID !== userID)    return res.status(403).json({ message: "Access denied." });
+    if (doc.data().status !== "pending") return res.status(400).json({ message: "Only pending requests can be cancelled." });
+
     await ref.update({ status: "cancelled", updatedAt: admin.firestore.FieldValue.serverTimestamp() });
     return res.status(200).json({ message: "Request cancelled." });
   } catch (error) {
-    console.error("cancelEditRequest error:", error.message);
-    return res.status(500).json({ message: "Failed to cancel request." });
+    console.error("cancelEditRequest error:", error);
+    return res.status(500).json({ message: "Failed to cancel edit request." });
   }
 };
 
-module.exports = { requestEdit, getMyEditRequests, cancelEditRequest, FIELD_CONFIG };
+module.exports = { createEditRequest, getMyEditRequests, cancelEditRequest };
