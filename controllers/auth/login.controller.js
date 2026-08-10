@@ -13,16 +13,7 @@ const { recordLogin } = require("../../utils/userLogs/userLogs.util");
 // NOT "roleName" — that mismatch was the root cause of the earlier bypass.
 const BLOCKED_ADMIN_ROLE_NAMES = new Set(["Owner", "Admin", "Supervisor"]);
 
-// Looks up the role document for a given roleID and reports whether it's
-// one of the blocked admin-side roles.
-//
-// Fail-closed by design: if the roles collection can't be read, or the
-// roleID doesn't resolve to a role doc, we treat it as blocked rather than
-// silently letting the request through. A user with a roleID is expected
-// to have a matching role doc — if that lookup breaks, that's a data/
-// permissions problem to fix, not something we should fail open on for a
-// security-relevant check. (Accounts with no roleID at all are unaffected
-// by this — they never enter this check.)
+
 const isBlockedAdminRole = async (roleID) => {
   try {
     const roleSnap = await db.collection("roles").doc(roleID).get();
