@@ -8,11 +8,7 @@ const {
   updateFullProfile,
   updateAvatar,
 } = require("../controllers/user/user.controller");
-const {
-  createEditRequest,
-  getMyEditRequests,
-  cancelEditRequest,
-} = require("../controllers/user/editRequest.controller");
+const { requestEdit, getMyEditRequests, cancelEditRequest } = require("../controllers/editRequest/editRequest.controller");
 const verifyToken = require("../middlewares/auth.middleware");
 
 router.get("/details/:userID",        verifyToken, getUserDetails);
@@ -21,8 +17,9 @@ router.get("/profile/:userID",        verifyToken, getFullProfile);
 router.put("/profile/:userID",        verifyToken, updateFullProfile);
 router.post("/profile/:userID/avatar", verifyToken, updateAvatar);
 
-router.post("/edit-requests",             verifyToken, createEditRequest);
-router.get("/edit-requests/mine",         verifyToken, getMyEditRequests);
+// Locked-field edit requests (bundled — matches admin's editRequests schema)
+router.post("/edit-requests",           verifyToken, requestEdit);
+router.get("/edit-requests/mine",       verifyToken, getMyEditRequests);
 router.patch("/edit-requests/:id/cancel", verifyToken, cancelEditRequest);
 
 module.exports = router;
