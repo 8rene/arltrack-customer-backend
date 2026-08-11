@@ -1,16 +1,51 @@
-const { db }      = require("../../config/firebaseConnection/firebase");
+const { db, auth } = require("../../config/firebaseConnection/firebase");
 const generateOTP = require("../../utils/generateOTP");
+const { isBlockedAdminRole } = require("../../utils/roles/role.util");
 
 const OTP_EXPIRY_MS  = 5 * 60 * 1000;  // 5 minutes
 const OTP_COOLDOWN_MS = 60 * 1000;     // 1 minute cooldown between requests
 const MAX_ATTEMPTS   = 5;              // max wrong guesses before lockout
 
 // POST /api/auth/send-otp
+// body: { email, name, template_id, purpose }
+//
+// `purpose` distinguishes the two flows that share this endpoint:
+//   - "signup" (default/omitted) — the email is EXPECTED not to exist yet.
+//     No account/role check here; that's what signup itself validates.
+//   - "reset"  — forgot-password flow. The email MUST already belong to a
+//     real, non-admin-side account, or we don't send an OTP at all. This
+//     both avoids wasting OTP emails on addresses that were never
+//     registered, and stops Owner/Admin/Supervisor accounts from using
+//     the customer-side forgot-password flow to reset their password —
+//     same accounts that are blocked from customer login (login.controller.js).
+//
+// Message is intentionally generic either way ("No account found with
+// this email") so a reset attempt against a real staff email doesn't
+// reveal that the email belongs to an admin-side account.
 const sendOTP = async (req, res) => {
-  const { email, name, template_id } = req.body;
+  const { email, name, template_id, purpose } = req.body;
   if (!email) return res.status(400).json({ message: "Email is required." });
 
   try {
+    if (purpose === "reset") {
+      let firebaseUser;
+      try {
+        firebaseUser = await auth.getUserByEmail(email);
+      } catch (err) {
+        if (err.code === "auth/user-not-found") {
+          return res.status(404).json({ message: "No account found with this email." });
+        }
+        throw err;
+      }
+
+      const userDoc = await db.collection("user").doc(firebaseUser.uid).get();
+      const roleID  = userDoc.exists ? userDoc.data().roleID : null;
+
+      if (roleID && await isBlockedAdminRole(roleID, db)) {
+        return res.status(404).json({ message: "No account found with this email." });
+      }
+    }
+
     // Bug 4 fix: cooldown check — block if OTP was requested less than 1 minute ago
     const existing = await db.collection("otpCodes").doc(email).get();
     if (existing.exists) {
@@ -30,6 +65,7 @@ const sendOTP = async (req, res) => {
     // Store OTP in Firestore with expiry, cooldown timestamp, and attempt counter
     await db.collection("otpCodes").doc(email).set({
       otp,
+      purpose:    purpose === "reset" ? "reset" : "signup",
       createdAt:  new Date(),
       expiresAt:  new Date(Date.now() + OTP_EXPIRY_MS),
       attempts:   0,

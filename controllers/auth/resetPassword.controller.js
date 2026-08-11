@@ -1,4 +1,5 @@
 const { db, auth } = require("../../config/firebaseConnection/firebase");
+const { isBlockedAdminRole } = require("../../utils/roles/role.util");
 
 const MAX_ATTEMPTS = 5;
 
@@ -60,6 +61,19 @@ const resetPassword = async (req, res) => {
         return res.status(404).json({ message: "No account found with this email." });
       }
       throw err;
+    }
+
+    // 2a. Block admin-side accounts (Owner/Admin/Supervisor) from resetting
+    // their password through the customer-facing site — mirrors the same
+    // block in login.controller.js. This is checked again here (not just
+    // at send-otp) since `purpose` on send-otp is client-supplied and
+    // shouldn't be the only thing standing between a blocked role and a
+    // password reset. Generic message, same reasoning as login.
+    const userDoc = await db.collection("user").doc(firebaseUser.uid).get();
+    const roleID  = userDoc.exists ? userDoc.data().roleID : null;
+    if (roleID && await isBlockedAdminRole(roleID, db)) {
+      await otpRef.delete();
+      return res.status(404).json({ message: "No account found with this email." });
     }
 
     // 3. Update the password
