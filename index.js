@@ -25,6 +25,7 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
+      console.error(`CORS blocked origin: "${origin}" — not in ALLOWED_ORIGINS: [${allowedOrigins.join(", ")}]`);
       callback(new Error(`CORS blocked: ${origin}`));
     }
   },
