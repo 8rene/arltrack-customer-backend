@@ -1,5 +1,6 @@
 const admin = require("firebase-admin");
 const { db } = require("../../config/firebaseConnection/firebase");
+const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 
 // Human-readable labels + which Firestore collection each field actually
 // lives in. Kept in the exact same shape the ADMIN frontend already reads
@@ -101,6 +102,12 @@ const createEditRequest = async (req, res) => {
       reviewNote:  null,
       createdAt:   now,
       updatedAt:   now,
+    });
+
+    recordAudit({
+      action: "create",
+      description: `Edit request submitted by customer for: ${cleanChanges.map((c) => c.label).join(", ")}.`,
+      userID,
     });
 
     return res.status(201).json({

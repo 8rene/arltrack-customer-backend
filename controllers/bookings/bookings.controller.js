@@ -2,6 +2,7 @@ const { db, bucket } = require("../../config/firebaseConnection/firebase");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require("../../utils/pricing");
+const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
@@ -46,7 +47,7 @@ const getMimeType = (base64) => {
 // computing pricing itself.
 // ─────────────────────────────────────────────────────────────────────────────
 const getBookingQuote = async (req, res) => {
-  const { carID, duration, startDate, startTime, endDate, endTime, destination, driveType, paymentAmount } = req.body;
+  const { carID, duration, startDate, startTime, endDate, endTime, destination, destinationCity, destinationProvince, driveType, paymentAmount } = req.body;
 
   if (!carID || !duration) {
     return res.status(400).json({ message: "carID and duration are required." });
@@ -58,12 +59,14 @@ const getBookingQuote = async (req, res) => {
     const startDateTime = startDate && startTime ? new Date(`${startDate}T${startTime}:00`) : null;
     const endDateTime    = endDate && endTime     ? new Date(`${endDate}T${endTime}:00`)     : null;
 
-    const fees = computeBookingFees({
+    const fees = await computeBookingFees({
       pricePerDay,
       startDateTime,
       endDateTime,
       durationType: duration,
       destination,
+      destinationCity,
+      destinationProvince,
       driveType,
     });
 
@@ -117,6 +120,7 @@ const createBooking = async (req, res) => {
     destinationLat,
     destinationLng,
     destinationCity,
+    destinationProvince,
     extraDestinations,
     // screenshot handled separately (base64 or URL)
     proofBase64,
@@ -163,12 +167,14 @@ const createBooking = async (req, res) => {
 
     // ── Authoritative fee calculation — never trust client-sent totals ──
     const pricePerDay = await getPricePerDay(carID, duration);
-    const fees = computeBookingFees({
+    const fees = await computeBookingFees({
       pricePerDay,
       startDateTime,
       endDateTime,
       durationType: duration,
       destination,
+      destinationCity,
+      destinationProvince,
       driveType,
     });
     const { payNow, methodOfPayment: computedMethod } = computePaymentSplit(fees.grandTotal, paymentAmount);
@@ -627,6 +633,12 @@ const cancelBooking = async (req, res) => {
       // than fail the whole request over the session-side mirror.
       console.error("cancelBooking: failed to sync bookingSession:", sessionErr.message);
     }
+
+    recordAudit({
+      action: "update",
+      description: `Booking ${bookingID} cancelled by customer. Reason: ${reason || "No reason given."}`,
+      userID,
+    });
 
     return res.status(200).json({ message: "Booking cancelled successfully." });
   } catch (error) {
