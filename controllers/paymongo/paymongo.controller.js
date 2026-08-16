@@ -1,6 +1,7 @@
 const axios = require("axios");
 const { db } = require("../../config/firebaseConnection/firebase");
 const { computePaymentSplit } = require("../../utils/pricing");
+const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 
 // ─── PayMongo base config ────────────────────────────────────────────────────
 const PAYMONGO_SECRET = process.env.PAYMONGO_SECRET_KEY;
@@ -228,6 +229,12 @@ const handleWebhook = async (req, res) => {
         console.log("[PayMongo Webhook] ✅ Payment settled for booking:", bID, "paymongoPaymentID:", paymongoPaymentID);
       }
 
+      recordAudit({
+        action: "update",
+        description: `Payment ${paymentID || sessionID} settled (paid)${bID ? ` for booking ${bID}` : ""}.`,
+        userID: payment.userID || null,
+      });
+
       return res.status(200).json({ received: true });
     }
 
@@ -309,9 +316,19 @@ const handleWebhook = async (req, res) => {
           }
         }
         console.log("[PayMongo Webhook] ✅ Refund succeeded for refundRequest:", refundReq.refundRequestID);
+        recordAudit({
+          action: "update",
+          description: `Refund ${refundReq.refundRequestID} succeeded for payment ${refundReq.paymentID}.`,
+          userID: refundReq.userID || null,
+        });
       } else {
         await refundReqDoc.ref.update({ status: "Failed", updatedAt: now });
         console.log("[PayMongo Webhook] ❌ Refund failed for refundRequest:", refundReq.refundRequestID);
+        recordAudit({
+          action: "update",
+          description: `Refund ${refundReq.refundRequestID} failed for payment ${refundReq.paymentID}.`,
+          userID: refundReq.userID || null,
+        });
       }
 
       return res.status(200).json({ received: true });
@@ -502,6 +519,12 @@ const requestRefund = async (req, res) => {
     };
 
     await refundRef.set(refundRequest);
+
+    recordAudit({
+      action: "create",
+      description: `Refund requested by customer for payment ${paymentID} (reason: ${reason}).`,
+      userID,
+    });
 
     return res.status(201).json({
       message: "Refund request sent. We'll notify you once it's reviewed.",

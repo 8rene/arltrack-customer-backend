@@ -423,6 +423,12 @@ const createBooking = async (req, res) => {
       }
     }
 
+    recordAudit({
+      action: "create",
+      description: `Booking ${bookingID} created by customer for car ${carID}.`,
+      userID,
+    });
+
     return res.status(201).json({
       message:   "Booking confirmed!",
       bookingID,

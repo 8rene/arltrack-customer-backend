@@ -1,6 +1,7 @@
 const { auth, db } = require("../../config/firebaseConnection/firebase");
 const jwt          = require("jsonwebtoken");
 const { recordLogin } = require("../../utils/userLogs/userLogs.util");
+const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 
 // See login.controller.js for details — same admin roleIDs are blocked here.
 const BLOCKED_ADMIN_ROLE_IDS = new Set([
@@ -41,9 +42,15 @@ const googleLogin = async (req, res) => {
     // the admin-side login (auth.controller.js) and the email/password
     // login above (login.controller.js).
     if (userData.status && ["inactive", "locked"].includes(userData.status.toLowerCase())) {
+      const blockedStatus = userData.status.toLowerCase();
+      recordAudit({
+        action: "auth",
+        description: `Blocked Google login attempt: ${userData.email || userID} (status: ${blockedStatus}).`,
+        userID,
+      });
       return res.status(403).json({
         message:
-          userData.status.toLowerCase() === "locked"
+          blockedStatus === "locked"
             ? "Your account is pending approval. Please wait for admin verification."
             : "Your account has been deactivated. Please contact support.",
       });
