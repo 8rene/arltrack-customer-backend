@@ -36,10 +36,16 @@ const googleLogin = async (req, res) => {
     const userData = userQuery.docs[0].data();
     const userID   = userQuery.docs[0].id; // original UID from email signup
 
-    // 2a. Check if account is pending admin approval
-    if (userData.status === "locked") {
+    // 2a. Check if account is pending admin approval, or has been
+    // deactivated by an admin. Mirrors the same status check enforced on
+    // the admin-side login (auth.controller.js) and the email/password
+    // login above (login.controller.js).
+    if (userData.status && ["inactive", "locked"].includes(userData.status.toLowerCase())) {
       return res.status(403).json({
-        message: "Your account is pending approval. Please wait for admin verification.",
+        message:
+          userData.status.toLowerCase() === "locked"
+            ? "Your account is pending approval. Please wait for admin verification."
+            : "Your account has been deactivated. Please contact support.",
       });
     }
 

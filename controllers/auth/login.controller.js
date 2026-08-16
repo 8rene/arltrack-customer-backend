@@ -63,10 +63,15 @@ const login = async (req, res) => {
 
     const userData = userDoc.data();
 
-    // 2a. Check if account is pending admin approval
-    if (userData.status === "locked") {
+    // 2a. Check if account is pending admin approval, or has been
+    // deactivated by an admin. Mirrors the same status check enforced on
+    // the admin-side login (auth.controller.js).
+    if (userData.status && ["inactive", "locked"].includes(userData.status.toLowerCase())) {
       return res.status(403).json({
-        message: "Your account is pending approval. Please wait for admin verification.",
+        message:
+          userData.status.toLowerCase() === "locked"
+            ? "Your account is pending approval. Please wait for admin verification."
+            : "Your account has been deactivated. Please contact support.",
       });
     }
 
