@@ -2,7 +2,7 @@ const axios = require("axios");
 const { db }  = require("../../config/firebaseConnection/firebase");
 const jwt     = require("jsonwebtoken");
 const { recordLogin } = require("../../utils/userLogs/userLogs.util");
-const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
+const { checkAccountStatus } = require("../../utils/accountStatus/accountStatus.util");
 
 // Admin-side role NAMES (from the shared 'roles' Firestore collection) —
 // these accounts manage the fleet/bookings and should never be able to log
@@ -65,21 +65,12 @@ const login = async (req, res) => {
     const userData = userDoc.data();
 
     // 2a. Check if account is pending admin approval, or has been
-    // deactivated by an admin. Mirrors the same status check enforced on
-    // the admin-side login (auth.controller.js).
-    if (userData.status && ["inactive", "locked"].includes(userData.status.toLowerCase())) {
-      const blockedStatus = userData.status.toLowerCase();
-      recordAudit({
-        action: "auth",
-        description: `Blocked login attempt: ${userData.email || uid} (status: ${blockedStatus}).`,
-        userID: uid,
-      });
-      return res.status(403).json({
-        message:
-          blockedStatus === "locked"
-            ? "Your account is pending approval. Please wait for admin verification."
-            : "Your account has been deactivated. Please contact support.",
-      });
+    // deactivated by an admin. Single source of truth in
+    // accountStatus.util.js — shared with google.controller.js — so this
+    // can't silently drift out of sync between login paths again.
+    const statusBlock = checkAccountStatus(userData, uid);
+    if (statusBlock) {
+      return res.status(statusBlock.httpStatus).json({ message: statusBlock.message });
     }
 
     // 2b. Block admin-side accounts (Owner/Admin/Supervisor) from logging

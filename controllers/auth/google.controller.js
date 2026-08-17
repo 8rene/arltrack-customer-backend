@@ -1,7 +1,7 @@
 const { auth, db } = require("../../config/firebaseConnection/firebase");
 const jwt          = require("jsonwebtoken");
 const { recordLogin } = require("../../utils/userLogs/userLogs.util");
-const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
+const { checkAccountStatus } = require("../../utils/accountStatus/accountStatus.util");
 
 // See login.controller.js for details — same admin roleIDs are blocked here.
 const BLOCKED_ADMIN_ROLE_IDS = new Set([
@@ -38,22 +38,12 @@ const googleLogin = async (req, res) => {
     const userID   = userQuery.docs[0].id; // original UID from email signup
 
     // 2a. Check if account is pending admin approval, or has been
-    // deactivated by an admin. Mirrors the same status check enforced on
-    // the admin-side login (auth.controller.js) and the email/password
-    // login above (login.controller.js).
-    if (userData.status && ["inactive", "locked"].includes(userData.status.toLowerCase())) {
-      const blockedStatus = userData.status.toLowerCase();
-      recordAudit({
-        action: "auth",
-        description: `Blocked Google login attempt: ${userData.email || userID} (status: ${blockedStatus}).`,
-        userID,
-      });
-      return res.status(403).json({
-        message:
-          blockedStatus === "locked"
-            ? "Your account is pending approval. Please wait for admin verification."
-            : "Your account has been deactivated. Please contact support.",
-      });
+    // deactivated by an admin. Single source of truth in
+    // accountStatus.util.js — shared with login.controller.js — so this
+    // can't silently drift out of sync between login paths again.
+    const statusBlock = checkAccountStatus(userData, userID, { logPrefix: "Blocked Google login attempt" });
+    if (statusBlock) {
+      return res.status(statusBlock.httpStatus).json({ message: statusBlock.message });
     }
 
     // 2b. Block admin-side accounts (Owner/Admin/Supervisor) from logging
