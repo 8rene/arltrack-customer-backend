@@ -10,6 +10,16 @@ const cache = {
   barangays:      {},   // keyed by municipalityID
 };
 
+// Separate, short-lived cache for the store location — unlike the PSGC
+// data above, this CAN change any time an admin edits it on the admin
+// app's Settings page, so it isn't cached indefinitely. A short TTL still
+// avoids hitting Firestore on every single Booking.jsx/BookingDetails.jsx
+// page load, while keeping an admin's edit visible within a minute
+// without needing a redeploy or server restart.
+let storeLocationCache = null;
+let storeLocationCacheAt = 0;
+const STORE_LOCATION_CACHE_TTL_MS = 60 * 1000;
+
 /**
  * GET /api/location/regions
  * Returns all regions from Firestore.
@@ -203,4 +213,49 @@ const getPostalCode = async (req, res) => {
   }
 };
 
-module.exports = { getRegions, getProvinces, getMunicipalities, getBarangays, getPostalCode };
+/**
+ * GET /api/location/store
+ * Returns the in-store pickup location (name + coordinates), configured
+ * by an Owner/Admin on the admin app's Settings page → Store Location &
+ * Name. Reads the same `systemSettings` Firestore collection the admin
+ * backend writes to directly — same Firebase project, no admin-backend
+ * round trip needed.
+ *
+ * { storeName: "", storeLat: null, storeLng: null } (all unset/null) means
+ * no store location has been configured yet — the customer app's
+ * "Pick up in-store" option should stay hidden in that case, exactly like
+ * the old STORE_CONFIGURED env-var check it replaces.
+ */
+const getStoreLocation = async (req, res) => {
+  try {
+    const now = Date.now();
+    if (storeLocationCache && now - storeLocationCacheAt < STORE_LOCATION_CACHE_TTL_MS) {
+      return res.json(storeLocationCache);
+    }
+
+    const snapshot = await db
+      .collection("systemSettings")
+      .orderBy("createdAt", "desc")
+      .limit(1)
+      .get();
+
+    const doc = snapshot.empty ? {} : snapshot.docs[0].data();
+    const result = {
+      storeName: doc.storeName || "",
+      storeLat: typeof doc.storeLat === "number" ? doc.storeLat : null,
+      storeLng: typeof doc.storeLng === "number" ? doc.storeLng : null,
+    };
+
+    storeLocationCache = result;
+    storeLocationCacheAt = now;
+    res.json(result);
+  } catch (error) {
+    console.error("getStoreLocation error:", error);
+    // Fail safe rather than fail loud — a broken store-location lookup
+    // shouldn't block the whole booking page from loading. The frontend
+    // treats this the same as "not configured" (hides the in-store option).
+    res.json({ storeName: "", storeLat: null, storeLng: null });
+  }
+};
+
+module.exports = { getRegions, getProvinces, getMunicipalities, getBarangays, getPostalCode, getStoreLocation };
