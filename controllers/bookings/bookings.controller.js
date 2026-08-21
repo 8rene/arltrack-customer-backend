@@ -85,6 +85,7 @@ const createBooking = async (req, res) => {
   const {
     carID,
     serviceType,
+    serviceTypeID,
     duration,
     startDate,
     startTime,
@@ -318,6 +319,11 @@ const createBooking = async (req, res) => {
       carID:         carID       || "",
       userID:        userID      || "",
       serviceType:   serviceType || "",
+      // FK into the serviceType collection — used by admin to resolve the
+      // display name (see admin-backend/services/booking/booking.service.js's
+      // resolveServiceType()). null for "Others", since that's free text
+      // typed by the customer with no matching serviceType doc.
+      serviceTypeID: serviceTypeID || null,
       startDateTime,
       endDateTime,
       totalDays:     fees.days || 1,
