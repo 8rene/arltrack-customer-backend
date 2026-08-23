@@ -2,6 +2,7 @@ const axios = require("axios");
 const { db } = require("../../config/firebaseConnection/firebase");
 const { computePaymentSplit } = require("../../utils/pricing");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
+const { recordTransactionLog } = require("../../utils/transactionLogs/transactionLogs.util");
 
 // ─── PayMongo base config ────────────────────────────────────────────────────
 const PAYMONGO_SECRET = process.env.PAYMONGO_SECRET_KEY;
@@ -235,6 +236,18 @@ const handleWebhook = async (req, res) => {
         userID: payment.userID || null,
       });
 
+      recordTransactionLog({
+        bookingID: bID,
+        paymentID: payment.paymentID || paymentID,
+        userID: payment.userID || null,
+        type: "Payment",
+        amount: Number(payment.amount) || 0,
+        status: "Success",
+        paymentMethod: payment.paymentMethod || "—",
+        referenceNumber: payment.referenceNumber || "—",
+        description: `Payment settled via PayMongo${bID ? ` for booking ${bID}` : ""}.`,
+      });
+
       return res.status(200).json({ received: true });
     }
 
@@ -321,6 +334,16 @@ const handleWebhook = async (req, res) => {
           description: `Refund ${refundReq.refundRequestID} succeeded for payment ${refundReq.paymentID}.`,
           userID: refundReq.userID || null,
         });
+        recordTransactionLog({
+          bookingID: refundReq.bookingID,
+          paymentID: refundReq.paymentID,
+          refundRequestID: refundReq.refundRequestID,
+          userID: refundReq.userID || null,
+          type: "Refund",
+          amount: refundReq.amount || 0,
+          status: "Refunded",
+          description: `Refund confirmed by PayMongo for payment ${refundReq.paymentID}.`,
+        });
       } else {
         await refundReqDoc.ref.update({ status: "Failed", updatedAt: now });
         console.log("[PayMongo Webhook] ❌ Refund failed for refundRequest:", refundReq.refundRequestID);
@@ -328,6 +351,16 @@ const handleWebhook = async (req, res) => {
           action: "update",
           description: `Refund ${refundReq.refundRequestID} failed for payment ${refundReq.paymentID}.`,
           userID: refundReq.userID || null,
+        });
+        recordTransactionLog({
+          bookingID: refundReq.bookingID,
+          paymentID: refundReq.paymentID,
+          refundRequestID: refundReq.refundRequestID,
+          userID: refundReq.userID || null,
+          type: "Refund",
+          amount: refundReq.amount || 0,
+          status: "Failed",
+          description: `PayMongo reported this refund as failed for payment ${refundReq.paymentID}.`,
         });
       }
 
