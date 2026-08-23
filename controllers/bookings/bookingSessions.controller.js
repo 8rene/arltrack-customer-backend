@@ -92,7 +92,7 @@ const getBookingDetails = async (req, res) => {
     let carName  = "Unknown Vehicle";
     let carImage = "";
     if (booking.carID) {
-      const carDoc = await db.collection("car").doc(booking.carID).get();
+      const carDoc = await db.collection("cars").doc(booking.carID).get();
       if (carDoc.exists) {
         const car = carDoc.data();
         const [brandDoc, modelDoc] = await Promise.all([
@@ -184,7 +184,7 @@ const getBookingDetails = async (req, res) => {
     console.error("getBookingDetails error:", error);
     return res.status(500).json({ message: "Failed to fetch booking details." });
   }
-  
+
 };
 
 module.exports = { getBookingTraceback, getBookingDetails };
