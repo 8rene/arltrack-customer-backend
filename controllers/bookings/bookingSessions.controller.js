@@ -184,6 +184,7 @@ const getBookingDetails = async (req, res) => {
     console.error("getBookingDetails error:", error);
     return res.status(500).json({ message: "Failed to fetch booking details." });
   }
+  
 };
 
 module.exports = { getBookingTraceback, getBookingDetails };
