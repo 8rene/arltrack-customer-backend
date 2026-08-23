@@ -84,6 +84,33 @@ const getBookingDetails = async (req, res) => {
     const booking = await loadOwnedBooking(req, res, bookingID);
     if (!booking) return; // response already sent
 
+    // The booking doc itself only stores carID — carName/carImage never
+    // lived there. getUserBookings resolves this the same way (car doc ->
+    // brandID/modelID -> brand/model collections, + carImages by carID);
+    // this endpoint was reading booking.carName/booking.carImage directly,
+    // which never existed, hence "Unknown Vehicle" / no image every time.
+    let carName  = "Unknown Vehicle";
+    let carImage = "";
+    if (booking.carID) {
+      const carDoc = await db.collection("car").doc(booking.carID).get();
+      if (carDoc.exists) {
+        const car = carDoc.data();
+        const [brandDoc, modelDoc] = await Promise.all([
+          car.brandID ? db.collection("brand").doc(car.brandID).get() : null,
+          car.modelID ? db.collection("model").doc(car.modelID).get() : null,
+        ]);
+        const brand = brandDoc?.exists ? (brandDoc.data().brandName || "") : "";
+        const model = modelDoc?.exists ? (modelDoc.data().modelName || "") : "";
+        carName = `${brand} ${model}`.trim() || "Unknown Vehicle";
+      }
+      const imgSnap = await db.collection("carImages")
+        .where("carID", "==", booking.carID)
+        .where("isPrimary", "==", true)
+        .limit(1)
+        .get();
+      if (!imgSnap.empty) carImage = imgSnap.docs[0].data().imageURL || "";
+    }
+
     const sessionSnap = await db.collection("bookingSessions")
       .where("bookingID", "==", bookingID)
       .limit(1)
@@ -132,15 +159,19 @@ const getBookingDetails = async (req, res) => {
       booking: {
         bookingID,
         carID:          booking.carID          || null,
-        carName:        booking.carName        || "",
-        carImage:       booking.carImage       || "",
+        carName,
+        carImage,
         serviceType:    booking.serviceType    || "",
         status:         booking.status         || "pending",
         modeOfDriving:  booking.modeOfDriving  || "",
         startDateTime:  booking.startDateTime  || null,
         endDateTime:    booking.endDateTime    || null,
         totalDays:      booking.totalDays      || 1,
-        totalFee:       booking.totalFee       || 0,
+        // The booking doc's own totalFee is always 0 — the real total only
+        // ever lives on the payment record's `amount` (see getUserBookings,
+        // which does the exact same fallback). Fall back to 0 only if
+        // there's genuinely no payment yet.
+        totalFee:       payment?.amount        || booking.totalFee || 0,
       },
       // Pins — null if this booking predates the coordinate-capture change,
       // or if the customer typed an address without using the map.
