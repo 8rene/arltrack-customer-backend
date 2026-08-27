@@ -1,7 +1,7 @@
 const axios = require("axios");
 const { db }  = require("../../config/firebaseConnection/firebase");
 const jwt     = require("jsonwebtoken");
-const { recordLogin } = require("../../utils/userLogs/userLogs.util");
+const { createSessionLog, expireStaleSessionsForUser } = require("../../utils/sessionLogs/sessionLogs.util");
 const { checkAccountStatus } = require("../../utils/accountStatus/accountStatus.util");
 
 // Admin-side role NAMES (from the shared 'roles' Firestore collection) —
@@ -96,9 +96,14 @@ const login = async (req, res) => {
       { expiresIn: "1d" }
     );
 
-    // Log this session for the admin's User Logs page — fire without
+    // Close out any of this account's own sessions that never got an
+    // explicit logout (tab closed before the token expired client-side) —
+    // catches it right away instead of waiting for the nightly sweep.
+    expireStaleSessionsForUser(uid);
+
+    // Log this session for the admin's Session Logs page — fire without
     // blocking the response; a logging hiccup should never fail a login.
-    recordLogin(uid, userData.username || "");
+    createSessionLog(uid, userData.username || "");
 
     return res.status(200).json({
       message: "Login successful",

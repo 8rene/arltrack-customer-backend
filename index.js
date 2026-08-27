@@ -13,6 +13,7 @@ const reviewsRoutes   = require("./routes/reviews.routes");
 const locationRoutes  = require("./routes/location.routes");
 const adminRoutes     = require("./routes/admin.routes");
 const paymongoRoutes  = require("./routes/paymongo.routes"); // ← NEW
+const cronRoutes      = require("./routes/cron.routes"); // ← NEW
 
 const app = express();
 
@@ -49,6 +50,7 @@ app.use("/api/reviews",   reviewsRoutes);
 app.use("/api/location",  locationRoutes);
 app.use("/api/admin",     adminRoutes);
 app.use("/api/paymongo",  paymongoRoutes); // ← NEW
+app.use("/api/cron",      cronRoutes); // ← NEW
 
 // Firebase connection test — only runs in local development
 if (process.env.NODE_ENV !== "production") {

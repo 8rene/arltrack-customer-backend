@@ -209,6 +209,17 @@ const handleWebhook = async (req, res) => {
       const payment    = paymentDoc.data();
       const bID        = payment.bookingID;
 
+      // getPaymentStatus (the poll a customer's browser hits when it's
+      // redirected back from PayMongo's checkout page) can win the race
+      // and already mark this "paid" before the webhook arrives. If that
+      // already happened, skip straight to acknowledging the event —
+      // updating again is harmless, but logging again would double-count
+      // this payment in Transaction Logs.
+      if (payment.status === "paid") {
+        console.log("[PayMongo Webhook] payment already marked paid (handled via status poll) — skipping duplicate log for:", bID);
+        return res.status(200).json({ received: true });
+      }
+
       // The checkout_session payload embeds the underlying PayMongo payment
       // object(s) under attributes.payments — that payment's own `id` is
       // what the Refunds API needs (POST /v1/refunds requires payment_id,
@@ -415,6 +426,30 @@ const getPaymentStatus = async (req, res) => {
             paidAt: now,
             updatedAt: now,
             paymongoPaymentID: paidPayment.id,
+          });
+
+          // This poll can win the race against the webhook — the browser
+          // redirect back from PayMongo's checkout page often arrives
+          // before PayMongo's own webhook delivery does. Since this is the
+          // only other place a payment gets flipped to "paid", it has to
+          // log the transaction itself too, or a payment settled this way
+          // never appears in Transaction Logs at all (the webhook handler
+          // is the only other place that calls recordTransactionLog, and
+          // it has no way of knowing this already happened).
+          recordAudit({
+            action: "update",
+            description: `Payment ${paymentID} settled (paid)${p.bookingID ? ` for booking ${p.bookingID}` : ""} — confirmed via status poll.`,
+            userID: p.userID || null,
+          });
+
+          recordTransactionLog({
+            bookingID: p.bookingID,
+            paymentID: p.paymentID || paymentID,
+            userID: p.userID || null,
+            type: "Payment",
+            amount: Number(p.amount) || 0,
+            status: "Success",
+            description: `Payment confirmed via status poll (checkout_session ${p.paymongoSessionID}).`,
           });
 
           return res.status(200).json({ status: "paid", bookingID: p.bookingID });

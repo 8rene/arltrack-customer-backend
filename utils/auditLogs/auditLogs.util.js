@@ -3,13 +3,13 @@ const admin  = require("firebase-admin");
 
 // Matches the 'auditLogs' collection the admin panel already reads/writes
 // (admin-backend/services/auditLogs/auditLogs.service.js):
-//   { action, description, userID, createdAt }
+//   { auditLogsID, action, description, userID, createdAt }
 //
-// Until now only the admin frontend ever wrote here (car status changes,
-// discount edits, from Fleet.jsx / Payments.jsx). This is the first writer
-// on the customer side — for customer-initiated actions that are neither
-// a login/logout session (userLogs) nor a money event (transactionLogs),
-// e.g. booking cancellations and profile edit requests.
+// For customer-initiated actions that are neither a login/logout session
+// (sessionLogs) nor a money event (transactionLogs) — e.g. booking
+// cancellations and profile edit requests. Blocked login attempts used to
+// be logged here too; moved to sessionLogs to match the admin-side design
+// (all login-related activity, successful or not, lives in one place).
 //
 // action must be one of the same set the admin's createAuditLog validates:
 const VALID_ACTIONS = ["create", "update", "delete", "export", "auth", "system"];
@@ -27,7 +27,9 @@ const recordAudit = async ({ action, description, userID = null }) => {
       return null;
     }
 
-    const ref = await db.collection("auditLogs").add({
+    const ref = db.collection("auditLogs").doc();
+    await ref.set({
+      auditLogsID: ref.id,
       action,
       description,
       userID,

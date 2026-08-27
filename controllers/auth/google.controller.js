@@ -1,6 +1,6 @@
 const { auth, db } = require("../../config/firebaseConnection/firebase");
 const jwt          = require("jsonwebtoken");
-const { recordLogin } = require("../../utils/userLogs/userLogs.util");
+const { createSessionLog, expireStaleSessionsForUser } = require("../../utils/sessionLogs/sessionLogs.util");
 const { checkAccountStatus } = require("../../utils/accountStatus/accountStatus.util");
 
 // See login.controller.js for details — same admin roleIDs are blocked here.
@@ -66,7 +66,8 @@ const googleLogin = async (req, res) => {
       { expiresIn: "1d" }
     );
 
-    recordLogin(userID, userData.username || "");
+    expireStaleSessionsForUser(userID);
+    createSessionLog(userID, userData.username || "");
 
     return res.status(200).json({
       message: "Login successful",
