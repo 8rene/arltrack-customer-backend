@@ -489,6 +489,17 @@ const VALID_REFUND_REASONS = [
   "Other",
 ];
 
+// Same role IDs as bookings.controller.js's CANCELLATION_APPROVER_ROLE_IDS /
+// admin-backend/utils/roles/role.util.js — kept as a local literal here
+// since this is a separate deployable app and can't import that file
+// directly. Keep these lists in sync by hand if the roles collection's
+// doc IDs ever change.
+const STAFF_NOTIFY_ROLE_IDS = [
+  "1BX4V7M43t6barbPd4BP", // Owner
+  "5bhRYMrDkjrs9VlFFY4u", // Admin
+  "fFA8G2R2ANLbVsH00jlv", // Supervisor
+];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/paymongo/refunds
 // Customer submits a refund request for one of their own paid payments —
@@ -596,27 +607,45 @@ const requestRefund = async (req, res) => {
       userID,
     });
 
-    // Written directly here rather than relying on the admin backend to
-    // notice this via a Firestore watcher — the admin backend runs as a
-    // Vercel serverless function (app.listen + @vercel/node), which does
-    // NOT keep a persistent process alive to run onSnapshot() listeners
-    // reliably between requests. Writing the notification synchronously,
-    // in the same request that creates the refund request, has no such
-    // dependency — it either succeeds here or it doesn't, same as any
-    // other write in this function. Matches the exact document shape
-    // admin-backend/services/notification/notification.service.js
+    // ── Notify every Owner/Admin/Supervisor — one doc per person ──
+    // Fan-out, not a single shared doc: each staff member gets their own
+    // isRead/dismiss state, same pattern as requestCancellation() in
+    // bookings.controller.js. Written directly here rather than relying
+    // on the admin backend's (now-removed) userWatcher.js/bookingWatcher.js
+    // to notice via onSnapshot() — the admin backend runs as a Vercel
+    // serverless function, which doesn't keep a persistent process alive
+    // to run watchers reliably between requests. Matches the exact
+    // document shape admin-backend/services/notification/notification.service.js
     // creates, so the existing bell UI needs no changes to read it.
-    db.collection("notifications").add({
-      type: "refund_request",
-      refID: refundRef.id,
-      refCollection: "refundRequests",
-      title: "Refund Request",
-      message: `A refund request for ₱${Number(amountPaid).toLocaleString()} is awaiting review.`,
-      isRead: false,
-      status: "active",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      resolvedAt: null,
-    }).catch((err) => console.error("[requestRefund] Failed to write notification:", err.message));
+    try {
+      const staffSnap = await db.collection("user")
+        .where("roleID", "in", STAFF_NOTIFY_ROLE_IDS)
+        .get();
+
+      const batch = db.batch();
+      staffSnap.forEach((staffDoc) => {
+        const notifRef = db.collection("notifications").doc();
+        batch.set(notifRef, {
+          type: "refund_request",
+          userID: staffDoc.id,
+          refID: refundRef.id,
+          refCollection: "refundRequests",
+          title: "Refund Request",
+          message: `A refund request for ₱${Number(amountPaid).toLocaleString()} is awaiting review.`,
+          isRead: false,
+          status: "active",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          resolvedAt: null,
+        });
+      });
+      await batch.commit();
+    } catch (notifErr) {
+      // Refund request is already saved at this point — log and move on
+      // rather than fail the whole request over the notification fan-out.
+      // Worst case: staff have to notice it in the Refund Requests list
+      // instead of the bell.
+      console.error("[requestRefund] Failed to write notifications:", notifErr.message);
+    }
 
     return res.status(201).json({
       message: "Refund request sent. We'll notify you once it's reviewed.",

@@ -5,6 +5,17 @@ const createUserDetails  = require("../../models/user/userDetails.model");
 const createUserAddress  = require("../../models/user/userAddress.model");
 const createUserDocument = require("../../models/user/userDocument.model");
 
+// Same role IDs as bookings.controller.js's CANCELLATION_APPROVER_ROLE_IDS /
+// paymongo.controller.js's STAFF_NOTIFY_ROLE_IDS / admin-backend/utils/roles/role.util.js
+// — kept as a local literal here since this is a separate deployable app and
+// can't import that file directly. Keep these lists in sync by hand if the
+// roles collection's doc IDs ever change.
+const STAFF_NOTIFY_ROLE_IDS = [
+  "1BX4V7M43t6barbPd4BP", // Owner
+  "5bhRYMrDkjrs9VlFFY4u", // Admin
+  "fFA8G2R2ANLbVsH00jlv", // Supervisor
+];
+
 // ─────────────────────────────────────────────────────────────
 // Helper: upload a base64 data-URL to Firebase Storage (Admin SDK)
 // Returns the public download URL, or "" on failure.
@@ -126,25 +137,46 @@ const signup = async (req, res) => {
 
     await batch.commit();
 
+    // ── Notify every Owner/Admin/Supervisor — one doc per person ──
+    // Fan-out, not a single shared doc: each staff member gets their own
+    // isRead/dismiss state, same pattern as requestCancellation() in
+    // bookings.controller.js and requestRefund() in paymongo.controller.js.
     // Written directly here rather than relying on the admin backend's
-    // userWatcher.js to notice via a Firestore onSnapshot() listener —
-    // same reasoning as the refund-request notification: the admin
-    // backend runs as a Vercel serverless function, which doesn't keep a
-    // persistent process alive to run watchers reliably between requests.
-    // Matches the exact document shape
+    // (now-removed) userWatcher.js to notice via a Firestore onSnapshot()
+    // listener — the admin backend runs as a Vercel serverless function,
+    // which doesn't keep a persistent process alive to run watchers
+    // reliably between requests. Matches the exact document shape
     // admin-backend/services/notification/notification.service.js
     // creates, so the existing bell UI needs no changes to read it.
-    db.collection("notifications").add({
-      type: "new_user",
-      refID: userID,
-      refCollection: "user",
-      title: "New user signup",
-      message: `${username || email || "A new user"} is waiting for account review.`,
-      isRead: false,
-      status: "active",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      resolvedAt: null,
-    }).catch((err) => console.error("[signup] Failed to write notification:", err.message));
+    try {
+      const staffSnap = await db.collection("user")
+        .where("roleID", "in", STAFF_NOTIFY_ROLE_IDS)
+        .get();
+
+      const notifBatch = db.batch();
+      staffSnap.forEach((staffDoc) => {
+        const notifRef = db.collection("notifications").doc();
+        notifBatch.set(notifRef, {
+          type: "new_user",
+          userID: staffDoc.id,
+          refID: userID,
+          refCollection: "user",
+          title: "New user signup",
+          message: `${username || email || "A new user"} is waiting for account review.`,
+          isRead: false,
+          status: "active",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          resolvedAt: null,
+        });
+      });
+      await notifBatch.commit();
+    } catch (notifErr) {
+      // Signup already succeeded at this point — log and move on rather
+      // than fail the whole request over the notification fan-out.
+      // Worst case: staff have to notice it in the user list instead of
+      // the bell.
+      console.error("[signup] Failed to write notifications:", notifErr.message);
+    }
 
     return res.status(201).json({ message: "Signup successful", userID });
 
