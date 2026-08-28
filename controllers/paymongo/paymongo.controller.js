@@ -510,11 +510,12 @@ const computeAmountPaid = (payment) => {
   if (method.includes("full")) return amount;
   // "Partial" is what computePaymentSplit() actually produces, and it charges
   // 50% of the grand total via PayMongo (payNow = Math.floor(total * 0.5)).
-  // This branch used to fall through to the flat depositFee (₱1,000) below,
-  // which meant a refund request only asked back ₱1,000 even though the
-  // customer had actually paid ~50% of the total — undercharging every
-  // partial-payment refund. Keep it in sync with computePaymentSplit's math.
-  if (method.includes("partial") || method.includes("down")) return Math.round(amount / 2);
+  // MUST use the same Math.floor here — Math.round would disagree with
+  // computePaymentSplit() by ₱1 whenever the grand total is an odd number
+  // of pesos (e.g. ₱2,503 → floor=₱1,251 actually charged, but
+  // round=₱1,252), causing PayMongo to reject the refund for exceeding
+  // what it actually received on that payment_id.
+  if (method.includes("partial") || method.includes("down")) return Math.floor(amount / 2);
   if (method.includes("deposit")) return depositFee; // true deposit-only flow, if ever used
   if (status === "paid" || status === "approved") return amount;
   return depositFee;
