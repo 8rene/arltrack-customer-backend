@@ -1,4 +1,5 @@
 const axios = require("axios");
+const admin = require("firebase-admin");
 const { db } = require("../../config/firebaseConnection/firebase");
 const { computePaymentSplit } = require("../../utils/pricing");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
@@ -593,6 +594,28 @@ const requestRefund = async (req, res) => {
       description: `Refund requested by customer for payment ${paymentID} (reason: ${reason}).`,
       userID,
     });
+
+    // Written directly here rather than relying on the admin backend to
+    // notice this via a Firestore watcher — the admin backend runs as a
+    // Vercel serverless function (app.listen + @vercel/node), which does
+    // NOT keep a persistent process alive to run onSnapshot() listeners
+    // reliably between requests. Writing the notification synchronously,
+    // in the same request that creates the refund request, has no such
+    // dependency — it either succeeds here or it doesn't, same as any
+    // other write in this function. Matches the exact document shape
+    // admin-backend/services/notification/notification.service.js
+    // creates, so the existing bell UI needs no changes to read it.
+    db.collection("notifications").add({
+      type: "refund_request",
+      refID: refundRef.id,
+      refCollection: "refundRequests",
+      title: "Refund Request",
+      message: `A refund request for ₱${Number(amountPaid).toLocaleString()} is awaiting review.`,
+      isRead: false,
+      status: "active",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      resolvedAt: null,
+    }).catch((err) => console.error("[requestRefund] Failed to write notification:", err.message));
 
     return res.status(201).json({
       message: "Refund request sent. We'll notify you once it's reviewed.",

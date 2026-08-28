@@ -1,3 +1,4 @@
+const admin = require("firebase-admin");
 const { auth, db, bucket } = require("../../config/firebaseConnection/firebase");
 const createUser         = require("../../models/user/user.model");
 const createUserDetails  = require("../../models/user/userDetails.model");
@@ -124,6 +125,26 @@ const signup = async (req, res) => {
     }));
 
     await batch.commit();
+
+    // Written directly here rather than relying on the admin backend's
+    // userWatcher.js to notice via a Firestore onSnapshot() listener —
+    // same reasoning as the refund-request notification: the admin
+    // backend runs as a Vercel serverless function, which doesn't keep a
+    // persistent process alive to run watchers reliably between requests.
+    // Matches the exact document shape
+    // admin-backend/services/notification/notification.service.js
+    // creates, so the existing bell UI needs no changes to read it.
+    db.collection("notifications").add({
+      type: "new_user",
+      refID: userID,
+      refCollection: "user",
+      title: "New user signup",
+      message: `${username || email || "A new user"} is waiting for account review.`,
+      isRead: false,
+      status: "active",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      resolvedAt: null,
+    }).catch((err) => console.error("[signup] Failed to write notification:", err.message));
 
     return res.status(201).json({ message: "Signup successful", userID });
 
