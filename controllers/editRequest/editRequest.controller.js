@@ -2,6 +2,16 @@ const admin = require("firebase-admin");
 const { db } = require("../../config/firebaseConnection/firebase");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 
+// Same role IDs as bookings.controller.js/paymongo.controller.js/
+// signup.controller.js's STAFF_NOTIFY_ROLE_IDS — kept as a local literal
+// here since this is a separate deployable app and can't import
+// admin-backend's role.util.js directly.
+const STAFF_NOTIFY_ROLE_IDS = [
+  "1BX4V7M43t6barbPd4BP", // Owner
+  "5bhRYMrDkjrs9VlFFY4u", // Admin
+  "fFA8G2R2ANLbVsH00jlv", // Supervisor
+];
+
 // Human-readable labels + which Firestore collection each field actually
 // lives in. Kept in the exact same shape the ADMIN frontend already reads
 // (Users.jsx → EditRequestsTab → applyProfileChanges expects
@@ -109,6 +119,38 @@ const createEditRequest = async (req, res) => {
       description: `Edit request submitted by customer for: ${cleanChanges.map((c) => c.label).join(", ")}.`,
       userID,
     });
+
+    // Notify every Owner/Admin/Supervisor — one doc per person, same
+    // fan-out pattern as new_user/refund_request/cancellation_request.
+    // This request type had no notification at all before; staff could
+    // only find it by manually checking the Edit Requests tab.
+    try {
+      const staffSnap = await db.collection("user")
+        .where("roleID", "in", STAFF_NOTIFY_ROLE_IDS)
+        .get();
+
+      const notifBatch = db.batch();
+      staffSnap.forEach((staffDoc) => {
+        const notifRef = db.collection("notifications").doc();
+        notifBatch.set(notifRef, {
+          type: "edit_request",
+          userID: staffDoc.id,
+          refID: docRef.id,
+          refCollection: "editRequests",
+          title: "Profile edit request",
+          message: `A customer requested changes to: ${cleanChanges.map((c) => c.label).join(", ")}.`,
+          isRead: false,
+          status: "active",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          resolvedAt: null,
+        });
+      });
+      await notifBatch.commit();
+    } catch (notifErr) {
+      // The edit request itself already succeeded — don't fail the
+      // request over the notification fan-out.
+      console.error("[editRequest] Failed to write notifications:", notifErr.message);
+    }
 
     return res.status(201).json({
       message: "Edit request sent. An admin will review it shortly.",
