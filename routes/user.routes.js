@@ -7,6 +7,7 @@ const {
   getFullProfile,
   updateFullProfile,
   updateAvatar,
+  submitIdResubmitRequest,
 } = require("../controllers/user/user.controller");
 const {
   createEditRequest,
@@ -24,5 +25,7 @@ router.post("/profile/:userID/avatar", verifyToken, updateAvatar);
 router.post("/edit-requests",             verifyToken, createEditRequest);
 router.get("/edit-requests/mine",         verifyToken, getMyEditRequests);
 router.patch("/edit-requests/:id/cancel", verifyToken, cancelEditRequest);
+
+router.post("/id-resubmit-requests", verifyToken, submitIdResubmitRequest);
 
 module.exports = router;

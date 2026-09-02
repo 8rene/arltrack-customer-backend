@@ -1,4 +1,16 @@
 const { db } = require("../../config/firebaseConnection/firebase");
+const admin  = require("firebase-admin");
+const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
+
+// Same role IDs as editRequest.controller.js/signup.controller.js's
+// STAFF_NOTIFY_ROLE_IDS — kept as a local literal here too since each
+// controller file in this app defines it independently (no shared
+// constants module across controllers currently).
+const STAFF_NOTIFY_ROLE_IDS = [
+  "1BX4V7M43t6barbPd4BP", // Owner
+  "5bhRYMrDkjrs9VlFFY4u", // Admin
+  "fFA8G2R2ANLbVsH00jlv", // Supervisor
+];
 
 // ─────────────────────────────────────────────────────────────
 // GET /api/user/details/:userID
@@ -148,9 +160,7 @@ const getFullProfile = async (req, res) => {
       documentNumber:    primaryDocument.documentNumber   || "",
       documentImageUrl:  primaryDocument.documentImageUrl || "",
       driverLicenseUrl:  primaryDocument.driverLicenseUrl || "",
-      governmentIdUrl:   primaryDocument.governmentIdUrl  || "",
       selfieWithIdUrl:   primaryDocument.selfieWithIdUrl  || "",
-      governmentIdType:  primaryDocument.governmentIdType || "",
       documentVerified:  user.isVerified                  || false, // sourced from user collection
       // all documents array
       documents,
@@ -269,4 +279,110 @@ const updateAvatar = async (req, res) => {
   }
 };
 
-module.exports = { getUserDetails, updateUserDetails, getFullProfile, updateFullProfile, updateAvatar };
+module.exports = { getUserDetails, updateUserDetails, getFullProfile, updateFullProfile, updateAvatar, submitIdResubmitRequest };
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/user/id-resubmit-requests
+// Body: { documentKind, currentUrl, newUrl, documentType?, documentNumber? }
+// documentKind: "license" | "document". newUrl is the downloadURL from a
+// Storage upload the frontend already did (same pattern as updateAvatar
+// above) — this endpoint only writes the Firestore doc.
+//
+// Writes into the SAME idResubmitRequests collection admin-backend's
+// profileRequests.service.js already reads/approves for staff — nothing
+// new on the admin review side is needed; a customer's request shows up
+// in the same Edit Requests tab automatically, same shape, same
+// approve/reject flow (including the required-expiry-on-approve rule
+// for license). role is hardcoded to "Customer" since this app only
+// ever acts on customer accounts (same reasoning as
+// editRequest.controller.js's createEditRequest).
+//
+// documentType/documentNumber only apply when documentKind === "document"
+// — typed here at submission by the customer, same as the original
+// signup flow captured them, then carried straight through to
+// userDocument on admin approval.
+// ─────────────────────────────────────────────────────────────
+async function submitIdResubmitRequest(req, res) {
+  const userID = req.user.userID;
+  const { documentKind, currentUrl, newUrl, documentType, documentNumber } = req.body || {};
+
+  if (!["license", "document"].includes(documentKind)) {
+    return res.status(400).json({ message: "documentKind must be 'license' or 'document'." });
+  }
+  if (!newUrl) {
+    return res.status(400).json({ message: "newUrl is required." });
+  }
+  if (documentKind === "document" && (!documentType || !documentNumber)) {
+    return res.status(400).json({ message: "documentType and documentNumber are required for a document resubmission." });
+  }
+
+  try {
+    const urlFields = documentKind === "license"
+      ? { currentLicenseUrl: currentUrl || "", newLicenseUrl: newUrl }
+      : {
+          currentDocumentUrl: currentUrl || "",
+          newDocumentUrl: newUrl,
+          documentType: documentType.trim(),
+          documentNumber: documentNumber.trim(),
+        };
+
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const ref = await db.collection("idResubmitRequests").add({
+      userID,
+      role: "Customer",
+      documentKind,
+      ...urlFields,
+      status: "pending",
+      requestedBy: userID,
+      reviewedBy: null,
+      reviewedAt: null,
+      reviewNote: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const kindLabel = documentKind === "license" ? "driver's license" : "document";
+    recordAudit({
+      action: "update",
+      description: `Submitted a ${kindLabel} resubmission for review.`,
+      userID,
+    });
+
+    // Notify every Owner/Admin/Supervisor — same fan-out pattern as
+    // createEditRequest above. This request type had no notification at
+    // all before; staff could only find it by manually checking the
+    // Edit Requests tab.
+    try {
+      const staffSnap = await db.collection("user")
+        .where("roleID", "in", STAFF_NOTIFY_ROLE_IDS)
+        .get();
+
+      const notifBatch = db.batch();
+      staffSnap.forEach((staffDoc) => {
+        const notifRef = db.collection("notifications").doc();
+        notifBatch.set(notifRef, {
+          type: "id_resubmit_request",
+          userID: staffDoc.id,
+          refID: ref.id,
+          refCollection: "idResubmitRequests",
+          title: "ID resubmission submitted",
+          message: `A customer submitted a ${kindLabel} resubmission for review.`,
+          isRead: false,
+          status: "active",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          resolvedAt: null,
+        });
+      });
+      await notifBatch.commit();
+    } catch (notifErr) {
+      // The resubmission itself already succeeded — don't fail the
+      // request over the notification fan-out.
+      console.error("[submitIdResubmitRequest] Failed to write notifications:", notifErr.message);
+    }
+
+    return res.status(201).json({ message: "Resubmission sent for review.", id: ref.id });
+  } catch (error) {
+    console.error("submitIdResubmitRequest error:", error);
+    return res.status(500).json({ message: "Failed to submit resubmission." });
+  }
+}

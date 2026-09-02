@@ -436,6 +436,43 @@ const createBooking = async (req, res) => {
       userID,
     });
 
+    // Notify every Owner/Admin/Supervisor of the new booking — one doc
+    // per person, same fan-out pattern as requestCancellation/
+    // requestRefund/signup. Didn't exist before this; a chauffeur
+    // booking especially needs a driver assigned (see assignDriver() in
+    // admin-backend), so staff should see it land rather than
+    // discovering it only if they happen to check the bookings list.
+    try {
+      const isChauffeur = driveType === "chauffeur";
+      const staffSnap = await db.collection("user")
+        .where("roleID", "in", CANCELLATION_APPROVER_ROLE_IDS)
+        .get();
+
+      const notifBatch = db.batch();
+      staffSnap.forEach((staffDoc) => {
+        const notifRef = db.collection("notifications").doc();
+        notifBatch.set(notifRef, {
+          type: "new_booking",
+          userID: staffDoc.id,
+          refID: bookingID,
+          refCollection: "bookings",
+          title: isChauffeur ? "New booking — chauffeur needed" : "New booking",
+          message: isChauffeur
+            ? `A new chauffeur booking (${bookingID}) was placed and needs a driver assigned.`
+            : `A new self-drive booking (${bookingID}) was placed.`,
+          isRead: false,
+          status: "active",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          resolvedAt: null,
+        });
+      });
+      await notifBatch.commit();
+    } catch (notifErr) {
+      // Booking already succeeded at this point — log and move on rather
+      // than fail the whole request over the notification fan-out.
+      console.error("createBooking: failed to write notifications:", notifErr.message);
+    }
+
     return res.status(201).json({
       message:   "Booking confirmed!",
       bookingID,
