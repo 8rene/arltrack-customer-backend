@@ -207,6 +207,7 @@ const promoteBookingToUpcoming = async (bookingID) => {
   }
 };
 
+
 module.exports = {
   BOOKING_STATUS,
   TO_PAY_WINDOW_MS,
