@@ -43,6 +43,7 @@
 
 const { db } = require("../../config/firebaseConnection/firebase");
 const { recordAudit } = require("../auditLogs/auditLogs.util");
+const { createNotification } = require("../../services/notification/notification.service");
 
 const BOOKING_STATUS = {
   TO_PAY:    "to pay",
@@ -164,6 +165,26 @@ const cancelStaleBooking = async (bookingID, reason) => {
     description: `Booking ${bookingID} auto-cancelled. ${reason}`,
     userID: booking.userID || null,
   });
+
+  // ── Notify the customer ──
+  // A schedule-passed cancellation is the "Booking Date/Time Expired" case
+  // specifically (the reservation is invalid because its own date passed,
+  // not because anyone actively cancelled it) — everything else that
+  // routes through this single choke-point (the 12h unpaid window, or an
+  // immediately-failed deposit charge from the PayMongo webhook) reads as
+  // a regular cancellation instead.
+  if (booking.userID) {
+    const isExpiry = /scheduled date\/time has passed/i.test(reason || "");
+    await createNotification({
+      type: isExpiry ? "booking_expired" : "booking_cancelled",
+      userID: booking.userID,
+      refID: bookingID,
+      title: isExpiry ? "Booking Schedule Expired" : "Booking Cancelled",
+      message: isExpiry
+        ? "Your booking's scheduled date and time has passed without a completed payment, so this reservation is no longer valid."
+        : reason,
+    }).catch((err) => console.error(`cancelStaleBooking: failed to write notification for ${bookingID}:`, err.message));
+  }
 
   return true;
 };

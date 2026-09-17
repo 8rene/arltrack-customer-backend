@@ -15,17 +15,30 @@ const getServiceTypes = async (req, res) => {
   }
 };
 
-// GET /api/services/car-bookings/:carID — returns booked time windows for availability checking
+// GET /api/services/car-bookings/:carID — returns booked time windows AND
+// scheduled-maintenance days for availability checking. The car's own
+// `status` field is never used for this — a car flagged "Maintenance" in
+// Fleet.jsx still needs to be bookable on every day that isn't actually
+// covered by one of its own carMaintenance records. Only "Scheduled"
+// maintenance blocks a day; "Completed"/"Cancelled" records don't (see
+// admin-backend's maintenance.model.js for why "In Progress"/"Overdue"
+// were dropped from the status list).
 // NOTE: intentionally omits bookingID and userID — only time/status data is needed by the client
 const getCarBookings = async (req, res) => {
   const { carID } = req.params;
   try {
-    const snap = await db.collection("bookings")
-      .where("carID", "==", carID)
-      .where("status", "in", ["pending", "confirmed", "active"])
-      .get();
+    const [bookingSnap, maintSnap] = await Promise.all([
+      db.collection("bookings")
+        .where("carID", "==", carID)
+        .where("status", "in", ["pending", "confirmed", "active"])
+        .get(),
+      db.collection("carMaintenance")
+        .where("carID", "==", carID)
+        .where("status", "==", "Scheduled")
+        .get(),
+    ]);
 
-    const bookings = snap.docs.map((doc) => {
+    const bookings = bookingSnap.docs.map((doc) => {
       const d = doc.data();
       return {
         // bookingID intentionally excluded — not needed by client and avoids ID enumeration
@@ -35,7 +48,18 @@ const getCarBookings = async (req, res) => {
       };
     });
 
-    return res.status(200).json(bookings);
+    // Each maintenance record blocks just its own single day —
+    // maintenanceDate has no separate end date in the data model.
+    const maintenanceDays = maintSnap.docs
+      .map((doc) => doc.data().maintenanceDate)
+      .filter(Boolean)
+      .map((d) => ({
+        status:        "maintenance",
+        startDateTime: d,
+        endDateTime:   d,
+      }));
+
+    return res.status(200).json([...bookings, ...maintenanceDays]);
   } catch (error) {
     console.error("getCarBookings error:", error);
     return res.status(500).json({ message: "Failed to fetch car bookings." });

@@ -4,6 +4,7 @@ const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require("../../utils/pricing");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
+const { createNotification } = require("../../services/notification/notification.service");
 
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
@@ -296,6 +297,46 @@ const createBooking = async (req, res) => {
       return res.status(400).json({ message: codingViolation, codingViolation: true });
     }
 
+    // ── 0.5. Maintenance conflict check (server-side enforcement) ──
+    // The car's own `status` field (Active/Maintenance/Inactive, set from
+    // Fleet.jsx) is NOT used to gate bookings — a car flagged "Maintenance"
+    // for one day must stay bookable for every other day. Availability is
+    // decided purely by whether a *specific* carMaintenance record
+    // ("Scheduled" — i.e. not yet done, not cancelled) falls on a day this
+    // booking's date range actually touches. This mirrors the same
+    // day-level overlap check admin-backend's maintenance.service.js
+    // already does in the opposite direction (blocking a maintenance save
+    // that lands on an existing booking).
+    const maintenanceViolation = await (async () => {
+      try {
+        const maintSnap = await db.collection("carMaintenance")
+          .where("carID", "==", carID)
+          .where("status", "==", "Scheduled")
+          .get();
+        if (maintSnap.empty) return null;
+
+        const dayStart = new Date(startDateTime); dayStart.setHours(0, 0, 0, 0);
+        const dayEnd   = new Date(endDateTime);    dayEnd.setHours(23, 59, 59, 999);
+
+        for (const doc of maintSnap.docs) {
+          const m = doc.data();
+          const mDate = m.maintenanceDate?.toDate ? m.maintenanceDate.toDate() : (m.maintenanceDate ? new Date(m.maintenanceDate) : null);
+          if (!mDate) continue;
+          if (mDate >= dayStart && mDate <= dayEnd) {
+            return `This vehicle has scheduled maintenance on ${mDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} and can't be booked for a date range that includes that day. Please choose different dates or another vehicle.`;
+          }
+        }
+        return null;
+      } catch (e) {
+        console.warn("Maintenance conflict check skipped:", e.message);
+        return null;
+      }
+    })();
+
+    if (maintenanceViolation) {
+      return res.status(409).json({ message: maintenanceViolation, maintenanceViolation: true });
+    }
+
     // ── 1. Save to bookings collection (auto Firestore ID) ──
     const bookingRef = db.collection("bookings").doc();
     const bookingID  = bookingRef.id;
@@ -449,6 +490,31 @@ const createBooking = async (req, res) => {
       description: `Booking ${bookingID} created by customer for car ${carID}.`,
       userID,
     });
+
+    // ── Notify the customer: booking placed + payment still needed ──
+    // Two separate cards on purpose (matches the customer bell's own
+    // notification types) — "Booking Created" confirms the booking itself
+    // went through, "Payment Pending" is the actionable one with the
+    // "Pay Now" CTA. Best-effort: never let this block the response the
+    // customer is waiting on.
+    try {
+      await createNotification({
+        type: "booking_created",
+        userID,
+        refID: bookingID,
+        title: "Booking Created",
+        message: `Your booking for ${new Date(startDateTime).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} has been created successfully.`,
+      });
+      await createNotification({
+        type: "payment_pending",
+        userID,
+        refID: bookingID,
+        title: "Payment Pending",
+        message: `Your booking is awaiting payment of ₱${Number(payNow).toLocaleString()}. Pay now to keep your reservation.`,
+      });
+    } catch (notifErr) {
+      console.error("createBooking: failed to write customer notifications:", notifErr.message);
+    }
 
     return res.status(201).json({
       message:   "Booking confirmed!",
@@ -719,6 +785,18 @@ const cancelBooking = async (req, res) => {
       description: `Booking ${bookingID} cancelled by customer. Reason: ${reason || "No reason given."}`,
       userID,
     });
+
+    try {
+      await createNotification({
+        type: "booking_cancelled",
+        userID,
+        refID: bookingID,
+        title: "Booking Cancelled",
+        message: `Your booking has been cancelled. Reason: ${reason || "Cancelled by you."}`,
+      });
+    } catch (notifErr) {
+      console.error("cancelBooking: failed to write customer notification:", notifErr.message);
+    }
 
     return res.status(200).json({ message: "Booking cancelled successfully." });
   } catch (error) {

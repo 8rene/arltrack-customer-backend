@@ -4,7 +4,8 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { computePaymentSplit } = require("../../utils/pricing");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { recordTransactionLog } = require("../../utils/transactionLogs/transactionLogs.util");
-const { BOOKING_STATUS, enforceToPayValidity, promoteBookingToUpcoming, cancelStaleBooking } = require("../../utils/bookings/bookingStatus.util");
+const { BOOKING_STATUS, enforceToPayValidity, promoteBookingToUpcoming, cancelStaleBooking, isFullyPaid } = require("../../utils/bookings/bookingStatus.util");
+const { createNotification, resolveNotification } = require("../../services/notification/notification.service");
 
 // ─── PayMongo base config ────────────────────────────────────────────────────
 const PAYMONGO_SECRET = process.env.PAYMONGO_SECRET_KEY;
@@ -337,6 +338,41 @@ const handleWebhook = async (req, res) => {
         description: `${phase === "balance" ? "Balance" : "Deposit"} payment settled via PayMongo${bID ? ` for booking ${bID}` : ""}.`,
       });
 
+      // ── Notify the customer: this phase's payment cleared ──
+      // "Booking Confirmed" only fires once the booking is FULLY paid
+      // (isFullyPaid) — a Partial booking's deposit clearing gets just the
+      // "Payment Successful" card; the confirmation card waits for the
+      // balance phase too, same gate promoteBookingToUpcoming itself uses.
+      if (payment.userID) {
+        try {
+          const chargedAmount = phase === "balance"
+            ? (Number(payment.balanceAmount) || 0)
+            : (computePaymentSplit(payment.amount, payment.methodOfPayment).payNow || 0);
+
+          await createNotification({
+            type: "payment_successful",
+            userID: payment.userID,
+            refID: bID,
+            title: "Payment Successful",
+            message: `Your ${phase === "balance" ? "balance" : "deposit"} payment of ₱${chargedAmount.toLocaleString()} was received.`,
+          });
+
+          if (isFullyPaid({ ...payment, ...updatePayload })) {
+            await createNotification({
+              type: "booking_confirmed",
+              userID: payment.userID,
+              refID: bID,
+              title: "Booking Confirmed",
+              message: "Your booking has been confirmed. We look forward to serving you!",
+            });
+          }
+
+          await resolveNotification("payment_pending", bID, payment.userID);
+        } catch (notifErr) {
+          console.error("[PayMongo Webhook] failed to write customer notifications:", notifErr.message);
+        }
+      }
+
       return res.status(200).json({ received: true });
     }
 
@@ -366,6 +402,16 @@ const handleWebhook = async (req, res) => {
           // balance failed so the customer can retry paying it; the
           // booking stays "to pay" either way.
           await paymentSnap.docs[0].ref.update({ balanceStatus: "failed", updatedAt: now });
+
+          if (failedPayment.userID) {
+            await createNotification({
+              type: "payment_failed",
+              userID: failedPayment.userID,
+              refID: failedPayment.bookingID || null,
+              title: "Payment Failed",
+              message: "Your balance payment could not be processed. Please try again to complete your booking.",
+            }).catch((e) => console.error("[PayMongo Webhook] failed to write payment_failed notification:", e.message));
+          }
         } else {
           // Deposit failed (including choosing PayMongo's test-mode "Fail"
           // option) — nothing has actually been charged yet, so it's safe
@@ -376,6 +422,19 @@ const handleWebhook = async (req, res) => {
           await paymentSnap.docs[0].ref.update({ status: "failed", updatedAt: now });
           if (failedPayment.bookingID) {
             await cancelStaleBooking(failedPayment.bookingID, "Booking cancelled: payment failed.");
+          }
+
+          // cancelStaleBooking() above already sends the "Booking Cancelled"
+          // notification (single choke-point — see its own header comment) —
+          // this just adds the payment-specific "Payment Failed" card on top.
+          if (failedPayment.userID) {
+            await createNotification({
+              type: "payment_failed",
+              userID: failedPayment.userID,
+              refID: failedPayment.bookingID || null,
+              title: "Payment Failed",
+              message: "Your payment could not be processed, so this booking was not confirmed. Please book again to try once more.",
+            }).catch((e) => console.error("[PayMongo Webhook] failed to write payment_failed notification:", e.message));
           }
         }
       }
@@ -568,6 +627,40 @@ const getPaymentStatus = async (req, res) => {
             status: "Success",
             description: `${phase === "balance" ? "Balance" : "Deposit"} payment confirmed via status poll (checkout_session ${p.paymongoSessionID}).`,
           });
+
+          // Same pair of cards as the webhook path — createNotification()'s
+          // dedup means whichever of the two (webhook vs. this poll) lands
+          // first "wins" and the other is a no-op, so there's never a
+          // duplicate even though both paths can reach here for the same payment.
+          if (p.userID) {
+            try {
+              const chargedAmount = phase === "balance"
+                ? (Number(p.balanceAmount) || 0)
+                : (computePaymentSplit(p.amount, p.methodOfPayment).payNow || 0);
+
+              await createNotification({
+                type: "payment_successful",
+                userID: p.userID,
+                refID: p.bookingID,
+                title: "Payment Successful",
+                message: `Your ${phase === "balance" ? "balance" : "deposit"} payment of ₱${chargedAmount.toLocaleString()} was received.`,
+              });
+
+              if (isFullyPaid({ ...p, ...updatePayload })) {
+                await createNotification({
+                  type: "booking_confirmed",
+                  userID: p.userID,
+                  refID: p.bookingID,
+                  title: "Booking Confirmed",
+                  message: "Your booking has been confirmed. We look forward to serving you!",
+                });
+              }
+
+              await resolveNotification("payment_pending", p.bookingID, p.userID);
+            } catch (notifErr) {
+              console.error("getPaymentStatus: failed to write customer notifications:", notifErr.message);
+            }
+          }
 
           return res.status(200).json({ status: "paid", bookingID: p.bookingID, phase });
         }

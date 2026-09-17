@@ -3,6 +3,7 @@ const router = express.Router();
 
 const { runExpireSessions } = require("../jobs/expireSessions.job");
 const { runCancelStaleBookings } = require("../jobs/cancelStaleBookings.job");
+const { runBookingReminders } = require("../jobs/bookingNotifications.job");
 
 // Vercel Cron hits this over HTTP on schedule (see vercel.json). If
 // CRON_SECRET is set in this project's env vars, Vercel automatically sends
@@ -38,6 +39,26 @@ router.get("/cancel-stale-bookings", verifyCronRequest, async (req, res) => {
     return res.status(200).json({ success: true, result: result || null });
   } catch (err) {
     console.error("[CRON] cancel-stale-bookings route error:", err.message);
+    return res.status(200).json({ success: false, message: err.message });
+  }
+});
+
+// Run every few minutes — sends "Upcoming Booking" (~24h out) and
+// "Booking Reminder" (~2h out) notifications. Safe to run often: dedup
+// lives in createNotification(), not here.
+//
+// NOTE: no separate "expire-bookings" route — that scenario (a booking's
+// schedule passing with no completed payment) is already the exact thing
+// cancelStaleBookings.job.js's sweep auto-cancels, and the customer
+// notification for it now lives right on that single choke-point
+// (cancelStaleBooking() in utils/bookings/bookingStatus.util.js) rather
+// than being re-detected here.
+router.get("/booking-reminders", verifyCronRequest, async (req, res) => {
+  try {
+    const result = await runBookingReminders();
+    return res.status(200).json({ success: true, result });
+  } catch (err) {
+    console.error("[CRON] booking-reminders route error:", err.message);
     return res.status(200).json({ success: false, message: err.message });
   }
 });
