@@ -17,7 +17,7 @@
     },
     {
       "path": "/api/cron/refund-notifications",
-      "schedule": "0 * * * *"
+      "schedule": "30 18 * * *"
     }
   ]
 }
