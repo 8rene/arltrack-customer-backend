@@ -4,6 +4,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { computePaymentSplit } = require("../../utils/pricing");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { recordTransactionLog } = require("../../utils/transactionLogs/transactionLogs.util");
+const { BOOKING_STATUS, enforceToPayValidity, promoteBookingToUpcoming, cancelStaleBooking } = require("../../utils/bookings/bookingStatus.util");
 
 // ─── PayMongo base config ────────────────────────────────────────────────────
 const PAYMONGO_SECRET = process.env.PAYMONGO_SECRET_KEY;
@@ -64,6 +65,33 @@ const createPaymentLink = async (req, res) => {
 
     const paymentDoc = paymentSnap.docs[0];
     const payment    = paymentDoc.data();
+
+    // ── Only allow starting payment/confirmation if the booking's own
+    // schedule is still valid (hasn't passed its 12h "to pay" window, and
+    // its start date/time hasn't already gone by). This is enforced HERE
+    // rather than after the fact — once PayMongo has actually charged the
+    // customer there's no clean way to "un-charge" them, so the gate has
+    // to sit in front of checkout, not behind it. If it's gone stale, this
+    // cancels it in the same step (self-heal — see enforceToPayValidity)
+    // instead of leaving it dangling as "to pay" for the next cron sweep.
+    const bookingSnap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
+    if (bookingSnap.empty) {
+      return res.status(404).json({ message: "Booking not found." });
+    }
+    const booking = bookingSnap.docs[0].data();
+
+    if (booking.status === BOOKING_STATUS.TO_PAY) {
+      const stillValidStatus = await enforceToPayValidity(bookingID, booking);
+      if (stillValidStatus !== BOOKING_STATUS.TO_PAY) {
+        return res.status(400).json({
+          message: "This booking's schedule is no longer valid and it has been cancelled. Please make a new booking.",
+        });
+      }
+    } else if (booking.status !== BOOKING_STATUS.UPCOMING) {
+      // Not "to pay" and not already "upcoming" (e.g. cancelled/completed) —
+      // there's nothing left here to pay for.
+      return res.status(400).json({ message: "This booking can no longer be paid for." });
+    }
 
     // Server-computed charge amount — the only amount PayMongo ever sees.
     const { payNow } = computePaymentSplit(payment.amount, payment.methodOfPayment);
@@ -238,7 +266,10 @@ const handleWebhook = async (req, res) => {
 
       await paymentDoc.ref.update(updatePayload);
 
+      // Payment confirmed → booking moves from "to pay" to "upcoming".
+      // No-ops if the booking already moved on for some other reason.
       if (bID) {
+        await promoteBookingToUpcoming(bID);
         console.log("[PayMongo Webhook] ✅ Payment settled for booking:", bID, "paymongoPaymentID:", paymongoPaymentID);
       }
 
@@ -279,7 +310,22 @@ const handleWebhook = async (req, res) => {
           .get();
       }
       if (paymentSnap && !paymentSnap.empty) {
+        const failedPayment = paymentSnap.docs[0].data();
         await paymentSnap.docs[0].ref.update({ status: "failed", updatedAt: now });
+
+        // A failed payment (including choosing PayMongo's test-mode "Fail"
+        // option) cancels the booking right away instead of leaving it
+        // sitting as "to pay" — it shouldn't count as a real booking just
+        // because someone started, then failed, a checkout. Unlike the 12h/
+        // schedule-passed cancellation, cancelStaleBooking is reused here
+        // simply because it already does exactly what's needed (cancel the
+        // booking doc + mirror onto bookingSession + audit log) — it won't
+        // re-touch the payment doc since it's already "failed", not
+        // "pending". To try again, the customer books fresh rather than
+        // retrying this same booking.
+        if (failedPayment.bookingID) {
+          await cancelStaleBooking(failedPayment.bookingID, "Booking cancelled: payment failed.");
+        }
       }
       return res.status(200).json({ received: true });
     }
@@ -429,6 +475,13 @@ const getPaymentStatus = async (req, res) => {
             paymongoPaymentID: paidPayment.id,
           });
 
+          // Same promotion the webhook does — this poll can win the race
+          // against the webhook, so it has to do this itself too rather
+          // than assuming the webhook already will have.
+          if (p.bookingID) {
+            await promoteBookingToUpcoming(p.bookingID);
+          }
+
           // This poll can win the race against the webhook — the browser
           // redirect back from PayMongo's checkout page often arrives
           // before PayMongo's own webhook delivery does. Since this is the
@@ -487,17 +540,6 @@ const VALID_REFUND_REASONS = [
   "Service issue",
   "Duplicate payment",
   "Other",
-];
-
-// Same role IDs as bookings.controller.js's CANCELLATION_APPROVER_ROLE_IDS /
-// admin-backend/utils/roles/role.util.js — kept as a local literal here
-// since this is a separate deployable app and can't import that file
-// directly. Keep these lists in sync by hand if the roles collection's
-// doc IDs ever change.
-const STAFF_NOTIFY_ROLE_IDS = [
-  "1BX4V7M43t6barbPd4BP", // Owner
-  "5bhRYMrDkjrs9VlFFY4u", // Admin
-  "fFA8G2R2ANLbVsH00jlv", // Supervisor
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -607,45 +649,27 @@ const requestRefund = async (req, res) => {
       userID,
     });
 
-    // ── Notify every Owner/Admin/Supervisor — one doc per person ──
-    // Fan-out, not a single shared doc: each staff member gets their own
-    // isRead/dismiss state, same pattern as requestCancellation() in
-    // bookings.controller.js. Written directly here rather than relying
-    // on the admin backend's (now-removed) userWatcher.js/bookingWatcher.js
-    // to notice via onSnapshot() — the admin backend runs as a Vercel
-    // serverless function, which doesn't keep a persistent process alive
-    // to run watchers reliably between requests. Matches the exact
-    // document shape admin-backend/services/notification/notification.service.js
+    // Written directly here rather than relying on the admin backend to
+    // notice this via a Firestore watcher — the admin backend runs as a
+    // Vercel serverless function (app.listen + @vercel/node), which does
+    // NOT keep a persistent process alive to run onSnapshot() listeners
+    // reliably between requests. Writing the notification synchronously,
+    // in the same request that creates the refund request, has no such
+    // dependency — it either succeeds here or it doesn't, same as any
+    // other write in this function. Matches the exact document shape
+    // admin-backend/services/notification/notification.service.js
     // creates, so the existing bell UI needs no changes to read it.
-    try {
-      const staffSnap = await db.collection("user")
-        .where("roleID", "in", STAFF_NOTIFY_ROLE_IDS)
-        .get();
-
-      const batch = db.batch();
-      staffSnap.forEach((staffDoc) => {
-        const notifRef = db.collection("notifications").doc();
-        batch.set(notifRef, {
-          type: "refund_request",
-          userID: staffDoc.id,
-          refID: refundRef.id,
-          refCollection: "refundRequests",
-          title: "Refund Request",
-          message: `A refund request for ₱${Number(amountPaid).toLocaleString()} is awaiting review.`,
-          isRead: false,
-          status: "active",
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          resolvedAt: null,
-        });
-      });
-      await batch.commit();
-    } catch (notifErr) {
-      // Refund request is already saved at this point — log and move on
-      // rather than fail the whole request over the notification fan-out.
-      // Worst case: staff have to notice it in the Refund Requests list
-      // instead of the bell.
-      console.error("[requestRefund] Failed to write notifications:", notifErr.message);
-    }
+    db.collection("notifications").add({
+      type: "refund_request",
+      refID: refundRef.id,
+      refCollection: "refundRequests",
+      title: "Refund Request",
+      message: `A refund request for ₱${Number(amountPaid).toLocaleString()} is awaiting review.`,
+      isRead: false,
+      status: "active",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      resolvedAt: null,
+    }).catch((err) => console.error("[requestRefund] Failed to write notification:", err.message));
 
     return res.status(201).json({
       message: "Refund request sent. We'll notify you once it's reviewed.",

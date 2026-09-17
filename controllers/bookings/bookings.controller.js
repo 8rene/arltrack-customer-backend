@@ -1,9 +1,9 @@
-const admin = require("firebase-admin");
 const { db, bucket } = require("../../config/firebaseConnection/firebase");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require("../../utils/pricing");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
+const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
@@ -333,7 +333,12 @@ const createBooking = async (req, res) => {
       notesUser:     specialNotes || "",
       notesAdmin:    "",
       isReviewed:    false,
-      status:        "upcoming",
+      // Booking starts life unpaid — it's only promoted to "upcoming" once
+      // PayMongo actually confirms the payment (see promoteBookingToUpcoming
+      // in paymongo.controller.js). If payment fails or is never completed,
+      // it stays "to pay" until the customer pays or it auto-cancels (see
+      // utils/bookings/bookingStatus.util.js).
+      status:        BOOKING_STATUS.TO_PAY,
       hasDevice,
       createdAt:     now,
       updatedAt:     now,
@@ -436,43 +441,6 @@ const createBooking = async (req, res) => {
       userID,
     });
 
-    // Notify every Owner/Admin/Supervisor of the new booking — one doc
-    // per person, same fan-out pattern as requestCancellation/
-    // requestRefund/signup. Didn't exist before this; a chauffeur
-    // booking especially needs a driver assigned (see assignDriver() in
-    // admin-backend), so staff should see it land rather than
-    // discovering it only if they happen to check the bookings list.
-    try {
-      const isChauffeur = driveType === "chauffeur";
-      const staffSnap = await db.collection("user")
-        .where("roleID", "in", CANCELLATION_APPROVER_ROLE_IDS)
-        .get();
-
-      const notifBatch = db.batch();
-      staffSnap.forEach((staffDoc) => {
-        const notifRef = db.collection("notifications").doc();
-        notifBatch.set(notifRef, {
-          type: "new_booking",
-          userID: staffDoc.id,
-          refID: bookingID,
-          refCollection: "bookings",
-          title: isChauffeur ? "New booking — chauffeur needed" : "New booking",
-          message: isChauffeur
-            ? `A new chauffeur booking (${bookingID}) was placed and needs a driver assigned.`
-            : `A new self-drive booking (${bookingID}) was placed.`,
-          isRead: false,
-          status: "active",
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          resolvedAt: null,
-        });
-      });
-      await notifBatch.commit();
-    } catch (notifErr) {
-      // Booking already succeeded at this point — log and move on rather
-      // than fail the whole request over the notification fan-out.
-      console.error("createBooking: failed to write notifications:", notifErr.message);
-    }
-
     return res.status(201).json({
       message:   "Booking confirmed!",
       bookingID,
@@ -505,6 +473,19 @@ const getUserBookings = async (req, res) => {
     if (snap.empty) return res.status(200).json([]);
 
     const bookings = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+
+    // Self-heal any "to pay" booking that's gone stale (12h unpaid, or its
+    // own start date/time already passed) right here on read, instead of
+    // only relying on the periodic cron sweep — so "My Bookings" never
+    // shows a booking as payable that shouldn't be anymore. See
+    // utils/bookings/bookingStatus.util.js.
+    await Promise.all(
+      bookings
+        .filter((b) => b.status === BOOKING_STATUS.TO_PAY)
+        .map(async (b) => {
+          b.status = await enforceToPayValidity(b.bookingID, b);
+        })
+    );
 
     // Collect unique carIDs
     const carIDs = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
@@ -651,9 +632,10 @@ const cancelBooking = async (req, res) => {
       return res.status(403).json({ message: "You are not allowed to cancel this booking." });
     }
 
-    // Only upcoming (not yet picked up) bookings can be cancelled by the user
-    if (booking.status !== "upcoming") {
-      return res.status(400).json({ message: "Only upcoming bookings can be cancelled." });
+    // Bookings not yet picked up — whether still unpaid ("to pay") or
+    // already confirmed ("upcoming") — can be cancelled by the customer.
+    if (![BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING].includes(booking.status)) {
+      return res.status(400).json({ message: "Only upcoming or unpaid bookings can be cancelled." });
     }
 
     const now = new Date();
@@ -662,6 +644,22 @@ const cancelBooking = async (req, res) => {
       cancellationReason: reason || "Cancelled by user.",
       updatedAt:          now,
     });
+
+    // If this booking was still unpaid, its payment doc never got charged —
+    // mark it cancelled too so it doesn't sit as "pending" forever (and so
+    // it can't still be paid for via a stale PayMongo checkout link).
+    // Never touches an already-paid payment; refunding that goes through
+    // the separate requestRefund flow instead.
+    if (booking.status === BOOKING_STATUS.TO_PAY) {
+      try {
+        const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+        if (!paymentSnap.empty && paymentSnap.docs[0].data().status === "pending") {
+          await paymentSnap.docs[0].ref.update({ status: "cancelled", updatedAt: now });
+        }
+      } catch (paymentErr) {
+        console.error("cancelBooking: failed to sync payment status:", paymentErr.message);
+      }
+    }
 
     // Mirror the cancellation onto the bookingSession doc — otherwise this
     // self-service cancel path leaves an "upcoming" ghost card in admin's
@@ -697,122 +695,6 @@ const cancelBooking = async (req, res) => {
   }
 };
 
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PATCH /api/bookings/:bookingID/request-cancellation
-// Separate from cancelBooking() above on purpose — that one only ever
-// applies to "upcoming" bookings and takes effect instantly, no approval
-// needed, since nothing has been dispatched yet. Once a booking is
-// "ongoing" (car is already out, driver/dispatch already committed),
-// cancelling isn't a decision the customer can make unilaterally anymore —
-// this puts the booking into "cancellation_request" instead, and an
-// Owner/Admin/Supervisor has to approve or reject it from the admin panel.
-//
-// Same role IDs as admin-backend/utils/roles/role.util.js — kept as a
-// local literal here since this is a separate deployable app and can't
-// import that file directly. Keep these two lists in sync by hand if the
-// roles collection's doc IDs ever change.
-const CANCELLATION_APPROVER_ROLE_IDS = [
-  "1BX4V7M43t6barbPd4BP", // Owner
-  "5bhRYMrDkjrs9VlFFY4u", // Admin
-  "fFA8G2R2ANLbVsH00jlv", // Supervisor
-];
-
-const requestCancellation = async (req, res) => {
-  const { bookingID } = req.params;
-  const userID = req.user.userID; // from verified JWT — never trust body
-  const { reason } = req.body;
-
-  if (!bookingID) {
-    return res.status(400).json({ message: "bookingID is required." });
-  }
-
-  try {
-    const snap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
-
-    if (snap.empty) {
-      return res.status(404).json({ message: "Booking not found." });
-    }
-
-    const doc     = snap.docs[0];
-    const booking = doc.data();
-
-    if (booking.userID !== userID) {
-      return res.status(403).json({ message: "You are not allowed to cancel this booking." });
-    }
-
-    // Only ongoing bookings go through this approval path — upcoming
-    // bookings use the instant cancelBooking() above instead, and
-    // completed/cancelled/stolen bookings can't be cancelled at all.
-    if (booking.status !== "ongoing") {
-      return res.status(400).json({
-        message: booking.status === "upcoming"
-          ? "This booking hasn't started yet — use the regular cancel option instead."
-          : "Only an ongoing booking can have a cancellation requested.",
-      });
-    }
-
-    if (booking.status === "cancellation_request") {
-      return res.status(400).json({ message: "A cancellation request is already pending for this booking." });
-    }
-
-    const now = new Date();
-    await doc.ref.update({
-      status:                          "cancellation_request",
-      statusBeforeCancellationRequest: booking.status, // so admin's reject action knows what to revert to
-      cancellationReason:              reason || "Cancellation requested by user.",
-      updatedAt:                       now,
-    });
-
-    // ── Notify every Owner/Admin/Supervisor — one doc per person ──
-    // Fan-out, not a single shared doc: each staff member gets their own
-    // isRead/dismiss state. See admin-backend's notification.model.js for
-    // the full shape this mirrors — kept as a direct write here rather
-    // than going through admin-backend's notification.service.js, same
-    // reasoning as the existing new_user/refund_request direct writes
-    // elsewhere in this file: this is a separate deployable app.
-    try {
-      const staffSnap = await db.collection("user")
-        .where("roleID", "in", CANCELLATION_APPROVER_ROLE_IDS)
-        .get();
-
-      const batch = db.batch();
-      staffSnap.forEach((staffDoc) => {
-        const notifRef = db.collection("notifications").doc();
-        batch.set(notifRef, {
-          type:          "cancellation_request",
-          userID:        staffDoc.id,
-          refID:         doc.id,
-          refCollection: "bookings",
-          title:         "Cancellation request",
-          message:       `Booking ${bookingID} (already ongoing) has a pending cancellation request.`,
-          isRead:        false,
-          status:        "active",
-          createdAt:     admin.firestore.FieldValue.serverTimestamp(),
-          resolvedAt:    null,
-        });
-      });
-      await batch.commit();
-    } catch (notifErr) {
-      // Booking is already in cancellation_request at this point — log and
-      // move on rather than fail the whole request over the notification
-      // fan-out. Worst case: staff have to notice it in the Bookings list
-      // instead of the bell.
-      console.error("requestCancellation: failed to write notifications:", notifErr.message);
-    }
-
-    recordAudit({
-      action: "update",
-      description: `Booking ${bookingID} — cancellation requested by customer (pending approval). Reason: ${reason || "No reason given."}`,
-      userID,
-    });
-
-    return res.status(200).json({ message: "Cancellation request submitted. An admin will review it shortly." });
-  } catch (error) {
-    console.error("requestCancellation error:", error);
-    return res.status(500).json({ message: "Failed to submit cancellation request. Please try again." });
-  }
-};
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1019,4 +901,4 @@ const checkCodingRule = async (req, res) => {
   }
 };
 
-module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getBookingQuote };
+module.exports = { createBooking, getUserBookings, cancelBooking, checkCodingRule, getBookingQuote };

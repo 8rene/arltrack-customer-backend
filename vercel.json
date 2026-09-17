@@ -6,6 +6,10 @@
     {
       "path": "/api/cron/expire-sessions",
       "schedule": "0 16 * * *"
+    },
+    {
+      "path": "/api/cron/cancel-stale-bookings",
+      "schedule": "0 * * * *"
     }
   ]
 }
