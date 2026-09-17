@@ -1,5 +1,6 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { createRefundRequest } = require("../../models/refund/refundRequest.model");
+const { BOOKING_STATUS } = require("../../utils/bookings/bookingStatus.util");
 
 const VALID_REASONS = [
   "Cancelled trip",
@@ -52,6 +53,22 @@ const requestRefund = async (req, res) => {
       return res.status(400).json({
         message: "This payment can't be auto-refunded yet — please contact support.",
       });
+    }
+
+    // 1.5. The booking itself must be fully confirmed before a refund makes
+    // sense. A "to pay" booking means the balance (Partial) hasn't cleared
+    // yet, or the customer is mid-checkout — asking to refund a deposit on
+    // a booking that was never actually confirmed doesn't fit the refund
+    // flow; that money either finishes paying the booking or the booking
+    // itself gets cancelled (self-service cancelBooking, or the auto-cancel
+    // paths in utils/bookings/bookingStatus.util.js), not refunded.
+    if (payment.bookingID) {
+      const bookingSnap = await db.collection("bookings").doc(payment.bookingID).get();
+      if (bookingSnap.exists && bookingSnap.data().status === BOOKING_STATUS.TO_PAY) {
+        return res.status(400).json({
+          message: "This booking hasn't been fully confirmed yet, so it can't be refunded. Cancel the booking instead if you no longer need it.",
+        });
+      }
     }
 
     // 2. Prevent duplicate active requests for the same payment

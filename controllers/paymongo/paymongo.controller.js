@@ -513,6 +513,16 @@ const handleWebhook = async (req, res) => {
           status: "Refunded",
           description: `Refund confirmed by PayMongo for payment ${refundReq.paymentID}.`,
         });
+
+        if (refundReq.userID) {
+          await createNotification({
+            type: "refund_completed",
+            userID: refundReq.userID,
+            refID: refundReq.bookingID || null,
+            title: "Refund Completed",
+            message: `Your refund of ₱${Number(refundReq.amount || 0).toLocaleString()} has been sent back to your original payment method.`,
+          }).catch((e) => console.error("[PayMongo Webhook] failed to write refund_completed notification:", e.message));
+        }
       } else {
         await refundReqDoc.ref.update({ status: "Failed", updatedAt: now });
         console.log("[PayMongo Webhook] ❌ Refund failed for refundRequest:", refundReq.refundRequestID);
@@ -531,6 +541,16 @@ const handleWebhook = async (req, res) => {
           status: "Failed",
           description: `PayMongo reported this refund as failed for payment ${refundReq.paymentID}.`,
         });
+
+        if (refundReq.userID) {
+          await createNotification({
+            type: "refund_failed",
+            userID: refundReq.userID,
+            refID: refundReq.bookingID || null,
+            title: "Refund Failed",
+            message: `Your approved refund of ₱${Number(refundReq.amount || 0).toLocaleString()} could not be completed by PayMongo. Please contact support.`,
+          }).catch((e) => console.error("[PayMongo Webhook] failed to write refund_failed notification:", e.message));
+        }
       }
 
       return res.status(200).json({ received: true });

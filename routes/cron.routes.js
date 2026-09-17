@@ -4,6 +4,7 @@ const router = express.Router();
 const { runExpireSessions } = require("../jobs/expireSessions.job");
 const { runCancelStaleBookings } = require("../jobs/cancelStaleBookings.job");
 const { runBookingReminders } = require("../jobs/bookingNotifications.job");
+const { runRefundNotifications } = require("../jobs/refundNotifications.job");
 
 // Vercel Cron hits this over HTTP on schedule (see vercel.json). If
 // CRON_SECRET is set in this project's env vars, Vercel automatically sends
@@ -59,6 +60,20 @@ router.get("/booking-reminders", verifyCronRequest, async (req, res) => {
     return res.status(200).json({ success: true, result });
   } catch (err) {
     console.error("[CRON] booking-reminders route error:", err.message);
+    return res.status(200).json({ success: false, message: err.message });
+  }
+});
+
+// Run every few minutes/hours — watches for refund requests staff just
+// Approved/Rejected in the admin app and notifies the customer. Purely a
+// customer-side watcher (see jobs/refundNotifications.job.js's header
+// comment) — nothing in the admin backend needs to change for this.
+router.get("/refund-notifications", verifyCronRequest, async (req, res) => {
+  try {
+    const result = await runRefundNotifications();
+    return res.status(200).json({ success: true, result });
+  } catch (err) {
+    console.error("[CRON] refund-notifications route error:", err.message);
     return res.status(200).json({ success: false, message: err.message });
   }
 });
