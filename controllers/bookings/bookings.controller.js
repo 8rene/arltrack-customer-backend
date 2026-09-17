@@ -379,6 +379,15 @@ const createBooking = async (req, res) => {
       referenceNumber: referenceNumber || "N/A",
       proofUrl,
       status:          "pending",
+      // Two-phase payment (see utils/bookings/bookingStatus.util.js):
+      // "Partial" pays payNow (50%) now, then the remaining balance
+      // separately later, via its own PayMongo checkout, before the
+      // booking is promoted to "upcoming". "Full" has no balance phase —
+      // balanceStatus stays "not_applicable" and is never touched.
+      payNow,
+      balanceAmount: Math.max(0, totalAmount - payNow),
+      balanceStatus: computedMethod === "Full" ? "not_applicable" : "not_due",
+      currentPhase:  "deposit",
       createdAt:       now,
       updatedAt:       now,
     });
@@ -577,6 +586,14 @@ const getUserBookings = async (req, res) => {
           referenceNumber: p.referenceNumber  || "",
           proofUrl:        p.proofUrl         || "",
           status:          p.status           || "",
+          // Two-phase payment fields — see utils/bookings/bookingStatus.util.js.
+          // MyBookings.jsx needs these to know whether a "to pay" booking
+          // already has its deposit paid (Partial, awaiting balance) so it
+          // can show "Pay Balance" instead of "Pay Now" / hide "Cancel".
+          payNow:          p.payNow           || 0,
+          balanceAmount:   p.balanceAmount    || 0,
+          balanceStatus:   p.balanceStatus    || "not_applicable",
+          currentPhase:    p.currentPhase     || "deposit",
           // Was previously recomputed in MyBookings.jsx (getPaymentInfo) —
           // now computed once, here, so it can't drift from the admin
           // dashboard's own version of the same math.
@@ -632,10 +649,21 @@ const cancelBooking = async (req, res) => {
       return res.status(403).json({ message: "You are not allowed to cancel this booking." });
     }
 
-    // Bookings not yet picked up — whether still unpaid ("to pay") or
-    // already confirmed ("upcoming") — can be cancelled by the customer.
+    // Bookings not yet picked up can be cancelled by the customer — EXCEPT
+    // a "to pay" booking that already has its deposit paid (Partial,
+    // awaiting the balance). That's real money on it already, same as an
+    // "upcoming" booking, so it goes through Request Refund (admin review)
+    // instead of a free self-serve cancel — same reasoning as "upcoming".
     if (![BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING].includes(booking.status)) {
       return res.status(400).json({ message: "Only upcoming or unpaid bookings can be cancelled." });
+    }
+    if (booking.status === BOOKING_STATUS.TO_PAY) {
+      const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+      if (!paymentSnap.empty && paymentSnap.docs[0].data().status === "paid") {
+        return res.status(400).json({
+          message: "This booking's deposit has already been paid — please request a refund instead of cancelling directly.",
+        });
+      }
     }
 
     const now = new Date();
@@ -645,16 +673,20 @@ const cancelBooking = async (req, res) => {
       updatedAt:          now,
     });
 
-    // If this booking was still unpaid, its payment doc never got charged —
-    // mark it cancelled too so it doesn't sit as "pending" forever (and so
-    // it can't still be paid for via a stale PayMongo checkout link).
-    // Never touches an already-paid payment; refunding that goes through
-    // the separate requestRefund flow instead.
+    // If this booking was still unpaid (or only deposit-paid on a Partial),
+    // clean up its payment doc's still-pending fields so nothing sits as
+    // "pending" forever (and can't still be paid via a stale PayMongo
+    // checkout link). Never touches an already-paid deposit OR balance;
+    // refunding those goes through the separate requestRefund flow instead.
     if (booking.status === BOOKING_STATUS.TO_PAY) {
       try {
         const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
-        if (!paymentSnap.empty && paymentSnap.docs[0].data().status === "pending") {
-          await paymentSnap.docs[0].ref.update({ status: "cancelled", updatedAt: now });
+        if (!paymentSnap.empty) {
+          const p = paymentSnap.docs[0].data();
+          const updates = { updatedAt: now };
+          if (p.status === "pending") updates.status = "cancelled";
+          if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
+          if (Object.keys(updates).length > 1) await paymentSnap.docs[0].ref.update(updates);
         }
       } catch (paymentErr) {
         console.error("cancelBooking: failed to sync payment status:", paymentErr.message);

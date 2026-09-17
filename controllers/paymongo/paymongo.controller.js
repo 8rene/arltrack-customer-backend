@@ -94,14 +94,44 @@ const createPaymentLink = async (req, res) => {
     }
 
     // Server-computed charge amount — the only amount PayMongo ever sees.
-    const { payNow } = computePaymentSplit(payment.amount, payment.methodOfPayment);
-    const amountInCentavos = Math.round(payNow * 100);
+    //
+    // Two-phase payment: "deposit" (the default — payNow, 50% for Partial /
+    // 100% for Full) and, for Partial only, "balance" (the remaining 50%,
+    // only payable once the deposit has actually cleared). phase comes from
+    // the request body and defaults to "deposit" so any existing caller
+    // that doesn't send it keeps behaving exactly as before.
+    const phase      = req.body.phase === "balance" ? "balance" : "deposit";
+    const isPartial  = String(payment.methodOfPayment).toLowerCase() === "partial";
+
+    let amountToCharge;
+    if (phase === "balance") {
+      if (!isPartial) {
+        return res.status(400).json({ message: "This booking doesn't have a separate balance payment." });
+      }
+      if (payment.status !== "paid") {
+        return res.status(400).json({ message: "Please complete the deposit payment first." });
+      }
+      if (payment.balanceStatus === "paid") {
+        return res.status(400).json({ message: "The balance has already been paid." });
+      }
+      amountToCharge = Number(payment.balanceAmount) || 0;
+    } else {
+      const { payNow } = computePaymentSplit(payment.amount, payment.methodOfPayment);
+      amountToCharge = payNow;
+    }
+
+    const amountInCentavos = Math.round(amountToCharge * 100);
     if (isNaN(amountInCentavos) || amountInCentavos < 2000) {
       return res.status(400).json({ message: "Amount must be at least ₱20.00." });
     }
 
-    // Prevent duplicate sessions if one already exists and is still pending
-    if (payment.paymongoSessionID && payment.status === "pending") {
+    // Prevent duplicate sessions for the SAME phase if one already exists
+    // and is still pending. Checked against that phase's own status field
+    // (not just the generic `status`) — a deposit session lingering as
+    // "pending" shouldn't block starting the separate balance session
+    // later, and vice versa.
+    const phaseStatus = phase === "balance" ? payment.balanceStatus : payment.status;
+    if (payment.paymongoSessionID && payment.currentPhase === phase && phaseStatus === "pending") {
       return res.status(200).json({
         message:     "Payment link already exists.",
         checkoutUrl: payment.checkoutUrl,
@@ -120,7 +150,7 @@ const createPaymentLink = async (req, res) => {
         attributes: {
           line_items: [
             {
-              name:     description || `ARLTrack Booking #${bookingID}`,
+              name:     description || `ARLTrack Booking #${bookingID}${phase === "balance" ? " (Balance)" : ""}`,
               amount:   amountInCentavos,
               currency: "PHP",
               quantity: 1,
@@ -149,6 +179,8 @@ const createPaymentLink = async (req, res) => {
       paymongoSessionID: sessionID,
       paymongoChannel:   paymentMethodTypes[0],
       checkoutUrl,
+      currentPhase:      phase,
+      ...(phase === "balance" ? { balanceStatus: "pending" } : {}),
       updatedAt: new Date(),
     });
 
@@ -237,15 +269,18 @@ const handleWebhook = async (req, res) => {
       const paymentDoc = paymentSnap.docs[0];
       const payment    = paymentDoc.data();
       const bID        = payment.bookingID;
+      const phase      = payment.currentPhase === "balance" ? "balance" : "deposit";
 
       // getPaymentStatus (the poll a customer's browser hits when it's
       // redirected back from PayMongo's checkout page) can win the race
-      // and already mark this "paid" before the webhook arrives. If that
-      // already happened, skip straight to acknowledging the event —
-      // updating again is harmless, but logging again would double-count
-      // this payment in Transaction Logs.
-      if (payment.status === "paid") {
-        console.log("[PayMongo Webhook] payment already marked paid (handled via status poll) — skipping duplicate log for:", bID);
+      // and already mark THIS SAME PHASE "paid" before the webhook arrives.
+      // Checked against the phase's own status field, not just the generic
+      // `status` — a Partial booking's deposit stays "paid" forever, which
+      // used to make this wrongly treat the balance phase's own later
+      // webhook event as a duplicate and skip it entirely.
+      const alreadyPaid = phase === "balance" ? payment.balanceStatus === "paid" : payment.status === "paid";
+      if (alreadyPaid) {
+        console.log(`[PayMongo Webhook] ${phase} payment already marked paid (handled via status poll) — skipping duplicate log for:`, bID);
         return res.status(200).json({ received: true });
       }
 
@@ -257,25 +292,30 @@ const handleWebhook = async (req, res) => {
       const paidPayments   = session?.attributes?.payments || [];
       const paymongoPaymentID = paidPayments[0]?.id || null;
 
-      const updatePayload = { status: "paid", paidAt: now, updatedAt: now };
+      const updatePayload = phase === "balance"
+        ? { balanceStatus: "paid", balancePaidAt: now, updatedAt: now }
+        : { status: "paid", paidAt: now, updatedAt: now };
       if (paymongoPaymentID) {
-        updatePayload.paymongoPaymentID = paymongoPaymentID;
+        updatePayload.paymongoPaymentID = paymongoPaymentID; // most recent charge's PayMongo payment ID
       } else {
         console.warn("[PayMongo Webhook] payment.paid event had no payments[0].id — refunds for this payment will need a manual lookup.");
       }
 
       await paymentDoc.ref.update(updatePayload);
 
-      // Payment confirmed → booking moves from "to pay" to "upcoming".
-      // No-ops if the booking already moved on for some other reason.
+      // Booking only moves to "upcoming" once FULLY paid — for a Partial
+      // booking that means BOTH this and the deposit phase; for a Full
+      // booking (single phase) this alone is enough. promoteBookingToUpcoming
+      // checks that itself (isFullyPaid, bookingStatus.util.js), so a
+      // Partial deposit-only payment correctly leaves the booking on "to pay".
       if (bID) {
         await promoteBookingToUpcoming(bID);
-        console.log("[PayMongo Webhook] ✅ Payment settled for booking:", bID, "paymongoPaymentID:", paymongoPaymentID);
+        console.log(`[PayMongo Webhook] ✅ ${phase} payment settled for booking:`, bID, "paymongoPaymentID:", paymongoPaymentID);
       }
 
       recordAudit({
         action: "update",
-        description: `Payment ${paymentID || sessionID} settled (paid)${bID ? ` for booking ${bID}` : ""}.`,
+        description: `Payment ${paymentID || sessionID} — ${phase} settled (paid)${bID ? ` for booking ${bID}` : ""}.`,
         userID: payment.userID || null,
       });
 
@@ -284,11 +324,17 @@ const handleWebhook = async (req, res) => {
         paymentID: payment.paymentID || paymentID,
         userID: payment.userID || null,
         type: "Payment",
-        amount: Number(payment.amount) || 0,
+        // The amount actually charged for THIS phase — not the full grand
+        // total (payment.amount), which used to be logged here even for a
+        // Partial deposit that only charged 50%. That would double-count
+        // once the balance phase's own charge is logged separately too.
+        amount: phase === "balance"
+          ? (Number(payment.balanceAmount) || 0)
+          : (computePaymentSplit(payment.amount, payment.methodOfPayment).payNow || 0),
         status: "Success",
         paymentMethod: payment.paymentMethod || "—",
         referenceNumber: payment.referenceNumber || "—",
-        description: `Payment settled via PayMongo${bID ? ` for booking ${bID}` : ""}.`,
+        description: `${phase === "balance" ? "Balance" : "Deposit"} payment settled via PayMongo${bID ? ` for booking ${bID}` : ""}.`,
       });
 
       return res.status(200).json({ received: true });
@@ -311,20 +357,26 @@ const handleWebhook = async (req, res) => {
       }
       if (paymentSnap && !paymentSnap.empty) {
         const failedPayment = paymentSnap.docs[0].data();
-        await paymentSnap.docs[0].ref.update({ status: "failed", updatedAt: now });
+        const phase = failedPayment.currentPhase === "balance" ? "balance" : "deposit";
 
-        // A failed payment (including choosing PayMongo's test-mode "Fail"
-        // option) cancels the booking right away instead of leaving it
-        // sitting as "to pay" — it shouldn't count as a real booking just
-        // because someone started, then failed, a checkout. Unlike the 12h/
-        // schedule-passed cancellation, cancelStaleBooking is reused here
-        // simply because it already does exactly what's needed (cancel the
-        // booking doc + mirror onto bookingSession + audit log) — it won't
-        // re-touch the payment doc since it's already "failed", not
-        // "pending". To try again, the customer books fresh rather than
-        // retrying this same booking.
-        if (failedPayment.bookingID) {
-          await cancelStaleBooking(failedPayment.bookingID, "Booking cancelled: payment failed.");
+        if (phase === "balance") {
+          // Balance failed — the deposit is already real money collected,
+          // so this does NOT cancel the booking (that would need a refund,
+          // which this auto-cancel path doesn't handle). Just mark the
+          // balance failed so the customer can retry paying it; the
+          // booking stays "to pay" either way.
+          await paymentSnap.docs[0].ref.update({ balanceStatus: "failed", updatedAt: now });
+        } else {
+          // Deposit failed (including choosing PayMongo's test-mode "Fail"
+          // option) — nothing has actually been charged yet, so it's safe
+          // to cancel the booking outright instead of leaving it dangling
+          // as "to pay". It shouldn't count as a real booking just because
+          // someone started, then failed, a checkout. To try again, the
+          // customer books fresh.
+          await paymentSnap.docs[0].ref.update({ status: "failed", updatedAt: now });
+          if (failedPayment.bookingID) {
+            await cancelStaleBooking(failedPayment.bookingID, "Booking cancelled: payment failed.");
+          }
         }
       }
       return res.status(200).json({ received: true });
@@ -456,8 +508,16 @@ const getPaymentStatus = async (req, res) => {
     }
 
     const p = snap.docs[0].data();
+    const phase       = p.currentPhase === "balance" ? "balance" : "deposit";
+    const phaseStatus = phase === "balance" ? p.balanceStatus : p.status;
 
-    if (p.status === "pending" && p.paymongoSessionID) {
+    // Poll based on the CURRENT phase's own status — not just the generic
+    // `status`, which stays "paid" forever once the deposit clears. Without
+    // this, a Partial booking's balance checkout would never actually get
+    // polled here: p.status === "paid" (from the deposit) would make this
+    // condition false, and the customer's browser would just sit showing
+    // the last-known Firestore status instead of ever checking PayMongo.
+    if (phaseStatus === "pending" && p.paymongoSessionID) {
       try {
         const pmRes = await axios.get(
           `${PAYMONGO_V1}/checkout_sessions/${p.paymongoSessionID}`,
@@ -466,18 +526,19 @@ const getPaymentStatus = async (req, res) => {
         const payments = pmRes.data?.data?.attributes?.payments || [];
         const paidPayment = payments.find(pay => pay.attributes?.status === "paid");
 
-        if (paidPayment && p.status !== "paid") {
+        if (paidPayment && phaseStatus !== "paid") {
           const now = new Date();
-          await snap.docs[0].ref.update({
-            status: "paid",
-            paidAt: now,
-            updatedAt: now,
-            paymongoPaymentID: paidPayment.id,
-          });
+          const updatePayload = phase === "balance"
+            ? { balanceStatus: "paid", balancePaidAt: now, updatedAt: now, paymongoPaymentID: paidPayment.id }
+            : { status: "paid", paidAt: now, updatedAt: now, paymongoPaymentID: paidPayment.id };
+          await snap.docs[0].ref.update(updatePayload);
 
           // Same promotion the webhook does — this poll can win the race
           // against the webhook, so it has to do this itself too rather
-          // than assuming the webhook already will have.
+          // than assuming the webhook already will have. Only actually
+          // flips the booking to "upcoming" once FULLY paid (see
+          // isFullyPaid) — a Partial deposit confirmed here still leaves
+          // the booking on "to pay" until the balance phase also clears.
           if (p.bookingID) {
             await promoteBookingToUpcoming(p.bookingID);
           }
@@ -492,7 +553,7 @@ const getPaymentStatus = async (req, res) => {
           // it has no way of knowing this already happened).
           recordAudit({
             action: "update",
-            description: `Payment ${paymentID} settled (paid)${p.bookingID ? ` for booking ${p.bookingID}` : ""} — confirmed via status poll.`,
+            description: `Payment ${paymentID} — ${phase} settled (paid)${p.bookingID ? ` for booking ${p.bookingID}` : ""} — confirmed via status poll.`,
             userID: p.userID || null,
           });
 
@@ -501,14 +562,16 @@ const getPaymentStatus = async (req, res) => {
             paymentID: p.paymentID || paymentID,
             userID: p.userID || null,
             type: "Payment",
-            amount: Number(p.amount) || 0,
+            amount: phase === "balance"
+              ? (Number(p.balanceAmount) || 0)
+              : (computePaymentSplit(p.amount, p.methodOfPayment).payNow || 0),
             status: "Success",
-            description: `Payment confirmed via status poll (checkout_session ${p.paymongoSessionID}).`,
+            description: `${phase === "balance" ? "Balance" : "Deposit"} payment confirmed via status poll (checkout_session ${p.paymongoSessionID}).`,
           });
 
-          return res.status(200).json({ status: "paid", bookingID: p.bookingID });
+          return res.status(200).json({ status: "paid", bookingID: p.bookingID, phase });
         }
-        return res.status(200).json({ status: p.status, bookingID: p.bookingID });
+        return res.status(200).json({ status: phaseStatus, bookingID: p.bookingID, phase });
       } catch (e) {
         // Previously swallowed silently, which is exactly why a real failure
         // here (e.g. the v1/v2 endpoint mismatch this fixes) went unnoticed
@@ -523,9 +586,10 @@ const getPaymentStatus = async (req, res) => {
     }
 
     return res.status(200).json({
-      status:      p.status,
+      status:      phaseStatus,
       bookingID:   p.bookingID,
       checkoutUrl: p.checkoutUrl || null,
+      phase,
     });
 
   } catch (error) {

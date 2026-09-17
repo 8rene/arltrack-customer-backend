@@ -143,6 +143,13 @@ const getBookingDetails = async (req, res) => {
         referenceNumber:   p.referenceNumber  || "",
         proofUrl:          p.proofUrl         || "",
         status:            p.status           || "pending",
+        // Two-phase payment fields (see utils/bookings/bookingStatus.util.js)
+        // — lets the frontend offer "Complete Payment" for a still-pending
+        // deposit OR a still-pending balance, not just the deposit.
+        payNow:            p.payNow           || 0,
+        balanceAmount:     p.balanceAmount    || 0,
+        balanceStatus:     p.balanceStatus    || "not_applicable",
+        currentPhase:      p.currentPhase     || "deposit",
         // Lets the frontend offer a "Complete Payment" link while a
         // PayMongo checkout session is still open for this payment.
         checkoutUrl:       p.checkoutUrl      || null,

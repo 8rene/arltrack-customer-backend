@@ -21,7 +21,9 @@ const runCancelStaleBookings = async () => {
   let cancelledCount = 0;
   for (const doc of snap.docs) {
     const booking = doc.data();
-    const reason  = getStaleReason(booking);
+    const paymentSnap = await db.collection("payments").where("bookingID", "==", booking.bookingID).limit(1).get();
+    const payment = paymentSnap.empty ? null : paymentSnap.docs[0].data();
+    const reason  = getStaleReason(booking, payment);
     if (!reason) continue;
     const cancelled = await cancelStaleBooking(booking.bookingID, reason);
     if (cancelled) cancelledCount++;
