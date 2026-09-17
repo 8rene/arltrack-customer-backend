@@ -728,6 +728,72 @@ const cancelBooking = async (req, res) => {
 };
 
 
+// PATCH /api/bookings/:bookingID/request-cancellation
+// For ONGOING bookings only — customer can't self-cancel once the rental
+// has started, so this just flags the booking for admin review instead of
+// changing its status outright. Admin approval/rejection is handled on the
+// admin-backend side (not implemented in this file).
+const requestCancellation = async (req, res) => {
+  const { bookingID } = req.params;
+  const userID = req.user.userID; // from verified JWT — never trust body
+  const { reason } = req.body;
+
+  if (!bookingID) {
+    return res.status(400).json({ message: "bookingID is required." });
+  }
+  if (!reason || !reason.trim()) {
+    return res.status(400).json({ message: "A reason is required to request cancellation." });
+  }
+
+  try {
+    // Find the booking document by bookingID field
+    const snap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
+
+    if (snap.empty) {
+      return res.status(404).json({ message: "Booking not found." });
+    }
+
+    const doc     = snap.docs[0];
+    const booking = doc.data();
+
+    // Ownership check
+    if (booking.userID !== userID) {
+      return res.status(403).json({ message: "You are not allowed to modify this booking." });
+    }
+
+    // Only bookings currently ongoing can go through this flow — anything
+    // still "to pay" or "upcoming" uses the direct self-serve cancelBooking
+    // instead.
+    if (booking.status !== BOOKING_STATUS.ONGOING) {
+      return res.status(400).json({ message: "Only ongoing bookings can request cancellation." });
+    }
+
+    // Don't allow spamming multiple pending requests on the same booking
+    if (booking.cancellationRequestStatus === "pending") {
+      return res.status(400).json({ message: "A cancellation request for this booking is already pending admin review." });
+    }
+
+    const now = new Date();
+    await doc.ref.update({
+      cancellationRequestStatus: "pending",
+      cancellationRequestReason: reason.trim(),
+      cancellationRequestedAt:   now,
+      updatedAt:                 now,
+    });
+
+    recordAudit({
+      action: "update",
+      description: `Cancellation requested for booking ${bookingID} by customer. Reason: ${reason.trim()}`,
+      userID,
+    });
+
+    return res.status(200).json({ message: "Cancellation request submitted. An admin will review it shortly." });
+  } catch (error) {
+    console.error("requestCancellation error:", error);
+    return res.status(500).json({ message: "Failed to submit cancellation request. Please try again." });
+  }
+};
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/bookings/check-coding
@@ -933,4 +999,4 @@ const checkCodingRule = async (req, res) => {
   }
 };
 
-module.exports = { createBooking, getUserBookings, cancelBooking, checkCodingRule, getBookingQuote };
+module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getBookingQuote };
