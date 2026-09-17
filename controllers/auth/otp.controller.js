@@ -15,8 +15,8 @@ const MAX_ATTEMPTS   = 5;              // max wrong guesses before lockout
 //   - "reset"  — forgot-password flow. The email MUST already belong to a
 //     real, non-admin-side account, or we don't send an OTP at all. This
 //     both avoids wasting OTP emails on addresses that were never
-//     registered, and stops Owner/Admin/Supervisor accounts from using
-//     the customer-side forgot-password flow to reset their password —
+//     registered, and stops Owner/Admin/Supervisor/Driver accounts from
+//     using the customer-side forgot-password flow to reset their password —
 //     same accounts that are blocked from customer login (login.controller.js).
 //
 // Message is intentionally generic either way ("No account found with

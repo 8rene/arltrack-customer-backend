@@ -3,34 +3,12 @@ const { db }  = require("../../config/firebaseConnection/firebase");
 const jwt     = require("jsonwebtoken");
 const { createSessionLog, expireStaleSessionsForUser } = require("../../utils/sessionLogs/sessionLogs.util");
 const { checkAccountStatus } = require("../../utils/accountStatus/accountStatus.util");
+const { isBlockedAdminRole } = require("../../utils/roles/role.util");
 
-// Admin-side role NAMES (from the shared 'roles' Firestore collection) —
-// these accounts manage the fleet/bookings and should never be able to log
-// into the customer-facing site. Driver is intentionally NOT blocked here
-// since drivers may also need customer-side access depending on how the
-// business uses that role; only Owner/Admin/Supervisor are blocked.
-//
-// NOTE: this checks the role doc's "name" field (confirmed in Firestore),
-// NOT "roleName" — that mismatch was the root cause of the earlier bypass.
-const BLOCKED_ADMIN_ROLE_NAMES = new Set(["Owner", "Admin", "Supervisor"]);
-
-
-const isBlockedAdminRole = async (roleID) => {
-  try {
-    const roleSnap = await db.collection("roles").doc(roleID).get();
-
-    if (!roleSnap.exists) {
-      console.error(`Role lookup failed: no roles doc for roleID "${roleID}". Failing closed (blocking login).`);
-      return true;
-    }
-
-    const roleName = roleSnap.data().name;
-    return BLOCKED_ADMIN_ROLE_NAMES.has(roleName);
-  } catch (err) {
-    console.error(`Role lookup error for roleID "${roleID}":`, err.message, "— failing closed (blocking login).");
-    return true;
-  }
-};
+// Admin-side role blocking (Owner/Admin/Supervisor/Driver) now lives in one
+// place — utils/roles/role.util.js — instead of being duplicated here. This
+// file used to keep its own local copy of this logic, which is exactly how
+// it drifted out of sync with google.controller.js before.
 
 const login = async (req, res) => {
   const { email, password } = req.body;
@@ -78,7 +56,7 @@ const login = async (req, res) => {
     // Message is intentionally generic ("does not exist") rather than
     // confirming this is an admin account, so login attempts here don't
     // leak which emails belong to staff accounts.
-    if (userData.roleID && await isBlockedAdminRole(userData.roleID)) {
+    if (userData.roleID && await isBlockedAdminRole(userData.roleID, db)) {
       return res.status(404).json({
         message: "The user does not exist.",
       });

@@ -28,10 +28,9 @@ const ROLE_IDS = {
 };
 
 // Admin-side roles that should never be able to log into the
-// customer-facing site. Driver is intentionally NOT included — drivers may
-// also need customer-side access depending on how the business uses that
-// role.
-const BLOCKED_ADMIN_ROLE_NAMES = new Set([ROLES.OWNER, ROLES.ADMIN, ROLES.SUPERVISOR]);
+// customer-facing site. Driver is now included alongside Owner/Admin/
+// Supervisor — all four staff roles belong on the admin panel only.
+const BLOCKED_ADMIN_ROLE_NAMES = new Set([ROLES.OWNER, ROLES.ADMIN, ROLES.SUPERVISOR, ROLES.DRIVER]);
 
 /**
  * Map a Firestore roleID → roleName.

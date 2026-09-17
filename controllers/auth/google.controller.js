@@ -2,13 +2,13 @@ const { auth, db } = require("../../config/firebaseConnection/firebase");
 const jwt          = require("jsonwebtoken");
 const { createSessionLog, expireStaleSessionsForUser } = require("../../utils/sessionLogs/sessionLogs.util");
 const { checkAccountStatus } = require("../../utils/accountStatus/accountStatus.util");
+const { isBlockedAdminRole } = require("../../utils/roles/role.util");
 
-// See login.controller.js for details — same admin roleIDs are blocked here.
-const BLOCKED_ADMIN_ROLE_IDS = new Set([
-  "1BX4V7M43t6barbPd4BP", // Owner
-  "5bhRYMrDkjrs9VlFFY4u", // Admin
-  "fFA8G2R2ANLbVsH00jlv", // Supervisor
-]);
+// Admin-side role blocking (Owner/Admin/Supervisor/Driver) now lives in one
+// place — utils/roles/role.util.js — instead of a local hardcoded roleID
+// set here. Keeping a separate copy in this file is what let it fall out
+// of sync with login.controller.js before (this set never had Driver in it
+// even when the other file changed).
 
 const googleLogin = async (req, res) => {
   const { idToken } = req.body;
@@ -48,7 +48,7 @@ const googleLogin = async (req, res) => {
 
     // 2b. Block admin-side accounts (Owner/Admin/Supervisor) from logging
     // into the customer-facing site via Google too.
-    if (userData.roleID && BLOCKED_ADMIN_ROLE_IDS.has(userData.roleID)) {
+    if (userData.roleID && await isBlockedAdminRole(userData.roleID, db)) {
       return res.status(403).json({
         message: "This account is an admin account and can't be used to log in here. Please use the admin panel.",
       });
