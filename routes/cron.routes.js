@@ -42,5 +42,4 @@ router.get("/cancel-stale-bookings", verifyCronRequest, async (req, res) => {
   }
 });
 
-
 module.exports = router;

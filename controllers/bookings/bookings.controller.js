@@ -933,5 +933,4 @@ const checkCodingRule = async (req, res) => {
   }
 };
 
-
 module.exports = { createBooking, getUserBookings, cancelBooking, checkCodingRule, getBookingQuote };

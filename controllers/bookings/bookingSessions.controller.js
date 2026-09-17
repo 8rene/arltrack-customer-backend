@@ -194,5 +194,4 @@ const getBookingDetails = async (req, res) => {
 
 };
 
-
 module.exports = { getBookingTraceback, getBookingDetails };

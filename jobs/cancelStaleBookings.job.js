@@ -33,5 +33,4 @@ const runCancelStaleBookings = async () => {
   return { cancelledCount, checked: snap.size };
 };
 
-
 module.exports = { runCancelStaleBookings };
