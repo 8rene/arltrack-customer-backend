@@ -1,6 +1,7 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const admin  = require("firebase-admin");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
+const { generateUniqueReferralCode } = require("../../utils/referrals/referral.util");
 
 // Same role IDs as editRequest.controller.js/signup.controller.js's
 // STAFF_NOTIFY_ROLE_IDS — kept as a local literal here too since each
@@ -106,6 +107,17 @@ const getFullProfile = async (req, res) => {
     const user    = userDoc.data();
     const details = detailsDoc.exists ? detailsDoc.data() : {};
 
+    // Accounts created before the referral feature existed have no
+    // referralCode on their "user" doc at all (not even null — the field
+    // was never written). Generate and persist one the first time they
+    // load their profile, so every user ends up with a code without
+    // needing a one-off backfill script run against the whole collection.
+    let referralCode = user.referralCode;
+    if (!referralCode) {
+      referralCode = await generateUniqueReferralCode();
+      await db.collection("user").doc(userID).update({ referralCode });
+    }
+
     // Map all addresses
     const addresses = addressSnap.docs.map(doc => ({
       userAddressID: doc.id,
@@ -134,6 +146,12 @@ const getFullProfile = async (req, res) => {
       roleID:            user.roleID            || "",
       isVerified:        user.isVerified        || false,
       status:            user.status            || "",
+      // referral — this user's own shareable code and how many people
+      // they've referred so far. Was already on the "user" doc since
+      // signup started writing it, just never surfaced through this
+      // endpoint before.
+      referralCode:      referralCode           || "",
+      referralCount:     user.referralCount     || 0,
       // userDetails
       firstName:         details.firstName      || "",
       lastName:          details.lastName       || "",
