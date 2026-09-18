@@ -1,5 +1,19 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 
+// Firestore Admin SDK Timestamps serialize over res.json() as a plain
+// { _seconds, _nanoseconds } object (their own toJSON()) — NOT an ISO
+// string. `new Date({_seconds:...})` on the frontend silently produces
+// an Invalid Date (no error thrown), which then turns into a "NaN-NaN-NaN"
+// calendar key in Booking.jsx's getDateStatuses() and is never matched
+// against any real day. Always convert to a real Date/ISO string before
+// putting a Firestore timestamp field in an API response.
+const toISO = (value) => {
+  if (!value) return null;
+  if (typeof value.toDate === "function") return value.toDate().toISOString(); // Firestore Timestamp
+  if (value instanceof Date) return value.toISOString();
+  return value; // already a string/number — leave as-is
+};
+
 // GET /api/services/types — returns only serviceType names (no carID)
 const getServiceTypes = async (req, res) => {
   try {
@@ -42,9 +56,9 @@ const getCarBookings = async (req, res) => {
       const d = doc.data();
       return {
         // bookingID intentionally excluded — not needed by client and avoids ID enumeration
-        status:        d.status        || "pending",
-        startDateTime: d.startDateTime || null,
-        endDateTime:   d.endDateTime   || null,
+        status:        d.status || "pending",
+        startDateTime: toISO(d.startDateTime),
+        endDateTime:   toISO(d.endDateTime),
       };
     });
 
@@ -55,8 +69,8 @@ const getCarBookings = async (req, res) => {
       .filter(Boolean)
       .map((d) => ({
         status:        "maintenance",
-        startDateTime: d,
-        endDateTime:   d,
+        startDateTime: toISO(d),
+        endDateTime:   toISO(d),
       }));
 
     return res.status(200).json([...bookings, ...maintenanceDays]);
