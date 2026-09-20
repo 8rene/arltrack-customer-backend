@@ -208,6 +208,21 @@ const handleWebhook = async (req, res) => {
   const webhookSecret = process.env.PAYMONGO_WEBHOOK_SECRET;
 
   const sigHeader = req.headers["paymongo-signature"];
+
+  // Whenever a webhook secret IS configured, a signature header is
+  // mandatory — not optional. The old check here was
+  // `if (webhookSecret && sigHeader)`, which only ran verification when
+  // BOTH were present. That meant anyone could skip verification
+  // entirely just by leaving the Paymongo-Signature header off their
+  // request — this endpoint has no auth middleware (PayMongo calls it
+  // directly), so a forged POST with a real paymentID could mark any
+  // pending payment "paid" for free. Failing closed here (reject when
+  // secret is set but header is missing) closes that gap.
+  if (webhookSecret && !sigHeader) {
+    console.warn("PayMongo webhook: missing signature header while a webhook secret is configured — rejecting.");
+    return res.status(400).json({ message: "Missing signature." });
+  }
+
   if (webhookSecret && sigHeader) {
     const crypto = require("crypto");
     const parts  = {};
@@ -223,7 +238,23 @@ const handleWebhook = async (req, res) => {
     const rawBody = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body);
     const toSign  = `${parts.t}.${rawBody}`;
     const hmac    = crypto.createHmac("sha256", webhookSecret).update(toSign).digest("hex");
-    const isValid = hmac === parts.te || hmac === parts.li;
+
+    // Constant-time comparison — a plain `===` bails out at the first
+    // differing character, so how long the check takes leaks how many
+    // leading hex characters an attacker's guess got right. That's a
+    // narrow, largely theoretical attack over a network (a lot of
+    // requests needed per character), but timingSafeEqual closes it for
+    // free. It throws on mismatched buffer lengths instead of returning
+    // false, so length is checked first — a missing/malformed `te`/`li`
+    // segment just fails the comparison instead of crashing the request.
+    const safeEqual = (a, b) => {
+      if (typeof a !== "string" || typeof b !== "string") return false;
+      const bufA = Buffer.from(a, "utf8");
+      const bufB = Buffer.from(b, "utf8");
+      if (bufA.length !== bufB.length) return false;
+      return crypto.timingSafeEqual(bufA, bufB);
+    };
+    const isValid = safeEqual(hmac, parts.te) || safeEqual(hmac, parts.li);
 
     if (!isValid) {
       console.warn("PayMongo webhook: invalid signature");
