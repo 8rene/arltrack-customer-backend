@@ -5,6 +5,7 @@ const createUserDetails  = require("../../models/user/userDetails.model");
 const createUserAddress  = require("../../models/user/userAddress.model");
 const createUserDocument = require("../../models/user/userDocument.model");
 const createReferral     = require("../../models/referral/referral.model");
+const { recordAudit }    = require("../../utils/auditLogs/auditLogs.util");
 const { generateUniqueReferralCode, findUserByReferralCode } = require("../../utils/referrals/referral.util");
 
 // Same role IDs as bookings.controller.js's CANCELLATION_APPROVER_ROLE_IDS /
@@ -219,6 +220,18 @@ const signup = async (req, res) => {
         // the bell.
         console.error("[signup] Failed to write notifications:", notifErr.message);
       }
+
+      // Audit trail: one entry per new signup, including who referred them.
+      // recordAudit never throws, so this can't fail the signup itself.
+      await recordAudit({
+        action: "create",
+        description: `New signup: ${username || email}${
+          referrerDoc
+            ? ` (referred by ${referrerDoc.data().username || referrerDoc.data().email || "a member"})`
+            : (referralCode ? ` (entered referral code ${String(referralCode).trim().toUpperCase()}, no match)` : "")
+        }.`,
+        userID,
+      });
 
       return res.status(201).json({
         message: "Signup successful",
