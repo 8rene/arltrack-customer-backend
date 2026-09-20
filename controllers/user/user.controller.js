@@ -118,6 +118,29 @@ const getFullProfile = async (req, res) => {
       await db.collection("user").doc(userID).update({ referralCode });
     }
 
+    // Who referred this user (if anyone), and who this user has invited.
+    // Usernames + status only — no email/phone of other customers.
+    let referredBy = null;
+    if (user.referredBy) {
+      const referrerDoc = await db.collection("user").doc(user.referredBy).get();
+      referredBy = {
+        username: referrerDoc.exists ? (referrerDoc.data().username || "") : "",
+        removed:  !referrerDoc.exists,
+      };
+    }
+    const invitedSnap = await db.collection("user").where("referredBy", "==", userID).get();
+    const invited = invitedSnap.docs
+      .map((d) => {
+        const u = d.data();
+        return {
+          username:   u.username || "",
+          isVerified: !!u.isVerified,
+          status:     u.status || "",
+          joinedAt:   u.createdAt?.toDate ? u.createdAt.toDate().toISOString() : null,
+        };
+      })
+      .sort((a, b) => String(b.joinedAt || "").localeCompare(String(a.joinedAt || "")));
+
     // Map all addresses
     const addresses = addressSnap.docs.map(doc => ({
       userAddressID: doc.id,
@@ -152,6 +175,8 @@ const getFullProfile = async (req, res) => {
       // endpoint before.
       referralCode:      referralCode           || "",
       referralCount:     user.referralCount     || 0,
+      referredBy,                       // { username, removed } | null
+      invited,                          // [{ username, isVerified, status, joinedAt }]
       // userDetails
       firstName:         details.firstName      || "",
       lastName:          details.lastName       || "",

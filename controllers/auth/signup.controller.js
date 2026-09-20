@@ -200,7 +200,11 @@ const signup = async (req, res) => {
             refID: userID,
             refCollection: "user",
             title: "New user signup",
-            message: `${username || email || "A new user"} is waiting for account review.`,
+            message: `${username || email || "A new user"} is waiting for account review.${
+              referrerDoc
+                ? ` Referred by ${referrerDoc.data().username || referrerDoc.data().email || "a member"}.`
+                : (referralCode ? ` Entered referral code ${String(referralCode).trim().toUpperCase()} (no match).` : "")
+            }`,
             isRead: false,
             status: "active",
             createdAt: admin.firestore.FieldValue.serverTimestamp(),

@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 
-const { signup, checkAvailability } = require("../controllers/auth/signup.controller");
+const { signup, checkAvailability, checkReferralCode } = require("../controllers/auth/signup.controller");
 const { login }   = require("../controllers/auth/login.controller");
 const { sendOTP, verifyOTP } = require("../controllers/auth/otp.controller");
 const { resetPassword } = require("../controllers/auth/resetPassword.controller"); // ← NEW
@@ -13,6 +13,8 @@ const verifyToken    = require("../middlewares/auth.middleware");
 
 // GET /api/auth/check-availability?email=x&phone=x&username=x
 router.get("/check-availability", checkAvailability);
+// GET /api/auth/check-referral?code=ARL-XXXXXXXX  (used live by the signup form)
+router.get("/check-referral",     checkReferralCode);
 router.post("/signup",            validateSignup, signup);
 router.post("/login",             validateLogin,  login);
 router.post("/send-otp",          sendOTP);
