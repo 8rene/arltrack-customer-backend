@@ -336,6 +336,13 @@ const createBooking = async (req, res) => {
             : "You already have a booking for this car on these dates.",
           existingBookingID: b.bookingID,
           existingStatus: st,
+          // The frontend toast used to just repeat the generic message above
+          // with nothing to check it against — a customer who genuinely
+          // never booked this car had no way to tell what was actually
+          // blocking them. Sending the conflicting booking's own dates lets
+          // the UI show exactly which reservation is in the way.
+          existingStartDateTime: b.startDateTime || null,
+          existingEndDateTime: b.endDateTime || null,
         });
       }
     }

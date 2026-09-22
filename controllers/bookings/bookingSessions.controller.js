@@ -150,6 +150,11 @@ const getBookingDetails = async (req, res) => {
         balanceAmount:     p.balanceAmount    || 0,
         balanceStatus:     p.balanceStatus    || "not_applicable",
         currentPhase:      p.currentPhase     || "deposit",
+        // Staff discount (see admin applyDiscount) — getUserBookings already
+        // sends this to MyBookings.jsx (see bookings.controller.js), but this
+        // endpoint built its own separate payment object and never copied it
+        // over, so BookingDetails.jsx had no discount data to show at all.
+        discountAmount:    Number(p.discountAmount) || 0,
         // Lets the frontend offer a "Complete Payment" link while a
         // PayMongo checkout session is still open for this payment.
         checkoutUrl:       p.checkoutUrl      || null,
