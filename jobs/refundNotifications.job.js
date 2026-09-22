@@ -2,16 +2,16 @@ const { db } = require("../config/firebaseConnection/firebase");
 const { createNotification } = require("../services/notification/notification.service");
 
 // ─────────────────────────────────────────────────────────────────────────────
-// "Approved"/"Rejected" only ever get SET from the admin app (staff review a
-// refundRequests doc there — see admin-backend's refundRequest.service.js).
-// Rather than adding a notification hook inside that separate deployable,
-// this job just watches the shared refundRequests collection from the
-// customer side instead and reacts once it sees the status flip — same
-// data, no admin code touched at all.
+// FALLBACK only. The admin app now notifies the customer the moment staff
+// Approve/Reject a refund request (admin-backend refundRequest.service.js) and
+// stamps customerNotified: true on the request. This job just catches anything
+// that didn't get notified that way — e.g. a decision made on an older admin
+// deployment — so a customer is never left without an answer. Because it runs on
+// a daily cron, on its own it used to mean an approval could reach the customer
+// up to a day late.
 //
-// customerNotified is a plain boolean flag stamped on the refundRequests
-// doc itself once this job has sent the notification for it, so a request
-// is only ever scanned/notified once instead of every cron run forever.
+// customerNotified is a plain boolean flag on the refundRequests doc, so a
+// request is only ever scanned/notified once.
 // ─────────────────────────────────────────────────────────────────────────────
 const runRefundNotifications = async () => {
   const snap = await db.collection("refundRequests")

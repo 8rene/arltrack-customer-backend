@@ -20,6 +20,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { db } = require("../config/firebaseConnection/firebase");
+const { getPaymentBreakdown } = require("./payments/paymentBreakdown.util");
 
 // Hardcoded fallback values — used ONLY if Firestore has no systemSettings
 // doc yet, or the read fails. Kept identical to the original constants so
@@ -157,37 +158,28 @@ const computePaymentSplit = (grandTotal, paymentAmount) => {
 };
 
 // ── "How much of this payment has actually been paid?" badge/derivation ────
-// Mirrors the admin backend's computeAmounts() (payments.service.js) so the
-// customer-facing badge always agrees with the admin dashboard's math,
-// instead of each frontend recomputing its own (possibly-drifting) copy.
+// Built on getPaymentBreakdown() — the same math the admin backend's
+// computeAmounts() uses (identical copy, see paymentBreakdown.util.js) — so the
+// customer-facing badge can never drift from the admin dashboard.
+//
+// keys: "due" (nothing paid yet) | "partial" (deposit paid, balance owed) |
+//       "paid" | "failed" | "cancelled" | "refunded"
+//
+// This used to ignore the payment's own status: an unpaid ("pending") Full
+// booking showed as "paid" and an unpaid Partial as "partial" (assuming the
+// flat ₱1,000 deposit). Nothing counts as paid until the payment is confirmed.
 const derivePaymentStatus = (payment) => {
   if (!payment) return { key: "due", balance: 0, amountPaid: 0 };
 
-  const amount     = Number(payment.amount) || 0;
-  const depositFee = Number(payment.depositFee) || 0;
-  const method     = String(payment.methodOfPayment || "").toLowerCase();
-  const status     = String(payment.status || "").toLowerCase();
+  const status = String(payment.status || "").toLowerCase();
+  if (status === "failed" || status === "rejected") return { key: "failed",    balance: 0, amountPaid: 0 };
+  if (status === "cancelled")                       return { key: "cancelled", balance: 0, amountPaid: 0 };
+  if (status === "refunded")                        return { key: "refunded",  balance: 0, amountPaid: 0 };
 
-  if (status === "failed" || status === "rejected") return { key: "failed", balance: 0, amountPaid: 0 };
-  if (status === "cancelled") return { key: "cancelled", balance: 0, amountPaid: 0 };
-
-  let amountPaid;
-  if (method.includes("full")) {
-    amountPaid = amount;
-  } else if (method.includes("down")) {
-    amountPaid = Math.round(amount / 2);
-  } else if (method.includes("deposit") || method.includes("partial")) {
-    amountPaid = depositFee;
-  } else if (status === "paid" || status === "approved") {
-    amountPaid = amount;
-  } else {
-    amountPaid = depositFee;
-  }
-
-  const balance = Math.max(0, amount - amountPaid);
-  if (amountPaid > 0 && balance <= 0) return { key: "paid", balance, amountPaid };
-  if (amountPaid > 0) return { key: "partial", balance, amountPaid };
-  return { key: "due", balance, amountPaid };
+  const { amountPaid, balance } = getPaymentBreakdown(payment);
+  if (amountPaid <= 0) return { key: "due",     balance, amountPaid: 0 };
+  if (balance <= 0)    return { key: "paid",    balance, amountPaid };
+  return                      { key: "partial", balance, amountPaid };
 };
 
 module.exports = {

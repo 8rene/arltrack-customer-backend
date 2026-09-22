@@ -4,6 +4,7 @@ const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require("../../utils/pricing");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
+const { notifyStaff } = require("../../services/notification/notification.service");
 
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
@@ -308,6 +309,37 @@ const createBooking = async (req, res) => {
       return res.status(400).json({ message: codingViolation, codingViolation: true });
     }
 
+    // ── Duplicate guard: same customer + same car + overlapping dates ──
+    // A customer who backs out of checkout and books again used to end up with
+    // several unpaid "to pay" bookings for the same trip (and, if each got paid,
+    // several real ones). Filtered in memory so no composite index is needed.
+    {
+      const asDate = (v) => (v && v.toDate ? v.toDate() : new Date(v));
+      const mineSnap = await db.collection("bookings").where("userID", "==", userID).get();
+      const candidates = mineSnap.docs
+        .map((d) => d.data())
+        .filter((b) =>
+          b.carID === carID &&
+          [BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING].includes(b.status) &&
+          asDate(b.startDateTime) < endDateTime &&
+          asDate(b.endDateTime)   > startDateTime
+        );
+
+      for (const b of candidates) {
+        // An unpaid booking that has gone stale (or was actually paid) is
+        // resolved first, so it never blocks a legitimate rebooking.
+        const st = b.status === BOOKING_STATUS.TO_PAY ? await enforceToPayValidity(b.bookingID, b) : b.status;
+        if (st === BOOKING_STATUS.CANCELLED) continue;
+        return res.status(409).json({
+          message: st === BOOKING_STATUS.TO_PAY
+            ? "You already have an unpaid booking for this car on these dates. Finish paying for it in My Bookings › To Pay, or cancel it there first."
+            : "You already have a booking for this car on these dates.",
+          existingBookingID: b.bookingID,
+          existingStatus: st,
+        });
+      }
+    }
+
     // ── 1. Save to bookings collection (auto Firestore ID) ──
     const bookingRef = db.collection("bookings").doc();
     const bookingID  = bookingRef.id;
@@ -603,8 +635,12 @@ const getUserBookings = async (req, res) => {
           // already has its deposit paid (Partial, awaiting balance) so it
           // can show "Pay Balance" instead of "Pay Now" / hide "Cancel".
           payNow:          p.payNow           || 0,
-          balanceAmount:   p.balanceAmount    || 0,
-          balanceStatus:   p.balanceStatus    || "not_applicable",
+          // Bookings created before two-phase payments have no balance fields:
+          // for a Partial one, infer them so Pay Balance / the balance math work.
+          balanceAmount:   p.balanceAmount    || (String(p.methodOfPayment).toLowerCase() === "partial"
+                             ? Math.max(0, (Number(p.amount) || 0) - Math.floor((Number(p.amount) || 0) / 2)) : 0),
+          balanceStatus:   p.balanceStatus    || (String(p.methodOfPayment).toLowerCase() === "partial" ? "not_due" : "not_applicable"),
+          balanceCollected: !!p.balanceCollected, // staff collected the balance in person
           currentPhase:    p.currentPhase     || "deposit",
           // Was previously recomputed in MyBookings.jsx (getPaymentInfo) —
           // now computed once, here, so it can't drift from the admin
@@ -669,11 +705,16 @@ const cancelBooking = async (req, res) => {
     if (![BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING].includes(booking.status)) {
       return res.status(400).json({ message: "Only upcoming or unpaid bookings can be cancelled." });
     }
-    if (booking.status === BOOKING_STATUS.TO_PAY) {
+    // Anything with money on it goes through Request Refund (staff review + a
+    // real refund), never a free self-serve cancel — otherwise the customer's
+    // payment would just be kept. This used to be checked for "to pay" only, so
+    // an "upcoming" (paid) booking could be cancelled directly through the API.
+    {
       const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
-      if (!paymentSnap.empty && paymentSnap.docs[0].data().status === "paid") {
+      const payStatus = paymentSnap.empty ? "" : String(paymentSnap.docs[0].data().status || "").toLowerCase();
+      if (["paid", "approved"].includes(payStatus)) {
         return res.status(400).json({
-          message: "This booking's deposit has already been paid — please request a refund instead of cancelling directly.",
+          message: "This booking has already been paid — please request a refund instead of cancelling directly.",
         });
       }
     }
@@ -793,10 +834,21 @@ const requestCancellation = async (req, res) => {
       updatedAt:                 now,
     });
 
+    // Tell every Owner/Admin/Supervisor (one notification each — the admin bell
+    // only shows notifications addressed to the signed-in staff member).
+    await notifyStaff({
+      type: "cancellation_request",
+      refID: doc.id,
+      refCollection: "bookings",
+      title: "Cancellation request",
+      message: `Booking ${bookingID} (already ongoing) has a pending cancellation request.`,
+    });
+
     recordAudit({
       action: "update",
       description: `Cancellation requested for booking ${bookingID} by customer. Reason: ${reason.trim()}`,
       userID,
+      bookingID,
     });
 
     return res.status(200).json({ message: "Cancellation request submitted. An admin will review it shortly." });

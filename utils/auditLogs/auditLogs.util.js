@@ -16,7 +16,11 @@ const VALID_ACTIONS = ["create", "update", "delete", "export", "auth", "system"]
 
 // Never throws — a logging failure should never block the real action
 // (cancelling a booking, submitting an edit request) from completing.
-const recordAudit = async ({ action, description, userID = null }) => {
+// Optional refs (bookingID / paymentID / refundRequestID) are stored next to the
+// description so an entry can be filtered/linked to the thing it's about
+// instead of only being free text. Extra fields are ignored by the admin's
+// existing Audit Logs page.
+const recordAudit = async ({ action, description, userID = null, bookingID = null, paymentID = null, refundRequestID = null }) => {
   try {
     if (!VALID_ACTIONS.includes(action)) {
       console.error(`recordAudit: invalid action "${action}"`);
@@ -33,6 +37,9 @@ const recordAudit = async ({ action, description, userID = null }) => {
       action,
       description,
       userID,
+      ...(bookingID        ? { bookingID }        : {}),
+      ...(paymentID        ? { paymentID }        : {}),
+      ...(refundRequestID  ? { refundRequestID }  : {}),
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     return ref.id;

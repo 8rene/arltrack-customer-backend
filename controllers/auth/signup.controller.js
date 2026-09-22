@@ -323,9 +323,10 @@ const checkReferralCode = async (req, res) => {
     const referrer = referrerDoc.data();
     return res.status(200).json({
       valid: true,
-      // First-name-only, not the full username/email — enough for the
-      // customer to recognize whose code they entered without this
-      // endpoint doubling as an unauthenticated user lookup.
+      // The referrer's USERNAME only (never their email, phone or real name) —
+      // enough for the customer to recognise whose code they entered. The route
+      // is rate-limited (see auth.routes.js) so this can't be used to enumerate
+      // codes/users at scale.
       referrerName: referrer.username || "a member",
     });
   } catch (err) {

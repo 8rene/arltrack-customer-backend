@@ -2,43 +2,39 @@
 // Booking status lifecycle — SINGLE SOURCE OF TRUTH.
 //
 // bookings.status flow:
-//   "to pay"    → set on createBooking(). Payment hasn't fully cleared yet.
-//   "upcoming"  → set once the booking is FULLY paid (see isFullyPaid below).
+//   "to pay"    → set on createBooking(). The first payment (the deposit) hasn't
+//                 cleared yet. Nothing has been paid.
+//   "upcoming"  → set as soon as the DEPOSIT is paid (see isDepositPaid /
+//                 promoteBookingToUpcoming). 50% for "Partial", 100% for "Full".
 //   "ongoing" / "completed" → set elsewhere (admin side / trip lifecycle).
-//   "cancelled" → set here (auto) or by cancelBooking() (customer) / admin.
+//   "cancelled" → set here (auto), by cancelBooking() (customer), by an approved
+//                 refund, or by admin.
 //
-// Two-phase payment (payments.controller fields, set in
-// bookings.controller.js's createBooking / paymongo.controller.js):
-//   status         → the FIRST payment ("deposit" phase — 50% for
-//                     "Partial", 100% for "Full"). "pending"|"paid"|"failed"|"cancelled".
-//   balanceStatus  → the SECOND payment, Partial bookings only (the
-//                     remaining 50%, paid once the deposit has cleared).
-//                     "not_applicable" (Full) | "not_due" (deposit not yet
-//                     paid) | "pending" | "paid" | "failed".
-//   currentPhase   → "deposit" | "balance" — which phase the payment doc's
-//                     shared paymongoSessionID/checkoutUrl currently belong
-//                     to (deposit and balance checkouts happen sequentially,
-//                     never concurrently, so these fields are safely reused
-//                     across phases rather than duplicated per-phase).
+// Two payments on a Partial booking (fields live on the payments doc):
+//   status         → the FIRST payment (the "deposit" phase).
+//                    "pending"|"paid"|"failed"|"cancelled".
+//   balanceStatus  → the SECOND payment, Partial only (the other 50%):
+//                    "not_applicable" (Full) | "not_due" | "pending" | "paid" | "failed".
+//                    OPTIONAL to pay online — the booking screen tells the customer
+//                    the balance is settled at pickup, so a deposit-paid booking is
+//                    already confirmed. Staff collect whatever is left at pickup
+//                    (admin: collectRemainingBalance → balanceCollected: true).
+//   currentPhase   → "deposit" | "balance" — which phase the shared
+//                    paymongoSessionID/checkoutUrl currently belong to.
 //
-// A booking only reaches "upcoming" once isFullyPaid() is true — for
-// "Partial" that means BOTH status AND balanceStatus are "paid", not just
-// the deposit. See promoteBookingToUpcoming.
+// A "to pay" booking (nothing paid) stops being valid when EITHER is true:
+//   1. Its own startDateTime has already passed.
+//   2. It has sat unpaid for more than TO_PAY_WINDOW_MS (12 hours).
 //
-// A "to pay" booking stops being valid the moment EITHER of these is true:
-//   1. Its own startDateTime has already passed — paying for a booking that
-//      can no longer happen makes no sense regardless of anything else.
-//   2. It's been sitting with NO deposit paid at all for more than
-//      TO_PAY_WINDOW_MS (12 hours). Once a deposit IS paid, real money has
-//      already been collected, so the 12h auto-cancel backs off — an
-//      outstanding balance from then on needs a human (admin/refund), not
-//      a silent auto-cancel. See getStaleReason.
+// SAFETY: before cancelling either way, PayMongo is asked whether the customer
+// actually paid (a missed webhook must never cancel a booking that was paid).
+// If PayMongo says it was paid the payment is settled instead; if PayMongo can't
+// be reached the cancellation is skipped and retried on the next run.
+// See enforceToPayValidity below.
 //
-// Same pattern as utils/sessionLogs/sessionLogs.util.js's sweepExpiredSessions:
-// a cron sweep (jobs/cancelStaleBookings.job.js) is the backstop, but the
-// checks here are also called inline on the read/write paths that touch a
-// "to pay" booking (getUserBookings, createPaymentLink, getPaymentStatus) so
-// staleness is caught immediately instead of waiting for the next sweep.
+// The same check runs inline on every read/write path that touches a "to pay"
+// booking (getUserBookings, createPaymentLink, getPaymentStatus) and in the cron
+// backstop (jobs/cancelStaleBookings.job.js).
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { db } = require("../../config/firebaseConnection/firebase");
@@ -88,19 +84,17 @@ const isFullyPaid = (payment) => {
 };
 
 // Returns a cancellation reason string if this "to pay" booking is no longer
-// valid, or null if it's still fine to pay for / confirm. `payment` is
-// optional but needed to correctly exempt a deposit-paid Partial booking
-// from the 12h window (schedule-passed still applies either way).
+// valid, or null if it's still fine to pay for / confirm.
+//
+// A booking whose deposit is already paid is NEVER stale here: real money has
+// been collected, so it must be promoted to "upcoming" (see
+// enforceToPayValidity), not cancelled — even if its start time has passed.
 const getStaleReason = (booking, payment = null) => {
   if (booking.status !== BOOKING_STATUS.TO_PAY) return null;
+  if (isDepositPaid(payment)) return null;
   if (hasSchedulePassed(booking.startDateTime)) {
     return "Auto-cancelled: the booking's scheduled date/time has passed.";
   }
-  // A deposit already paid on a Partial booking is real money collected —
-  // don't auto-cancel just because the balance is still outstanding. That
-  // needs a human (admin/refund flow), not the 12h sweep silently
-  // cancelling it out from under the customer.
-  if (isDepositPaid(payment)) return null;
   if (isPastToPayWindow(booking.createdAt)) {
     return "Auto-cancelled: payment was not completed within 12 hours.";
   }
@@ -164,6 +158,7 @@ const cancelStaleBooking = async (bookingID, reason) => {
     action: "update",
     description: `Booking ${bookingID} auto-cancelled. ${reason}`,
     userID: booking.userID || null,
+    bookingID,
   });
 
   // ── Notify the customer ──
@@ -191,41 +186,116 @@ const cancelStaleBooking = async (bookingID, reason) => {
 
 // Call on any read/write path that's about to use a "to pay" booking
 // (viewing "My Bookings", starting a PayMongo checkout, polling payment
-// status). Cancels it in place if it's gone stale and returns the
-// possibly-updated booking status; otherwise returns the original status.
+// status, the cron sweep). Returns the booking's status afterwards.
+//
+//   deposit already paid  → promote to "upcoming" (heals bookings created under
+//                           the older rule where a Partial deposit left it on "to pay")
+//   not stale             → unchanged
+//   stale                 → ask PayMongo first:
+//                             paid            → settle it (booking becomes "upcoming")
+//                             couldn't verify → leave it, try again next run
+//                             genuinely unpaid → cancel
 const enforceToPayValidity = async (bookingID, booking) => {
   const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
   const payment = paymentSnap.empty ? null : paymentSnap.docs[0].data();
+
+  if (isDepositPaid(payment)) {
+    const r = await promoteBookingToUpcoming(bookingID);
+    return r.bookingStatus || booking.status;
+  }
+
   const reason = getStaleReason(booking, payment);
+
+  // Ask PayMongo whenever an unpaid booking has a checkout session — not only
+  // when it's stale. This is what self-heals a missed webhook the moment the
+  // customer opens My Bookings, and it's the guard that stops a paid booking
+  // from being auto-cancelled.
+  const canVerify = !paymentSnap.empty
+    && String(payment.status || "").toLowerCase() === "pending"
+    && !!payment.paymongoSessionID;
+
+  if (!reason && !canVerify) return booking.status;
+
+  if (canVerify) {
+    // Lazy require: settlePayment.util requires this file (for promote), so a
+    // top-level require here would be circular.
+    const { verifyAndSettlePayment } = require("../payments/settlePayment.util");
+    const v = await verifyAndSettlePayment(paymentSnap.docs[0], { source: "stale-check" });
+    if (v.settled || v.alreadyPaid) return v.bookingStatus || BOOKING_STATUS.UPCOMING; // it WAS paid
+    if (!v.checked && reason) {
+      console.warn(`enforceToPayValidity: couldn't verify payment for ${bookingID} with PayMongo — skipping auto-cancel this round.`);
+      return booking.status; // fail safe: never cancel on uncertainty
+    }
+  }
+
   if (!reason) return booking.status;
+
   const cancelled = await cancelStaleBooking(bookingID, reason);
   return cancelled ? BOOKING_STATUS.CANCELLED : booking.status;
 };
 
-// Once a payment phase clears (webhook OR status-poll — whichever wins the
-// race), check whether the booking is now FULLY paid and, if so, promote it
-// from "to pay" to "upcoming". For a Partial booking, paying just the
-// deposit correctly leaves it on "to pay" — the balance still needs to
-// clear too (see isFullyPaid). No-ops if the booking already moved on
-// (e.g. was cancelled in the meantime) rather than clobbering that.
+// Once the deposit clears (webhook OR status-poll — whichever wins the race),
+// move the booking from "to pay" to "upcoming".
+//
+// Returns { promoted, bookingStatus }:
+//   promoted       true only if THIS call flipped it (so callers send the
+//                  "Booking Confirmed" / new-booking notifications exactly once)
+//   bookingStatus  the booking's status afterwards — "cancelled" tells the
+//                  caller a payment landed on an already-cancelled booking.
 const promoteBookingToUpcoming = async (bookingID) => {
-  if (!bookingID) return;
+  const none = { promoted: false, bookingStatus: null };
+  if (!bookingID) return none;
   try {
     const [bookingSnap, paymentSnap] = await Promise.all([
       db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get(),
       db.collection("payments").where("bookingID", "==", bookingID).limit(1).get(),
     ]);
-    if (bookingSnap.empty) return;
+    if (bookingSnap.empty) return none;
     const bookingDoc = bookingSnap.docs[0];
-    if (bookingDoc.data().status !== BOOKING_STATUS.TO_PAY) return;
+    const status     = bookingDoc.data().status;
+    if (status !== BOOKING_STATUS.TO_PAY) return { promoted: false, bookingStatus: status };
 
     const payment = paymentSnap.empty ? null : paymentSnap.docs[0].data();
-    if (!isFullyPaid(payment)) return; // e.g. Partial deposit paid, balance still outstanding
+    if (!isDepositPaid(payment)) return { promoted: false, bookingStatus: status };
 
     await bookingDoc.ref.update({ status: BOOKING_STATUS.UPCOMING, updatedAt: new Date() });
+
+    // Keep the bookingSession (admin Car Tracking card) in step.
+    try {
+      const sessionSnap = await db.collection("bookingSessions").where("bookingID", "==", bookingID).limit(1).get();
+      if (!sessionSnap.empty && sessionSnap.docs[0].data().status === BOOKING_STATUS.TO_PAY) {
+        await sessionSnap.docs[0].ref.update({ status: BOOKING_STATUS.UPCOMING, updatedAt: new Date() });
+      }
+    } catch (e) { /* session mirror is best-effort */ }
+
+    return { promoted: true, bookingStatus: BOOKING_STATUS.UPCOMING };
   } catch (err) {
     console.error(`promoteBookingToUpcoming: failed for ${bookingID}:`, err.message);
+    return none;
   }
+};
+
+// Cancels a booking because its refund was approved/completed. Only touches a
+// booking that hasn't started ("to pay" or "upcoming") — an ongoing/completed
+// trip is never silently cancelled by a refund. Leaves the payment doc alone
+// (the refund flow owns its status). Idempotent.
+const cancelBookingAfterRefund = async (bookingID, reason = "Cancelled: refund approved.") => {
+  if (!bookingID) return false;
+  const now = new Date();
+  const snap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
+  if (snap.empty) return false;
+  const doc = snap.docs[0];
+  const status = doc.data().status;
+  if (![BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING].includes(status)) return false;
+
+  await doc.ref.update({ status: BOOKING_STATUS.CANCELLED, cancellationReason: reason, updatedAt: now });
+  try {
+    const sessionSnap = await db.collection("bookingSessions").where("bookingID", "==", bookingID).limit(1).get();
+    if (!sessionSnap.empty) await sessionSnap.docs[0].ref.update({ status: BOOKING_STATUS.CANCELLED, updatedAt: now });
+  } catch (e) {
+    console.error(`cancelBookingAfterRefund: failed to sync bookingSession for ${bookingID}:`, e.message);
+  }
+  return true;
 };
 
 module.exports = {
@@ -239,4 +309,5 @@ module.exports = {
   cancelStaleBooking,
   enforceToPayValidity,
   promoteBookingToUpcoming,
+  cancelBookingAfterRefund,
 };

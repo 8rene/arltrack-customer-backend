@@ -29,6 +29,11 @@ const recordTransactionLog = async ({
   referenceNumber = "",
   description = "",
   performedBy = null,
+  // Optional idempotency key. When given, the log is written to a doc with
+  // this exact id using create() — so if the webhook and the status poll both
+  // try to log the same settlement, the second attempt is a harmless no-op
+  // instead of a duplicate row. Omit for one-off entries.
+  logID = null,
 }) => {
   try {
     if (!VALID_TYPES.includes(type)) {
@@ -40,8 +45,8 @@ const recordTransactionLog = async ({
       return null;
     }
 
-    const ref = db.collection("transactionLogs").doc();
-    await ref.set({
+    const ref = logID ? db.collection("transactionLogs").doc(logID) : db.collection("transactionLogs").doc();
+    const payload = {
       transactionLogsID: ref.id,
       bookingID: bookingID || null,
       paymentID: paymentID || null,
@@ -55,7 +60,18 @@ const recordTransactionLog = async ({
       description,
       performedBy,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    };
+
+    if (logID) {
+      try {
+        await ref.create(payload); // fails with ALREADY_EXISTS (code 6) if already logged
+      } catch (e) {
+        if (e && (e.code === 6 || /already exists/i.test(e.message || ""))) return ref.id; // duplicate — fine
+        throw e;
+      }
+    } else {
+      await ref.set(payload);
+    }
     return ref.id;
   } catch (err) {
     console.error("recordTransactionLog error:", err.message);

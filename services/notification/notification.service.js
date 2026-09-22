@@ -1,5 +1,6 @@
 const admin = require("firebase-admin");
 const { db } = require("../../config/firebaseConnection/firebase");
+const { ROLE_IDS } = require("../../utils/roles/role.util");
 
 /**
  * Creates a booking-related notification for a single customer — mirrors
@@ -41,6 +42,35 @@ const createNotification = async ({ type, userID, refID, title, message, refColl
 };
 
 /**
+ * Fans a notification out to every Owner/Admin/Supervisor — ONE DOC PER PERSON,
+ * each with that person's real userID.
+ *
+ * Why not a single shared doc: the admin app's bell only shows notifications
+ * whose userID equals the signed-in staff member's own uid
+ * (admin-frontend Header.jsx → where("userID", "==", user.uid)). A doc written
+ * with no userID is never shown to anyone. This mirrors admin-backend's
+ * notifyStaff() so both apps produce the same shape.
+ *
+ * Never throws — a notification failure must not fail the booking/refund
+ * action that triggered it.
+ */
+const notifyStaff = async ({ type, refID, refCollection = "bookings", title, message }) => {
+  try {
+    const staffSnap = await db.collection("user")
+      .where("roleID", "in", [ROLE_IDS.OWNER, ROLE_IDS.ADMIN, ROLE_IDS.SUPERVISOR])
+      .get();
+
+    await Promise.all(
+      staffSnap.docs.map((d) =>
+        createNotification({ type, refID, refCollection, title, message, userID: d.id })
+      )
+    );
+  } catch (err) {
+    console.error(`[NOTIF] notifyStaff(${type}) failed:`, err.message);
+  }
+};
+
+/**
  * Marks every ACTIVE notification for this type+refID+userID as resolved
  * — used so a stale card (e.g. "Payment Pending") disappears from the
  * bell the instant the thing it was about is no longer true, instead of
@@ -71,4 +101,4 @@ const deleteNotification = async (notifID) => {
   await db.collection("notifications").doc(notifID).delete();
 };
 
-module.exports = { createNotification, resolveNotification, deleteNotification };
+module.exports = { createNotification, notifyStaff, resolveNotification, deleteNotification };
