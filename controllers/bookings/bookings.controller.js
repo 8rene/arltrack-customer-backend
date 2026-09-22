@@ -340,6 +340,54 @@ const createBooking = async (req, res) => {
       }
     }
 
+    // ── Availability guard: another customer's booking or scheduled maintenance ──
+    // The calendar in Booking.jsx greys out these same dates (see
+    // getDateStatuses() / GET /api/services/car-bookings/:carID), but that's a
+    // client-side convenience only — nothing previously stopped this endpoint
+    // from being called directly for a date the calendar had just refused to
+    // show. Re-check the same source of truth here, server-side.
+    {
+      const asDate = (v) => (v && v.toDate ? v.toDate() : new Date(v));
+
+      const [otherSnap, maintSnap] = await Promise.all([
+        db.collection("bookings").where("carID", "==", carID).get(),
+        db.collection("carMaintenance")
+          .where("carID", "==", carID)
+          .where("status", "==", "Scheduled")
+          .get(),
+      ]);
+
+      const otherOverlap = otherSnap.docs
+        .map((d) => d.data())
+        .find((b) =>
+          b.userID !== userID &&
+          [BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING].includes(b.status) &&
+          asDate(b.startDateTime) < endDateTime &&
+          asDate(b.endDateTime)   > startDateTime
+        );
+      if (otherOverlap) {
+        return res.status(409).json({
+          message: "This car is no longer available on the selected dates. Please choose another date or vehicle.",
+        });
+      }
+
+      // Maintenance records only store a single day (maintenanceDate), with
+      // no separate end date — same as GET /api/services/car-bookings/:carID.
+      const maintOverlap = maintSnap.docs
+        .map((d) => d.data().maintenanceDate)
+        .filter(Boolean)
+        .some((md) => {
+          const day = asDate(md); day.setHours(0, 0, 0, 0);
+          const dayEnd = new Date(day); dayEnd.setHours(23, 59, 59, 999);
+          return day < endDateTime && dayEnd > startDateTime;
+        });
+      if (maintOverlap) {
+        return res.status(409).json({
+          message: "This car is scheduled for maintenance on the selected dates. Please choose another date or vehicle.",
+        });
+      }
+    }
+
     // ── 1. Save to bookings collection (auto Firestore ID) ──
     const bookingRef = db.collection("bookings").doc();
     const bookingID  = bookingRef.id;
@@ -642,6 +690,11 @@ const getUserBookings = async (req, res) => {
           balanceStatus:   p.balanceStatus    || (String(p.methodOfPayment).toLowerCase() === "partial" ? "not_due" : "not_applicable"),
           balanceCollected: !!p.balanceCollected, // staff collected the balance in person
           currentPhase:    p.currentPhase     || "deposit",
+          // Staff discount (see admin applyDiscount) — was computed into the
+          // balance/amountPaid math below but never sent to the customer, so
+          // MyBookings.jsx had no way to show that a discount was applied.
+          discountAmount:  Number(p.discountAmount) || 0,
+          refundIssued:    !!p.refundIssued,
           // Was previously recomputed in MyBookings.jsx (getPaymentInfo) —
           // now computed once, here, so it can't drift from the admin
           // dashboard's own version of the same math.

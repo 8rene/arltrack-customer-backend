@@ -49,6 +49,7 @@ const upfrontOf = (payType, amount, depositFee) => {
  *   amountPaid         net received after any staff discount spillover
  *   balance            still owed (after discount)
  *   refundDue          discount spillover still owed back to the customer
+ *   discountAmount     the flat-peso staff discount applied to this payment, if any
  */
 const getPaymentBreakdown = (payment) => {
   const p          = payment || {};
@@ -104,7 +105,7 @@ const getPaymentBreakdown = (payment) => {
     }
   }
 
-  return { payType, amount, depositCollected, balanceOnline, balanceInPerson, amountPaid, balance, refundDue };
+  return { payType, amount, depositCollected, balanceOnline, balanceInPerson, amountPaid, balance, refundDue, discountAmount };
 };
 
 /**

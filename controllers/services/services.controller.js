@@ -1,4 +1,5 @@
 const { db } = require("../../config/firebaseConnection/firebase");
+const { BOOKING_STATUS } = require("../../utils/bookings/bookingStatus.util");
 
 // Firestore Admin SDK Timestamps serialize over res.json() as a plain
 // { _seconds, _nanoseconds } object (their own toJSON()) — NOT an ISO
@@ -44,7 +45,7 @@ const getCarBookings = async (req, res) => {
     const [bookingSnap, maintSnap] = await Promise.all([
       db.collection("bookings")
         .where("carID", "==", carID)
-        .where("status", "in", ["pending", "confirmed", "active"])
+        .where("status", "in", [BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING])
         .get(),
       db.collection("carMaintenance")
         .where("carID", "==", carID)
@@ -56,7 +57,7 @@ const getCarBookings = async (req, res) => {
       const d = doc.data();
       return {
         // bookingID intentionally excluded — not needed by client and avoids ID enumeration
-        status:        d.status || "pending",
+        status:        d.status || BOOKING_STATUS.TO_PAY,
         startDateTime: toISO(d.startDateTime),
         endDateTime:   toISO(d.endDateTime),
       };

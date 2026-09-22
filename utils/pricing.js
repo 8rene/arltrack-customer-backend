@@ -169,17 +169,22 @@ const computePaymentSplit = (grandTotal, paymentAmount) => {
 // booking showed as "paid" and an unpaid Partial as "partial" (assuming the
 // flat ₱1,000 deposit). Nothing counts as paid until the payment is confirmed.
 const derivePaymentStatus = (payment) => {
-  if (!payment) return { key: "due", balance: 0, amountPaid: 0 };
+  // discountAmount/refundDue are surfaced here (rather than dropped) so
+  // customer-facing screens like MyBookings.jsx can show that a discount
+  // was applied, not just the already-net balance/amountPaid figures.
+  const discountAmount = Number(payment && payment.discountAmount) || 0;
+
+  if (!payment) return { key: "due", balance: 0, amountPaid: 0, discountAmount: 0, refundDue: 0 };
 
   const status = String(payment.status || "").toLowerCase();
-  if (status === "failed" || status === "rejected") return { key: "failed",    balance: 0, amountPaid: 0 };
-  if (status === "cancelled")                       return { key: "cancelled", balance: 0, amountPaid: 0 };
-  if (status === "refunded")                        return { key: "refunded",  balance: 0, amountPaid: 0 };
+  if (status === "failed" || status === "rejected") return { key: "failed",    balance: 0, amountPaid: 0, discountAmount, refundDue: 0 };
+  if (status === "cancelled")                       return { key: "cancelled", balance: 0, amountPaid: 0, discountAmount, refundDue: 0 };
+  if (status === "refunded")                        return { key: "refunded",  balance: 0, amountPaid: 0, discountAmount, refundDue: 0 };
 
-  const { amountPaid, balance } = getPaymentBreakdown(payment);
-  if (amountPaid <= 0) return { key: "due",     balance, amountPaid: 0 };
-  if (balance <= 0)    return { key: "paid",    balance, amountPaid };
-  return                      { key: "partial", balance, amountPaid };
+  const { amountPaid, balance, refundDue } = getPaymentBreakdown(payment);
+  if (amountPaid <= 0) return { key: "due",     balance, amountPaid: 0, discountAmount, refundDue };
+  if (balance <= 0)    return { key: "paid",    balance, amountPaid, discountAmount, refundDue };
+  return                      { key: "partial", balance, amountPaid, discountAmount, refundDue };
 };
 
 module.exports = {
