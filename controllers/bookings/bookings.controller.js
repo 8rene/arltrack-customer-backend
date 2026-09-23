@@ -309,15 +309,39 @@ const createBooking = async (req, res) => {
       return res.status(400).json({ message: codingViolation, codingViolation: true });
     }
 
+    // ── Post-rental booking cooldown: once a previous rental is marked
+    // "completed" (car returned), the customer can't start a NEW booking
+    // for 24h. Derived entirely from data the admin app already writes on
+    // every booking update (updatedAt) — no admin-side changes needed, no
+    // new field for anyone else to set or maintain. Reuses the same "all
+    // my bookings" read the duplicate guard just below needs, so this
+    // costs no extra round-trip.
+    const asDate = (v) => (v && v.toDate ? v.toDate() : new Date(v));
+    const mineSnap = await db.collection("bookings").where("userID", "==", userID).get();
+    const allMine = mineSnap.docs.map((d) => d.data());
+
+    const COOLDOWN_MS = 24 * 60 * 60 * 1000;
+    const activeCooldown = allMine
+      .filter((b) => b.status === BOOKING_STATUS.COMPLETED && b.updatedAt)
+      .map((b) => ({ b, cooldownUntil: asDate(b.updatedAt).getTime() + COOLDOWN_MS }))
+      .filter((x) => x.cooldownUntil > Date.now())
+      .sort((x, y) => y.cooldownUntil - x.cooldownUntil)[0];
+
+    if (activeCooldown) {
+      return res.status(403).json({
+        message: "Your last rental was just returned — please wait a day before booking again.",
+        postRentalCooldown: true,
+        cooldownUntil: new Date(activeCooldown.cooldownUntil).toISOString(),
+        completedBookingID: activeCooldown.b.bookingID,
+      });
+    }
+
     // ── Duplicate guard: same customer + same car + overlapping dates ──
     // A customer who backs out of checkout and books again used to end up with
     // several unpaid "to pay" bookings for the same trip (and, if each got paid,
     // several real ones). Filtered in memory so no composite index is needed.
     {
-      const asDate = (v) => (v && v.toDate ? v.toDate() : new Date(v));
-      const mineSnap = await db.collection("bookings").where("userID", "==", userID).get();
-      const candidates = mineSnap.docs
-        .map((d) => d.data())
+      const candidates = allMine
         .filter((b) =>
           b.carID === carID &&
           [BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING].includes(b.status) &&
