@@ -33,7 +33,16 @@ const sendGenericEmail = async ({ toEmail, subject, bodyHtml }) => {
     user_id:     process.env.EMAILJS_PUBLIC_KEY,
     accessToken: process.env.EMAILJS_PRIVATE_KEY,
     template_params: {
+      // EmailJS's "To Email" field on the template is bound to ONE specific
+      // variable name (set in the EmailJS dashboard), and it differs per
+      // template — the OTP template (template_pcp4m9n) is bound to `email`,
+      // this shared "Blank template" was apparently bound to something else.
+      // Send every common alias so it resolves regardless of which one the
+      // template actually uses.
       to_email: toEmail,
+      email: toEmail,
+      user_email: toEmail,
+      recipient_email: toEmail,
       subject,
       body: bodyHtml,
     },
