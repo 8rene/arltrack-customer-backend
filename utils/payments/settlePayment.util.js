@@ -26,6 +26,7 @@ const { recordAudit } = require("../auditLogs/auditLogs.util");
 const { recordTransactionLog } = require("../transactionLogs/transactionLogs.util");
 const { BOOKING_STATUS, promoteBookingToUpcoming } = require("../bookings/bookingStatus.util");
 const { createNotification, notifyStaff, resolveNotification } = require("../../services/notification/notification.service");
+const { sendPaymentReceiptEmail } = require("../../services/email.service");
 const { computeRefundPlan } = require("./paymentBreakdown.util");
 const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util");
 
@@ -208,6 +209,42 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
       await resolveNotification("payment_pending", bID, payment.userID);
     } catch (e) {
       console.error("[settle] failed to write customer notifications:", e.message);
+    }
+
+    // ── digital receipt, sent to the customer's Gmail ──
+    // Fired for EVERY settled phase (deposit AND, later, balance) — each is
+    // its own charge, so each gets its own receipt, same as the
+    // "payment_successful" notification above. Best-effort: a failed email
+    // must never undo the payment settlement that already happened.
+    try {
+      const [userSnap, bSnap] = await Promise.all([
+        db.collection("user").doc(payment.userID).get(),
+        db.collection("bookings").where("bookingID", "==", bID).limit(1).get(),
+      ]);
+      const userEmail = userSnap.exists ? userSnap.data().email : null;
+      const b         = bSnap.empty ? {} : bSnap.docs[0].data();
+
+      let toName = "Valued Customer";
+      const detailsSnap = await db.collection("userDetails").doc(payment.userID).get();
+      if (detailsSnap.exists) {
+        const { firstName, lastName } = detailsSnap.data();
+        toName = [firstName, lastName].filter(Boolean).join(" ") || toName;
+      }
+
+      await sendPaymentReceiptEmail({
+        toEmail: userEmail,
+        toName,
+        bookingID: bID,
+        carName: b.carName,
+        phase,
+        amount: charged,
+        paymentMethod: channelLabel(payment.paymongoChannel || payment.paymentMethod),
+        referenceNumber: paymongoPaymentID,
+        startDateTime: b.startDateTime,
+        endDateTime: b.endDateTime,
+      });
+    } catch (e) {
+      console.error("[settle] failed to send receipt email:", e.message);
     }
   }
 
