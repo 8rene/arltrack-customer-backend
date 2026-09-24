@@ -2,6 +2,8 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { isPhasePaid, chargedAmountFor } = require("../../utils/payments/settlePayment.util");
 const { buildAndSendCombinedReceipt } = require("../../utils/receipt/receipt.util");
 
+const RESEND_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between clicks, per booking
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Manual "Email my receipt" button (My Bookings / Booking Details) — always
 // sends exactly ONE email per click, covering every phase the customer has
@@ -9,6 +11,11 @@ const { buildAndSendCombinedReceipt } = require("../../utils/receipt/receipt.uti
 // one receipt with one row each) — never invents a receipt for a phase
 // that hasn't been paid yet, and never splits a resend into multiple
 // emails the way the automatic post-payment notifications do.
+//
+// Rate-limited to one click every 5 minutes per booking (enforced here in
+// the payment doc itself via lastReceiptSentAt, not just disabled on the
+// button — a disabled button is only a UI nicety, the real limit has to
+// live server-side or a page refresh / direct API call would bypass it).
 // ─────────────────────────────────────────────────────────────────────────────
 const resendReceipt = async (req, res) => {
   try {
@@ -34,7 +41,23 @@ const resendReceipt = async (req, res) => {
     if (pSnap.empty) {
       return res.status(404).json({ message: "No payment found for this booking yet." });
     }
-    const payment = pSnap.docs[0].data();
+    const paymentDoc = pSnap.docs[0];
+    const payment    = paymentDoc.data();
+
+    // Cooldown — refuse if the last send was under 5 minutes ago.
+    const lastSentAt = payment.lastReceiptSentAt?.toDate
+      ? payment.lastReceiptSentAt.toDate()
+      : (payment.lastReceiptSentAt ? new Date(payment.lastReceiptSentAt) : null);
+    if (lastSentAt) {
+      const elapsedMs = Date.now() - lastSentAt.getTime();
+      if (elapsedMs < RESEND_COOLDOWN_MS) {
+        const retryAfterSeconds = Math.ceil((RESEND_COOLDOWN_MS - elapsedMs) / 1000);
+        return res.status(429).json({
+          message: `Please wait ${Math.ceil(retryAfterSeconds / 60)} more minute(s) before requesting another receipt.`,
+          retryAfterSeconds,
+        });
+      }
+    }
 
     // Resend for every phase actually paid so far — never a phase that's
     // still pending (nothing to receipt yet for that one).
@@ -60,10 +83,17 @@ const resendReceipt = async (req, res) => {
       return res.status(500).json({ message: "Couldn't send the receipt email. Please try again in a bit." });
     }
 
+    // Start the cooldown from THIS successful send — set regardless of
+    // whether a later request would find nothing new to send, since a
+    // click that actually emailed something is what should be throttled.
+    const now = new Date();
+    await paymentDoc.ref.update({ lastReceiptSentAt: now });
+
     return res.status(200).json({
       message: "Receipt sent to your email.",
       sent: 1,
       failed: 0,
+      nextAllowedAt: new Date(now.getTime() + RESEND_COOLDOWN_MS).toISOString(),
     });
   } catch (err) {
     console.error("resendReceipt error:", err.message);

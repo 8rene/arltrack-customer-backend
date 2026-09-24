@@ -160,6 +160,10 @@ const getBookingDetails = async (req, res) => {
         checkoutUrl:       p.checkoutUrl      || null,
         createdAt:         p.createdAt        || null,
         paidAt:            p.paidAt           || null,
+        // "Email My Receipt" cooldown — lets the frontend keep the button
+        // disabled with an accurate countdown across page reloads, not
+        // just for the lifetime of one React state. See receipt.controller.js.
+        lastReceiptSentAt: p.lastReceiptSentAt || null,
         // Was previously computed inline in BookingDetails.jsx as
         // Math.max(0, amount - depositFee) — now the server's own math.
         paymentStatus:     derivePaymentStatus(p),
