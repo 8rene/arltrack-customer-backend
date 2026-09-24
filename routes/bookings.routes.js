@@ -3,6 +3,7 @@ const router  = express.Router();
 
 const { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getBookingQuote } = require("../controllers/bookings/bookings.controller");
 const { getBookingTraceback, getBookingDetails } = require("../controllers/bookings/bookingSessions.controller");
+const { resendReceipt } = require("../controllers/bookings/receipt.controller");
 const verifyToken = require("../middlewares/auth.middleware");
 
 router.post("/create",                        verifyToken, createBooking);
@@ -13,5 +14,6 @@ router.post("/check-coding",        checkCodingRule);   // no auth needed — ca
 router.post("/quote",               getBookingQuote);   // no auth needed — pricing preview only, writes nothing
 router.get("/:bookingID/details",   verifyToken, getBookingDetails);
 router.get("/:bookingID/traceback", verifyToken, getBookingTraceback);
+router.post("/:bookingID/resend-receipt", verifyToken, resendReceipt);
 
 module.exports = router;
