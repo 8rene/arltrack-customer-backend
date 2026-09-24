@@ -8,7 +8,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { db } = require("../../config/firebaseConnection/firebase");
-const { sendPaymentReceiptEmail } = require("../../services/email.service");
+const { sendPaymentReceiptEmail, sendCombinedPaymentReceiptEmail } = require("../../services/email.service");
 const { generateReceiptPdf } = require("../../services/pdf/receipt.service");
 const { channelLabel } = require("../payments/paymongoClient.util");
 
@@ -95,4 +95,71 @@ const buildAndSendReceipt = async ({ payment, phase, charged, paymongoPaymentID 
   }
 };
 
-module.exports = { buildAndSendReceipt, resolveCarName, asDate };
+/**
+ * Builds and sends ONE email covering every phase in `phases` (each still
+ * gets its own PDF, generated the same way buildAndSendReceipt does) —
+ * used ONLY by the manual "Email my receipt" button
+ * (controllers/bookings/receipt.controller.js) so clicking it always
+ * results in exactly one email, never one per paid phase. The automatic
+ * post-payment flow in settlePhasePayment() keeps using
+ * buildAndSendReceipt() above (one real-time email per actual charge,
+ * sent the moment it settles) — that part is intentionally untouched.
+ *
+ * @param {Object} params
+ * @param {Object} params.payment - full payment doc data
+ * @param {Array<{phase:string, charged:number, paymongoPaymentID:string}>} params.phases
+ * @returns {Promise<{success:boolean, error?:string}>}
+ */
+const buildAndSendCombinedReceipt = async ({ payment, phases }) => {
+  const bID = payment.bookingID || null;
+  if (!payment.userID || !bID) {
+    return { success: false, error: "payment is missing userID or bookingID" };
+  }
+  if (!phases || phases.length === 0) {
+    return { success: false, error: "no phases to send" };
+  }
+
+  try {
+    const [userSnap, bSnap, detailsSnap] = await Promise.all([
+      db.collection("user").doc(payment.userID).get(),
+      db.collection("bookings").where("bookingID", "==", bID).limit(1).get(),
+      db.collection("userDetails").doc(payment.userID).get(),
+    ]);
+    const userEmail = userSnap.exists ? userSnap.data().email : null;
+    const b         = bSnap.empty ? {} : bSnap.docs[0].data();
+
+    const carName       = await resolveCarName(b.carID);
+    const startDateTime = asDate(b.startDateTime);
+    const endDateTime   = asDate(b.endDateTime);
+
+    let toName = "Valued Customer";
+    if (detailsSnap.exists) {
+      const { firstName, lastName } = detailsSnap.data();
+      toName = [firstName, lastName].filter(Boolean).join(" ") || toName;
+    }
+
+    const paymentMethod = channelLabel(payment.paymongoChannel || payment.paymentMethod);
+
+    // One PDF per phase (same as the automatic flow), collected into one email.
+    const charges = await Promise.all(phases.map(async ({ phase, charged, paymongoPaymentID }) => {
+      const receiptUrl = await generateReceiptPdf({
+        bookingID: bID, paymentID: payment.paymentID, carName, phase, amount: charged,
+        paymentMethod, referenceNumber: paymongoPaymentID, startDateTime, endDateTime,
+        customerName: toName,
+      });
+      return { phase, amount: charged, referenceNumber: paymongoPaymentID, receiptUrl };
+    }));
+
+    await sendCombinedPaymentReceiptEmail({
+      toEmail: userEmail, toName, bookingID: bID, carName, paymentMethod,
+      startDateTime, endDateTime, charges,
+    });
+
+    return { success: true };
+  } catch (e) {
+    console.error(`[receipt] failed to build/send combined receipt for booking ${bID}:`, e.message);
+    return { success: false, error: e.message };
+  }
+};
+
+module.exports = { buildAndSendReceipt, buildAndSendCombinedReceipt, resolveCarName, asDate };

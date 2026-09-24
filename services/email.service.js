@@ -139,4 +139,83 @@ const sendPaymentReceiptEmail = ({
   `) });
 };
 
-module.exports = { sendAccountApprovedEmail, sendPaymentReceiptEmail };
+/**
+ * Sends ONE email covering every phase the customer has paid so far
+ * (deposit only, or deposit + balance) — used by the manual "Email my
+ * receipt" button so a resend is always a single email, never one per
+ * phase. Each paid phase gets its own row (with its own PayMongo
+ * reference), plus a "Total Paid" row at the end. Each phase's own PDF
+ * receipt is still linked individually underneath.
+ *
+ * @param {Object} params
+ * @param {string} params.toEmail
+ * @param {string} params.toName
+ * @param {string} params.bookingID
+ * @param {string} params.carName
+ * @param {string} params.paymentMethod
+ * @param {Date|string} params.startDateTime
+ * @param {Date|string} params.endDateTime
+ * @param {Array<{phase:string, amount:number, referenceNumber:string, receiptUrl:string}>} params.charges
+ */
+const sendCombinedPaymentReceiptEmail = ({
+  toEmail, toName, bookingID, carName, paymentMethod,
+  startDateTime, endDateTime, charges,
+}) => {
+  if (!toEmail) {
+    console.warn(`[email] no recipient email — skipped combined receipt for booking ${bookingID}`);
+    return Promise.resolve({ success: false, error: "missing recipient email" });
+  }
+
+  const fmt = (d) => d ? new Date(d).toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" }) : "—";
+  const totalPaid = (charges || []).reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
+
+  const chargeRows = (charges || []).map((c) => `
+      <tr>
+        <td style="padding: 4px 0; color: #6b7280;">${c.phase === "balance" ? "Balance" : "Deposit"} (Ref. ${c.referenceNumber || "—"})</td>
+        <td style="padding: 4px 0; text-align: right; font-weight: bold;">₱${Number(c.amount || 0).toLocaleString()}</td>
+      </tr>`).join("");
+
+  const rows = `
+      <tr>
+        <td style="padding: 4px 0; color: #6b7280;">Booking ID</td>
+        <td style="padding: 4px 0; text-align: right; font-weight: bold;">${bookingID || "—"}</td>
+      </tr>
+      <tr>
+        <td style="padding: 4px 0; color: #6b7280;">Vehicle</td>
+        <td style="padding: 4px 0; text-align: right; font-weight: bold;">${carName || "—"}</td>
+      </tr>
+      ${chargeRows}
+      <tr>
+        <td style="padding: 8px 0 4px; color: #1f2937; font-weight: bold; border-top: 1px solid #d1d5db;">Total Paid</td>
+        <td style="padding: 8px 0 4px; text-align: right; font-weight: bold; border-top: 1px solid #d1d5db;">₱${totalPaid.toLocaleString()}</td>
+      </tr>
+      <tr>
+        <td style="padding: 4px 0; color: #6b7280;">Method</td>
+        <td style="padding: 4px 0; text-align: right; font-weight: bold;">${paymentMethod || "—"}</td>
+      </tr>
+      <tr>
+        <td style="padding: 4px 0; color: #6b7280;">Rental Period</td>
+        <td style="padding: 4px 0; text-align: right; font-weight: bold;">${fmt(startDateTime)} – ${fmt(endDateTime)}</td>
+      </tr>
+      <tr>
+        <td style="padding: 4px 0; color: #6b7280;">Receipt Date</td>
+        <td style="padding: 4px 0; text-align: right; font-weight: bold;">${new Date().toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" })}</td>
+      </tr>`;
+
+  const pdfLinks = (charges || [])
+    .filter((c) => c.receiptUrl)
+    .map((c) => `<a href="${c.receiptUrl}" style="color: #1e3a8a; text-decoration: underline; margin-right: 16px;">${c.phase === "balance" ? "Balance" : "Deposit"} PDF</a>`)
+    .join("");
+
+  return sendGenericEmail({ toEmail, subject: `Payment Receipt — Booking ${bookingID || ""}`, bodyHtml: wrapEmailHtml(`
+    <p>Hi ${toName || "Valued Customer"},</p>
+    <h3 style="margin-bottom: 8px;">Payment Receipt</h3>
+    <p style="line-height: 1.5;">Here's your receipt covering everything you've paid for this booking so far:</p>
+    <table style="width: 100%; border-collapse: collapse; background: #f3f4f6; border-radius: 8px; padding: 14px 16px; font-size: 14px;">
+      ${rows}
+    </table>
+    ${pdfLinks ? `<p style="margin-top: 20px;">${pdfLinks}</p>` : ""}
+  `) });
+};
+
+module.exports = { sendAccountApprovedEmail, sendPaymentReceiptEmail, sendCombinedPaymentReceiptEmail };
