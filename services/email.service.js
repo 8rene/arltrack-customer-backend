@@ -92,7 +92,7 @@ const sendAccountApprovedEmail = ({ toEmail, toName }) => {
  */
 const sendPaymentReceiptEmail = ({
   toEmail, toName, bookingID, carName, phase, amount,
-  paymentMethod, referenceNumber, startDateTime, endDateTime,
+  paymentMethod, referenceNumber, startDateTime, endDateTime, receiptUrl,
 }) => {
   if (!toEmail) {
     console.warn(`[email] no recipient email — skipped receipt for booking ${bookingID}`);
@@ -117,7 +117,7 @@ const sendPaymentReceiptEmail = ({
         <td style="padding: 4px 0; text-align: right; font-weight: bold;">${value}</td>
       </tr>`).join("");
 
-  const bodyHtml = wrapEmailHtml(`
+  return sendGenericEmail({ toEmail, subject: `Payment Receipt — Booking ${bookingID || ""}`, bodyHtml: wrapEmailHtml(`
     <p>Hi ${toName || "Valued Customer"},</p>
     <h3 style="margin-bottom: 8px;">Payment Receipt</h3>
     <p style="line-height: 1.5;">We've received your ${phaseLabel.toLowerCase()} payment. Here's your receipt:</p>
@@ -125,11 +125,9 @@ const sendPaymentReceiptEmail = ({
       ${rows}
     </table>
     <p style="margin-top: 20px;">
-      <a href="${process.env.APP_URL || "http://localhost:3000"}" style="background: #1e3a8a; color: #ffffff; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold;">View My Booking</a>
+      <a href="${receiptUrl || process.env.APP_URL || "http://localhost:3000"}" style="background: #1e3a8a; color: #ffffff; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold;">${receiptUrl ? "Download PDF Receipt" : "View My Booking"}</a>
     </p>
-  `);
-
-  return sendGenericEmail({ toEmail, subject: `Payment Receipt — Booking ${bookingID || ""}`, bodyHtml });
+  `) });
 };
 
 module.exports = { sendAccountApprovedEmail, sendPaymentReceiptEmail };

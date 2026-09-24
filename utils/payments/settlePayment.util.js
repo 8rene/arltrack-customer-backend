@@ -27,6 +27,7 @@ const { recordTransactionLog } = require("../transactionLogs/transactionLogs.uti
 const { BOOKING_STATUS, promoteBookingToUpcoming } = require("../bookings/bookingStatus.util");
 const { createNotification, notifyStaff, resolveNotification } = require("../../services/notification/notification.service");
 const { sendPaymentReceiptEmail } = require("../../services/email.service");
+const { generateReceiptPdf } = require("../../services/pdf/receipt.service");
 const { computeRefundPlan } = require("./paymentBreakdown.util");
 const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util");
 
@@ -231,6 +232,21 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
         toName = [firstName, lastName].filter(Boolean).join(" ") || toName;
       }
 
+      // PDF first — EmailJS's Free plan (see email.service.js) can't attach
+      // files, so the email links to this instead of attaching it.
+      const receiptUrl = await generateReceiptPdf({
+        bookingID: bID,
+        paymentID: payment.paymentID,
+        carName: b.carName,
+        phase,
+        amount: charged,
+        paymentMethod: channelLabel(payment.paymongoChannel || payment.paymentMethod),
+        referenceNumber: paymongoPaymentID,
+        startDateTime: b.startDateTime,
+        endDateTime: b.endDateTime,
+        customerName: toName,
+      });
+
       await sendPaymentReceiptEmail({
         toEmail: userEmail,
         toName,
@@ -242,6 +258,7 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
         referenceNumber: paymongoPaymentID,
         startDateTime: b.startDateTime,
         endDateTime: b.endDateTime,
+        receiptUrl,
       });
     } catch (e) {
       console.error("[settle] failed to send receipt email:", e.message);
