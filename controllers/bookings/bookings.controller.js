@@ -309,32 +309,18 @@ const createBooking = async (req, res) => {
       return res.status(400).json({ message: codingViolation, codingViolation: true });
     }
 
-    // ── Post-rental booking cooldown: once a previous rental is marked
-    // "completed" (car returned), the customer can't start a NEW booking
-    // for 24h. Derived entirely from data the admin app already writes on
-    // every booking update (updatedAt) — no admin-side changes needed, no
-    // new field for anyone else to set or maintain. Reuses the same "all
-    // my bookings" read the duplicate guard just below needs, so this
-    // costs no extra round-trip.
+    // "allMine" is read once here and reused by the duplicate guard right
+    // below — no extra round-trip. (A previous version of this also
+    // enforced a customer-wide 24h "can't book ANY car" cooldown here —
+    // removed: it was blocking a customer from booking a different car
+    // entirely, which was never the intent. The actual per-car "give the
+    // car a day before it's bookable again" behavior lives in
+    // jobs/postRentalMaintenance.job.js, which only blocks the specific
+    // car that was just returned — see the maintenance-overlap check
+    // further down in this function.)
     const asDate = (v) => (v && v.toDate ? v.toDate() : new Date(v));
     const mineSnap = await db.collection("bookings").where("userID", "==", userID).get();
     const allMine = mineSnap.docs.map((d) => d.data());
-
-    const COOLDOWN_MS = 24 * 60 * 60 * 1000;
-    const activeCooldown = allMine
-      .filter((b) => b.status === BOOKING_STATUS.COMPLETED && b.updatedAt)
-      .map((b) => ({ b, cooldownUntil: asDate(b.updatedAt).getTime() + COOLDOWN_MS }))
-      .filter((x) => x.cooldownUntil > Date.now())
-      .sort((x, y) => y.cooldownUntil - x.cooldownUntil)[0];
-
-    if (activeCooldown) {
-      return res.status(403).json({
-        message: "Your last rental was just returned — please wait a day before booking again.",
-        postRentalCooldown: true,
-        cooldownUntil: new Date(activeCooldown.cooldownUntil).toISOString(),
-        completedBookingID: activeCooldown.b.bookingID,
-      });
-    }
 
     // ── Duplicate guard: same customer + same car + overlapping dates ──
     // A customer who backs out of checkout and books again used to end up with
