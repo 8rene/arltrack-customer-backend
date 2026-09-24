@@ -33,6 +33,11 @@ const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util
 
 const num   = (v) => Number(v) || 0;
 const lower = (v) => String(v || "").toLowerCase();
+// Firestore Timestamps have .toDate(); plain values (or already-Date) fall
+// back to new Date(v). Without this, new Date(timestampObject) silently
+// produces "Invalid Date" — the bug behind the "Invalid Date – Invalid
+// Date" rental period seen in receipt emails/PDFs.
+const asDate = (v) => (v && typeof v.toDate === "function" ? v.toDate() : (v ? new Date(v) : null));
 
 const phaseOf = (payment) => (payment && payment.currentPhase === "balance" ? "balance" : "deposit");
 
@@ -225,6 +230,31 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
       const userEmail = userSnap.exists ? userSnap.data().email : null;
       const b         = bSnap.empty ? {} : bSnap.docs[0].data();
 
+      // carName is NOT stored on the booking doc — it's a joined field
+      // (carID → cars → brandID/modelID → brand/model), same as
+      // bookings.controller.js resolves it for listings. Without this,
+      // b.carName is always undefined and the receipt shows "—".
+      let carName = "Unknown Vehicle";
+      if (b.carID) {
+        const carSnap = await db.collection("cars").doc(b.carID).get();
+        if (carSnap.exists) {
+          const car = carSnap.data();
+          const [brandSnap, modelSnap] = await Promise.all([
+            car.brandID ? db.collection("brand").doc(car.brandID).get() : null,
+            car.modelID ? db.collection("model").doc(car.modelID).get() : null,
+          ]);
+          const brand = brandSnap && brandSnap.exists ? brandSnap.data().brandName || "" : "";
+          const model = modelSnap && modelSnap.exists ? modelSnap.data().modelName || "" : "";
+          carName = `${brand} ${model}`.trim() || "Unknown Vehicle";
+        }
+      }
+
+      // startDateTime/endDateTime are Firestore Timestamps — convert to real
+      // Date objects here, once, so both the PDF and the email format them
+      // correctly instead of each doing new Date(timestampObject).
+      const startDateTime = asDate(b.startDateTime);
+      const endDateTime   = asDate(b.endDateTime);
+
       let toName = "Valued Customer";
       const detailsSnap = await db.collection("userDetails").doc(payment.userID).get();
       if (detailsSnap.exists) {
@@ -237,13 +267,13 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
       const receiptUrl = await generateReceiptPdf({
         bookingID: bID,
         paymentID: payment.paymentID,
-        carName: b.carName,
+        carName,
         phase,
         amount: charged,
         paymentMethod: channelLabel(payment.paymongoChannel || payment.paymentMethod),
         referenceNumber: paymongoPaymentID,
-        startDateTime: b.startDateTime,
-        endDateTime: b.endDateTime,
+        startDateTime,
+        endDateTime,
         customerName: toName,
       });
 
@@ -251,13 +281,13 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
         toEmail: userEmail,
         toName,
         bookingID: bID,
-        carName: b.carName,
+        carName,
         phase,
         amount: charged,
         paymentMethod: channelLabel(payment.paymongoChannel || payment.paymentMethod),
         referenceNumber: paymongoPaymentID,
-        startDateTime: b.startDateTime,
-        endDateTime: b.endDateTime,
+        startDateTime,
+        endDateTime,
         receiptUrl,
       });
     } catch (e) {
