@@ -42,7 +42,7 @@ const getServiceTypes = async (req, res) => {
 const getCarBookings = async (req, res) => {
   const { carID } = req.params;
   try {
-    const [bookingSnap, maintSnap] = await Promise.all([
+    const [bookingSnap, maintSnap, completedSnap] = await Promise.all([
       db.collection("bookings")
         .where("carID", "==", carID)
         .where("status", "in", [BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING])
@@ -51,6 +51,24 @@ const getCarBookings = async (req, res) => {
         .where("carID", "==", carID)
         .where("status", "==", "Scheduled")
         .get(),
+      // Recently-completed bookings still carry a 1-day post-rental
+      // turnaround buffer (see the availability guard in
+      // bookings.controller.js, which now enforces this the same day the
+      // booking is marked returned — no more waiting on
+      // jobs/postRentalMaintenance.job.js's once-a-day cron). Only the last
+      // 2 days are worth fetching: anything older can't possibly still be
+      // inside a 1-day buffer window. Needs a composite index on
+      // (carID ASC, status ASC, updatedAt ASC) — Firestore will prompt for
+      // it on first run if missing.
+      db.collection("bookings")
+        .where("carID", "==", carID)
+        .where("status", "==", BOOKING_STATUS.COMPLETED)
+        .where("updatedAt", ">=", new Date(Date.now() - 2 * 24 * 60 * 60 * 1000))
+        .get()
+        .catch((err) => {
+          console.warn("[getCarBookings] completed-bookings buffer query failed (missing index?):", err.message);
+          return { docs: [] };
+        }),
     ]);
 
     const bookings = bookingSnap.docs.map((doc) => {
@@ -58,6 +76,18 @@ const getCarBookings = async (req, res) => {
       return {
         // bookingID intentionally excluded — not needed by client and avoids ID enumeration
         status:        d.status || BOOKING_STATUS.TO_PAY,
+        startDateTime: toISO(d.startDateTime),
+        endDateTime:   toISO(d.endDateTime),
+      };
+    });
+
+    // Sent as their own "completed" entries — Booking.jsx's getDateStatuses()
+    // only greys the single day AFTER endDateTime for these (the rental
+    // window itself is in the past and doesn't need marking).
+    const completedBookings = completedSnap.docs.map((doc) => {
+      const d = doc.data();
+      return {
+        status:        BOOKING_STATUS.COMPLETED,
         startDateTime: toISO(d.startDateTime),
         endDateTime:   toISO(d.endDateTime),
       };
@@ -74,7 +104,7 @@ const getCarBookings = async (req, res) => {
         endDateTime:   toISO(d),
       }));
 
-    return res.status(200).json([...bookings, ...maintenanceDays]);
+    return res.status(200).json([...bookings, ...completedBookings, ...maintenanceDays]);
   } catch (error) {
     console.error("getCarBookings error:", error);
     return res.status(500).json({ message: "Failed to fetch car bookings." });

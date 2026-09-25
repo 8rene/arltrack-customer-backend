@@ -363,8 +363,24 @@ const createBooking = async (req, res) => {
     // client-side convenience only — nothing previously stopped this endpoint
     // from being called directly for a date the calendar had just refused to
     // show. Re-check the same source of truth here, server-side.
+    //
+    // The 1-day turnaround buffer (before a confirmed booking starts, and
+    // after it ends — cleaning/inspection) is computed HERE directly from
+    // the other booking's own start/end, not from a carMaintenance record.
+    // It used to rely entirely on jobs/postRentalMaintenance.job.js, a
+    // once-a-day cron that only creates that record AFTER a booking is
+    // marked "completed" — leaving a window (up to ~24h, or the entire time
+    // a booking is still "ongoing" and hasn't been marked returned yet)
+    // where the calendar already showed the buffer day as unavailable but
+    // this endpoint would still accept a booking for it. Computing the
+    // buffer synchronously here closes that gap — it's enforced the
+    // instant the other booking exists, no cron delay. The cron job still
+    // runs and still creates the maintenance record (kept for the admin
+    // app's own Maintenance list / staff cleaning checklist), it's just no
+    // longer what's actually blocking the day.
     {
       const asDate = (v) => (v && v.toDate ? v.toDate() : new Date(v));
+      const BUFFER_MS = 24 * 60 * 60 * 1000;
 
       const [otherSnap, maintSnap] = await Promise.all([
         db.collection("bookings").where("carID", "==", carID).get(),
@@ -376,20 +392,41 @@ const createBooking = async (req, res) => {
 
       const otherOverlap = otherSnap.docs
         .map((d) => d.data())
-        .find((b) =>
-          b.userID !== userID &&
-          [BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING].includes(b.status) &&
-          asDate(b.startDateTime) < endDateTime &&
-          asDate(b.endDateTime)   > startDateTime
-        );
+        .find((b) => {
+          if (b.userID === userID) return false;
+          const bStart = asDate(b.startDateTime);
+          const bEnd   = asDate(b.endDateTime);
+          if (!bStart || !bEnd) return false;
+
+          if ([BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING].includes(b.status)) {
+            // Still pending/active — block its own window PLUS a 1-day
+            // buffer on both sides, matching getDateStatuses()'s
+            // "preparation" days exactly.
+            const bufferedStart = new Date(bStart.getTime() - BUFFER_MS);
+            const bufferedEnd   = new Date(bEnd.getTime()   + BUFFER_MS);
+            return bufferedStart < endDateTime && bufferedEnd > startDateTime;
+          }
+
+          if (b.status === BOOKING_STATUS.COMPLETED) {
+            // Already returned — the rental window itself is over and
+            // can't conflict with anything new; only the day-after
+            // cleaning/inspection buffer still matters.
+            const bufferedEnd = new Date(bEnd.getTime() + BUFFER_MS);
+            return bEnd < endDateTime && bufferedEnd > startDateTime;
+          }
+
+          return false;
+        });
       if (otherOverlap) {
         return res.status(409).json({
-          message: "This car is no longer available on the selected dates. Please choose another date or vehicle.",
+          message: "This car needs a short turnaround before/after another booking on these dates. Please choose another date or vehicle.",
         });
       }
 
       // Maintenance records only store a single day (maintenanceDate), with
       // no separate end date — same as GET /api/services/car-bookings/:carID.
+      // This still catches any OTHER (manually staff-scheduled) maintenance
+      // window — the post-rental buffer above no longer depends on it.
       const maintOverlap = maintSnap.docs
         .map((d) => d.data().maintenanceDate)
         .filter(Boolean)
