@@ -84,6 +84,26 @@ const getBookingQuote = async (req, res) => {
 // POST /api/bookings/create
 const createBooking = async (req, res) => {
   const userID = req.user.userID; // from verified JWT — never trust body
+
+  // Block new bookings while a past booking's penalty balance is still
+  // unpaid. outstandingPenaltyBalance is mirrored onto the user doc by
+  // arltrack-admin-backend's penalty.service.js (settleBooking /
+  // recordShortfallPayment) whenever it changes — this is a single cheap
+  // read here, not a scan of this customer's whole penalty history on
+  // every booking attempt. This is an account-level check, not
+  // device/IP-level — a second account is a known, accepted gap (ID
+  // verification makes it harder, not impossible).
+  const requestingUserSnap = await db.collection("user").doc(userID).get();
+  const outstandingPenaltyBalance = requestingUserSnap.exists
+    ? (requestingUserSnap.data().outstandingPenaltyBalance || 0)
+    : 0;
+  if (outstandingPenaltyBalance > 0) {
+    return res.status(403).json({
+      message: `Please settle your outstanding balance of ₱${outstandingPenaltyBalance} before booking again.`,
+      outstandingPenaltyBalance,
+    });
+  }
+
   const {
     carID,
     serviceType,

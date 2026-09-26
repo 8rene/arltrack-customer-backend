@@ -66,6 +66,7 @@ const runPostRentalMaintenance = async () => {
 
       const ref = await db.collection("carMaintenance").add({
         carID:        booking.carID,
+        bookingID:    booking.bookingID || doc.id, // links back to this booking — see maintenance.model.js
         basis:        "Post-Rental",
         services:     [],
         totalCost:    0,

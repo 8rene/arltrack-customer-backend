@@ -169,6 +169,11 @@ const getFullProfile = async (req, res) => {
       roleID:            user.roleID            || "",
       isVerified:        user.isVerified        || false,
       status:            user.status            || "",
+      // Mirrored by admin-backend's penalty.service.js (settleBooking /
+      // recordShortfallPayment) whenever it changes — see MyBookings.jsx's
+      // outstanding-balance banner and bookings.controller.js's
+      // createBooking guard, which both read this same field.
+      outstandingPenaltyBalance: user.outstandingPenaltyBalance || 0,
       // referral — this user's own shareable code and how many people
       // they've referred so far. Was already on the "user" doc since
       // signup started writing it, just never surfaced through this
