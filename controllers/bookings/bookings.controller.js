@@ -86,17 +86,24 @@ const createBooking = async (req, res) => {
   const userID = req.user.userID; // from verified JWT — never trust body
 
   // Block new bookings while a past booking's penalty balance is still
-  // unpaid. outstandingPenaltyBalance is mirrored onto the user doc by
-  // arltrack-admin-backend's penalty.service.js (settleBooking /
-  // recordShortfallPayment) whenever it changes — this is a single cheap
-  // read here, not a scan of this customer's whole penalty history on
-  // every booking attempt. This is an account-level check, not
+  // unpaid. This used to read a cached outstandingPenaltyBalance field
+  // mirrored onto the user doc by arltrack-admin-backend's
+  // penalty.service.js — that field has been removed (it could drift out
+  // of sync whenever a penalty was confirmed on a booking whose deposit
+  // was already settled, since only settleBooking()/recordShortfallPayment()
+  // ever wrote it). This now queries `penalties` directly instead: narrow,
+  // indexed to this one customer's own Confirmed penalties, not a scan of
+  // the whole collection. This is an account-level check, not
   // device/IP-level — a second account is a known, accepted gap (ID
   // verification makes it harder, not impossible).
-  const requestingUserSnap = await db.collection("user").doc(userID).get();
-  const outstandingPenaltyBalance = requestingUserSnap.exists
-    ? (requestingUserSnap.data().outstandingPenaltyBalance || 0)
-    : 0;
+  const unpaidPenaltiesSnap = await db.collection("penalties")
+    .where("userID", "==", userID)
+    .where("status", "==", "Confirmed")
+    .get();
+  const outstandingPenaltyBalance = unpaidPenaltiesSnap.docs.reduce((sum, doc) => {
+    const p = doc.data();
+    return sum + Math.max(0, (Number(p.amount) || 0) - (Number(p.paidAmount) || 0));
+  }, 0);
   if (outstandingPenaltyBalance > 0) {
     return res.status(403).json({
       message: `Please settle your outstanding balance of ₱${outstandingPenaltyBalance} before booking again.`,
@@ -126,7 +133,7 @@ const createBooking = async (req, res) => {
     paymentMethod,
     referenceNumber,
     // NOTE: totalDays / rentalFee / extraFee / driversFee / serviceFee /
-    // gatewayFee / grandTotal / depositFee / methodOfPayment are intentionally
+    // gatewayFee / grandTotal / methodOfPayment are intentionally
     // NOT read from the request body anymore. Those used to be computed in
     // the browser (Booking.jsx) and simply trusted here (`Number(x) || 0`),
     // which meant anyone could edit the request and book a car for ₱0. They
@@ -203,7 +210,6 @@ const createBooking = async (req, res) => {
     const { payNow, methodOfPayment: computedMethod } = computePaymentSplit(fees.grandTotal, paymentAmount);
 
     const totalFee    = fees.rentalFee;
-    const depositPaid = fees.depositFee; // always ₱1,000
     const extra       = fees.extraFee;
     const drivers     = fees.driversFee;
     const service     = fees.serviceFee;
@@ -539,7 +545,6 @@ const createBooking = async (req, res) => {
       extraFee:        extra,
       driversFee:      drivers,
       gatewayFee:      gateway,
-      depositFee:      depositPaid,
       methodOfPayment: computedMethod,
       paymentMethod:   paymentMethod  || "",
       referenceNumber: referenceNumber || "N/A",
@@ -716,7 +721,6 @@ const getUserBookings = async (req, res) => {
         endDateTime:   b.endDateTime               || null,
         totalDays:     b.totalDays                 || 1,
         totalFee:      0,
-        depositFee:    0,
         rentalFee:     0,
         status:               (b.status || "upcoming").toLowerCase(),
         cancellationReason:   b.cancellationReason        || "",
@@ -741,7 +745,6 @@ const getUserBookings = async (req, res) => {
         result[i].payment = {
           paymentID:       p.paymentID        || snap.docs[0].id,
           amount:          p.amount           || 0,
-          depositFee:      p.depositFee       || 0,
           driversFee:      p.driversFee       || 0,
           extraFee:        p.extraFee         || 0,
           gatewayFee:      p.gatewayFee       || 0,
@@ -777,7 +780,6 @@ const getUserBookings = async (req, res) => {
         // Fix: fees are stored in payments, not in the booking doc
         result[i].totalFee   = p.amount      || 0;
         result[i].rentalFee  = p.rentalFee   || 0;
-        result[i].depositFee = p.depositFee  || 0;
       } else {
         result[i].payment = null;
       }

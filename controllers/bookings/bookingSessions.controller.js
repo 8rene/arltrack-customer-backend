@@ -132,7 +132,6 @@ const getBookingDetails = async (req, res) => {
       payment = {
         paymentID:         p.paymentID        || paymentSnap.docs[0].id,
         amount:            p.amount           || 0,
-        depositFee:        p.depositFee       || 0,
         rentalFee:         p.rentalFee        || 0,
         serviceFee:        p.serviceFee       || 0,
         extraFee:          p.extraFee         || 0,
@@ -164,8 +163,8 @@ const getBookingDetails = async (req, res) => {
         // disabled with an accurate countdown across page reloads, not
         // just for the lifetime of one React state. See receipt.controller.js.
         lastReceiptSentAt: p.lastReceiptSentAt || null,
-        // Was previously computed inline in BookingDetails.jsx as
-        // Math.max(0, amount - depositFee) — now the server's own math.
+        // Was previously computed inline in BookingDetails.jsx — now the
+        // server's own math.
         paymentStatus:     derivePaymentStatus(p),
         balanceDue:        balance,
       };
@@ -183,11 +182,10 @@ const getBookingDetails = async (req, res) => {
         startDateTime:  booking.startDateTime  || null,
         endDateTime:    booking.endDateTime    || null,
         totalDays:      booking.totalDays      || 1,
-        // The booking doc's own totalFee is always 0 — the real total only
-        // ever lives on the payment record's `amount` (see getUserBookings,
-        // which does the exact same fallback). Fall back to 0 only if
-        // there's genuinely no payment yet.
-        totalFee:       payment?.amount        || booking.totalFee || 0,
+        // The real total only ever lives on the payment record's `amount`
+        // (see getUserBookings, which does the exact same thing). 0 only
+        // if there's genuinely no payment yet.
+        totalFee:       payment?.amount        || 0,
       },
       // Pins — null if this booking predates the coordinate-capture change,
       // or if the customer typed an address without using the map.

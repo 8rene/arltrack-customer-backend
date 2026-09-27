@@ -8,7 +8,7 @@
 // means anyone could open devtools and submit a booking — or a PayMongo
 // checkout — for any amount they wanted.
 //
-// Fee AMOUNTS (SERVICE_FEE, GATEWAY_FEE, DEPOSIT_FEE, extraFeeOutsideArea,
+// Fee AMOUNTS (SERVICE_FEE, GATEWAY_FEE, extraFeeOutsideArea,
 // driversFeeBaseArea, driversFeeOutsideArea, baseAreaKeywords) now come from
 // the same systemSettings Firestore doc the admin panel's System Settings
 // page writes to (arltrack-admin-backend/services/systemSettings). This is
@@ -28,7 +28,6 @@ const { getPaymentBreakdown } = require("./payments/paymentBreakdown.util");
 const SETTINGS_DEFAULTS = {
   serviceFee: 50,
   gatewayFee: 53,
-  depositFee: 1000,
   extraFeeOutsideArea: 500,
   driversFeeBaseArea: 1000,
   driversFeeOutsideArea: 1500,
@@ -131,7 +130,7 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   // to slip through even with days === 0 and show a phantom price before
   // the customer had picked any dates.
   if (days === 0) {
-    return { days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, grandTotal: 0, depositFee: settings.depositFee };
+    return { days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, grandTotal: 0 };
   }
 
   const rentalFee = days * (Number(pricePerDay) || 0);
@@ -145,7 +144,7 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
 
   const grandTotal = rentalFee + extraFee + driversFee + serviceFee + gatewayFee;
 
-  return { days, diffHrs, rentalFee, extraFee, driversFee, serviceFee, gatewayFee, grandTotal, depositFee: settings.depositFee };
+  return { days, diffHrs, rentalFee, extraFee, driversFee, serviceFee, gatewayFee, grandTotal };
 };
 
 // ── Partial (50%) vs Full payment split ─────────────────────────────────────

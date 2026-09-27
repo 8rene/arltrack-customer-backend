@@ -153,6 +153,21 @@ const getFullProfile = async (req, res) => {
       ...doc.data(),
     }));
 
+    // Outstanding penalty balance — used to read a cached field mirrored
+    // onto the user doc by admin-backend's penalty.service.js. That field
+    // has been removed (it could drift out of sync — see
+    // bookings.controller.js's createBooking guard for the full reasoning),
+    // so this now queries `penalties` directly: narrow, indexed to this
+    // one customer's own Confirmed penalties.
+    const unpaidPenaltiesSnap = await db.collection("penalties")
+      .where("userID", "==", userID)
+      .where("status", "==", "Confirmed")
+      .get();
+    const outstandingPenaltyBalance = unpaidPenaltiesSnap.docs.reduce((sum, doc) => {
+      const p = doc.data();
+      return sum + Math.max(0, (Number(p.amount) || 0) - (Number(p.paidAmount) || 0));
+    }, 0);
+
     // Primary address = isDefault true, or first one
     const primaryAddress = addresses.find(a => a.isDefault) || addresses[0] || {};
 
@@ -169,11 +184,9 @@ const getFullProfile = async (req, res) => {
       roleID:            user.roleID            || "",
       isVerified:        user.isVerified        || false,
       status:            user.status            || "",
-      // Mirrored by admin-backend's penalty.service.js (settleBooking /
-      // recordShortfallPayment) whenever it changes — see MyBookings.jsx's
-      // outstanding-balance banner and bookings.controller.js's
-      // createBooking guard, which both read this same field.
-      outstandingPenaltyBalance: user.outstandingPenaltyBalance || 0,
+      // Queried live from `penalties` above — see MyBookings.jsx's
+      // outstanding-balance banner, which reads this same response field.
+      outstandingPenaltyBalance,
       // referral — this user's own shareable code and how many people
       // they've referred so far. Was already on the "user" doc since
       // signup started writing it, just never surfaced through this
