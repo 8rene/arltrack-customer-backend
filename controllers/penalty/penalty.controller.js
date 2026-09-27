@@ -37,8 +37,7 @@ const getMyBookingPenalties = async (req, res) => {
       const p = d.data();
       return {
         penaltyID: p.penaltyID,
-        type: p.type,
-        description: p.description,
+        lineItems: p.lineItems || [],
         amount: p.amount,
         paidAmount: p.paidAmount || 0,
         paymentMethod: p.paymentMethod || "",
