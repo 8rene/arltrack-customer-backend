@@ -137,6 +137,7 @@ const getBookingDetails = async (req, res) => {
         extraFee:          p.extraFee         || 0,
         driversFee:        p.driversFee       || 0,
         gatewayFee:        p.gatewayFee       || 0,
+        securityDeposit:   p.securityDeposit  || 0,
         methodOfPayment:   p.methodOfPayment  || p.paymentMethod || "",
         paymentMethod:     p.paymentMethod    || p.methodOfPayment || "",
         referenceNumber:   p.referenceNumber  || "",

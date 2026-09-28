@@ -127,14 +127,14 @@ const createPaymentLink = async (req, res) => {
       }
       // Older Partial bookings predate the balanceAmount field — derive it.
       amountToCharge = Number(payment.balanceAmount)
-        || Math.max(0, (Number(payment.amount) || 0) - computePaymentSplit(payment.amount, payment.methodOfPayment).payNow);
+        || Math.max(0, (Number(payment.amount) || 0) - computePaymentSplit(payment.amount, payment.methodOfPayment, payment.securityDeposit).payNow);
     } else {
       // Never open a second checkout for a deposit that's already been paid —
       // that is exactly how a customer ends up paying twice.
       if (["paid", "approved"].includes(lower(payment.status))) {
         return res.status(400).json({ message: "This booking's payment has already been received.", alreadyPaid: true });
       }
-      const { payNow } = computePaymentSplit(payment.amount, payment.methodOfPayment);
+      const { payNow } = computePaymentSplit(payment.amount, payment.methodOfPayment, payment.securityDeposit);
       amountToCharge = payNow;
     }
 

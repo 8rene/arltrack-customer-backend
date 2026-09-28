@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Payment breakdown + refund plan — SINGLE SOURCE OF TRUTH (customer backend).
+// Payment breakdown + refund plan — SINGLE SOURCE OF TRUTH (admin backend).
 //
-// KEEP IN SYNC with arltrack-admin-backend/services/payments/paymentBreakdown.js
+// KEEP IN SYNC with arltrack-customer-backend/utils/payments/paymentBreakdown.util.js
 // (an identical copy — the two apps deploy separately, so it can't be a shared
 // import). If you change one, change the other.
 //
@@ -32,9 +32,14 @@ const payTypeOf = (payment) => {
 };
 
 // How much the first payment is worth for each payment type.
-const upfrontOf = (payType, amount, depositFee) => {
+// securityDeposit (refundable, included in `amount`) is always paid in full up
+// front; 0 for older payments, which gives the original plain 50%.
+const upfrontOf = (payType, amount, depositFee, securityDeposit = 0) => {
   if (payType === "Full") return amount;
-  if (payType === "Downpayment" || payType === "Partial") return Math.floor(amount / 2); // == computePaymentSplit().payNow
+  if (payType === "Downpayment" || payType === "Partial") {
+    const sec = Math.min(Math.max(0, securityDeposit), amount);
+    return sec + Math.floor((amount - sec) / 2); // == computePaymentSplit().payNow
+  }
   return depositFee; // legacy flat deposit
 };
 
@@ -49,7 +54,6 @@ const upfrontOf = (payType, amount, depositFee) => {
  *   amountPaid         net received after any staff discount spillover
  *   balance            still owed (after discount)
  *   refundDue          discount spillover still owed back to the customer
- *   discountAmount     the flat-peso staff discount applied to this payment, if any
  */
 const getPaymentBreakdown = (payment) => {
   const p          = payment || {};
@@ -63,7 +67,7 @@ const getPaymentBreakdown = (payment) => {
   }
 
   const isConfirmed = status === "paid" || status === "approved";
-  const upfront     = upfrontOf(payType, amount, depositFee);
+  const upfront     = upfrontOf(payType, amount, depositFee, num(p.securityDeposit));
   const owedAfterUpfront = Math.max(0, amount - upfront);
 
   // First payment. NOT capped to `amount` on purpose: the original computeAmounts
@@ -105,7 +109,7 @@ const getPaymentBreakdown = (payment) => {
     }
   }
 
-  return { payType, amount, depositCollected, balanceOnline, balanceInPerson, amountPaid, balance, refundDue, discountAmount };
+  return { payType, amount, depositCollected, balanceOnline, balanceInPerson, amountPaid, balance, refundDue };
 };
 
 /**
@@ -153,4 +157,4 @@ const computeRefundPlan = (payment) => {
   return { total: b.amountPaid, parts, manualAmount: remaining, breakdown: b };
 };
 
-module.exports = { getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, payTypeOf };
+export { getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, payTypeOf };

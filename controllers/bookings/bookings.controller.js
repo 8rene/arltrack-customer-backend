@@ -72,7 +72,7 @@ const getBookingQuote = async (req, res) => {
       driveType,
     });
 
-    const split = computePaymentSplit(fees.grandTotal, paymentAmount);
+    const split = computePaymentSplit(fees.grandTotal, paymentAmount, fees.securityDeposit);
 
     return res.status(200).json({ ...fees, ...split, pricePerDay });
   } catch (error) {
@@ -207,8 +207,9 @@ const createBooking = async (req, res) => {
       destinationProvince,
       driveType,
     });
-    const { payNow, methodOfPayment: computedMethod } = computePaymentSplit(fees.grandTotal, paymentAmount);
+    const { payNow, methodOfPayment: computedMethod } = computePaymentSplit(fees.grandTotal, paymentAmount, fees.securityDeposit);
 
+    const securityDeposit = fees.securityDeposit;
     const totalFee    = fees.rentalFee;
     const extra       = fees.extraFee;
     const drivers     = fees.driversFee;
@@ -545,6 +546,9 @@ const createBooking = async (req, res) => {
       extraFee:        extra,
       driversFee:      drivers,
       gatewayFee:      gateway,
+      // Refundable; already inside `amount`. Becomes payments.deposit (Held)
+      // when the first payment settles — see settlePayment.util.js.
+      securityDeposit,
       methodOfPayment: computedMethod,
       paymentMethod:   paymentMethod  || "",
       referenceNumber: referenceNumber || "N/A",
@@ -631,6 +635,7 @@ const createBooking = async (req, res) => {
       driversFee: drivers,
       serviceFee: service,
       gatewayFee: gateway,
+      securityDeposit,
       grandTotal: totalAmount,
       payNow,
     });
@@ -748,6 +753,7 @@ const getUserBookings = async (req, res) => {
           driversFee:      p.driversFee       || 0,
           extraFee:        p.extraFee         || 0,
           gatewayFee:      p.gatewayFee       || 0,
+          securityDeposit: p.securityDeposit  || 0,
           serviceFee:      p.serviceFee       || 0,
           rentalFee:       p.rentalFee        || 0,
           methodOfPayment: p.methodOfPayment  || p.paymentMethod || "",

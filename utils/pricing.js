@@ -29,6 +29,10 @@ const SETTINGS_DEFAULTS = {
   serviceFee: 50,
   gatewayFee: 53,
   extraFeeOutsideArea: 500,
+  // Refundable security deposit — same field the admin System Settings page
+  // edits (systemSettings.securityDepositAmount). Now collected as part of
+  // the booking's grand total, not separately at pickup.
+  securityDepositAmount: 1000,
   driversFeeBaseArea: 1000,
   driversFeeOutsideArea: 1500,
   baseAreaKeywords: ["manila", "bulacan"],
@@ -130,7 +134,7 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   // to slip through even with days === 0 and show a phantom price before
   // the customer had picked any dates.
   if (days === 0) {
-    return { days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, grandTotal: 0 };
+    return { days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, securityDeposit: 0, grandTotal: 0 };
   }
 
   const rentalFee = days * (Number(pricePerDay) || 0);
@@ -142,16 +146,23 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   const serviceFee = settings.serviceFee;
   const gatewayFee = settings.gatewayFee;
 
-  const grandTotal = rentalFee + extraFee + driversFee + serviceFee + gatewayFee;
+  // Refundable security deposit, charged up front with everything else.
+  const securityDeposit = Math.max(0, Number(settings.securityDepositAmount) || 0);
 
-  return { days, diffHrs, rentalFee, extraFee, driversFee, serviceFee, gatewayFee, grandTotal };
+  const grandTotal = rentalFee + extraFee + driversFee + serviceFee + gatewayFee + securityDeposit;
+
+  return { days, diffHrs, rentalFee, extraFee, driversFee, serviceFee, gatewayFee, securityDeposit, grandTotal };
 };
 
 // ── Partial (50%) vs Full payment split ─────────────────────────────────────
-const computePaymentSplit = (grandTotal, paymentAmount) => {
+// The refundable security deposit is always collected in full up front:
+// Partial pays the deposit + 50% of everything else. securityDeposit = 0
+// (older bookings) reduces this to the original plain 50% split.
+const computePaymentSplit = (grandTotal, paymentAmount, securityDeposit = 0) => {
   const total = Number(grandTotal) || 0;
+  const sec = Math.min(Math.max(0, Number(securityDeposit) || 0), total);
   const isPartial = String(paymentAmount).toLowerCase() !== "full";
-  const payNow  = isPartial ? Math.floor(total * 0.5) : total;
+  const payNow  = isPartial ? sec + Math.floor((total - sec) * 0.5) : total;
   const balance = Math.max(0, total - payNow);
   return { payNow, balance, methodOfPayment: isPartial ? "Partial" : "Full" };
 };

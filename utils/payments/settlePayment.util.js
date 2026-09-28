@@ -44,7 +44,7 @@ const isPhasePaid = (payment, phase) =>
 const chargedAmountFor = (payment, phase) =>
   phase === "balance"
     ? num(payment.balanceAmount)
-    : num(computePaymentSplit(payment.amount, payment.methodOfPayment).payNow);
+    : num(computePaymentSplit(payment.amount, payment.methodOfPayment, payment.securityDeposit).payNow);
 
 /**
  * Money arrived for a booking that is already cancelled (e.g. the customer paid
@@ -142,6 +142,19 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
       payload[phase === "balance" ? "balancePaymongoPaymentID" : "depositPaymongoPaymentID"] = paymongoPaymentID;
     }
     payload.lastSettledVia = source;
+    // The refundable security deposit was part of this first payment, so it is
+    // now HELD — same shape admin's penalty.service recordDepositReceived()
+    // writes, so settleBooking()/the Penalties page work unchanged.
+    if (phase !== "balance" && num(p.securityDeposit) > 0 && !p.deposit) {
+      payload.deposit = {
+        amount: num(p.securityDeposit),
+        status: "Held",
+        waivedReason: "",
+        received: { method: "Online", referenceNumber: paymongoPaymentID || "", by: p.userID || "customer", at: now },
+        returned: { method: null, referenceNumber: "", by: null, at: null, amount: 0 },
+        settlement: { confirmedPenaltyTotal: 0, net: 0, status: "", settledBy: null, settledAt: null },
+      };
+    }
     t.update(paymentRef, payload);
     return { state: "settled", payment: { ...p, ...payload } };
   });
