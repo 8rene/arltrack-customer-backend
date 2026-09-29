@@ -1,5 +1,6 @@
 const { db } = require("../config/firebaseConnection/firebase");
 const { createNotification } = require("../services/notification/notification.service");
+const { resolveCarName } = require("../utils/receipt/receipt.util");
 
 const toDate = (v) => {
   if (!v) return null;
@@ -33,6 +34,7 @@ const runBookingReminders = async () => {
 
   let upcomingCount = 0;
   let reminderCount = 0;
+  let driverReminderCount = 0;
 
   for (const b of bookings) {
     const start = toDate(b.startDateTime);
@@ -61,11 +63,30 @@ const runBookingReminders = async () => {
         message: `Reminder: your booking starts at ${fmtDateTime(start)}.`,
       });
       if (id) reminderCount++;
+
+      // Same 2h mark, separate notification, to the DRIVER assigned to
+      // this trip (see admin-backend's driverDispatch.service.js —
+      // b.driverID → user/{uid} where roleID resolves to "Driver"). Skipped
+      // entirely when nobody's assigned yet — driverID is only set once
+      // staff dispatch a driver in the admin app; nothing here assigns one.
+      // Uses the SAME createNotification() dedup as the customer reminder
+      // above, so this is just as safe to run on every cron tick.
+      if (b.driverID) {
+        const carName = await resolveCarName(b.carID);
+        const driverId = await createNotification({
+          type: "driver_trip_reminder",
+          userID: b.driverID,
+          refID: bID,
+          title: "Upcoming Trip in 2 Hours",
+          message: `You're assigned to a trip starting at ${fmtDateTime(start)} — ${carName}${b.destination ? ` to ${b.destination}` : ""}.`,
+        });
+        if (driverId) driverReminderCount++;
+      }
     }
   }
 
-  console.log(`[CRON] booking-reminders: ${upcomingCount} upcoming, ${reminderCount} last-call reminder(s) sent.`);
-  return { upcomingCount, reminderCount };
+  console.log(`[CRON] booking-reminders: ${upcomingCount} upcoming, ${reminderCount} customer reminder(s), ${driverReminderCount} driver reminder(s) sent.`);
+  return { upcomingCount, reminderCount, driverReminderCount };
 };
 
 module.exports = { runBookingReminders };
