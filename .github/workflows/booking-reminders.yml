@@ -1,0 +1,42 @@
+name: Booking Reminders (15-min tick)
+
+# Vercel's Hobby plan only runs its OWN cron feature once a day (see
+# vercel.json — /api/cron/booking-reminders is still scheduled there too,
+# as a once-daily fallback). This workflow is what actually gets the
+# 2-hours-before driver/customer reminders close to on-time: GitHub
+# Actions' scheduler is separate from Vercel's, so it isn't subject to
+# that once-a-day limit, and it's free on a public or even a private repo
+# within GitHub's free minutes.
+#
+# This hits the SAME endpoint Vercel's own cron hits
+# (jobs/bookingNotifications.job.js via routes/cron.routes.js) — no new
+# backend logic, just calling it more often. createNotification()'s dedup
+# (see services/notification/notification.service.js) means a booking
+# already reminded won't get a duplicate notification even though this
+# runs every 15 minutes.
+#
+# Setup required (GitHub repo → Settings → Secrets and variables →
+# Actions → New repository secret):
+#   CRON_SECRET      — same value as CRON_SECRET in Vercel's env vars
+#   BACKEND_BASE_URL — e.g. https://arltrack-customer-backend.vercel.app
+#
+# NOTE: GitHub's schedule trigger is best-effort and can run a few
+# minutes late during high load on their end — acceptable here since the
+# 2-hour mark only needs to be "close", not to-the-second exact, and a
+# late run still catches it (createNotification has no expiry window).
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {} # lets you trigger a run manually from the Actions tab, for testing
+
+jobs:
+  ping-booking-reminders:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call /api/cron/booking-reminders
+        run: |
+          curl -sS -f -X GET "${{ secrets.BACKEND_BASE_URL }}/api/cron/booking-reminders" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            || (echo "::error::booking-reminders ping failed" && exit 1)
+            
