@@ -230,7 +230,12 @@ const createPaymentLink = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("createPaymentLink error:", error?.response?.data || error.message);
+    console.error(
+      "createPaymentLink error:",
+      "status:", error?.response?.status,
+      "url:", error?.config?.method?.toUpperCase(), error?.config?.url,
+      "body:", error?.response?.data || error.message
+    );
     return res.status(500).json({ message: "Failed to create payment link. Please try again." });
   }
 };
