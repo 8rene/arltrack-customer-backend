@@ -179,6 +179,8 @@ const getBookingDetails = async (req, res) => {
         carImage,
         serviceType:    booking.serviceType    || "",
         status:         booking.status         || "pending",
+        // Why staff/customer cancelled it (set when status becomes "cancelled").
+        cancellationReason: booking.cancellationReason || "",
         modeOfDriving:  booking.modeOfDriving  || "",
         startDateTime:  booking.startDateTime  || null,
         endDateTime:    booking.endDateTime    || null,
