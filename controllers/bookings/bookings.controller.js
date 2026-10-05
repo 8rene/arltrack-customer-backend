@@ -215,6 +215,12 @@ const createBooking = async (req, res) => {
     const drivers     = fees.driversFee;
     const service     = fees.serviceFee;
     const gateway     = fees.gatewayFee;
+    // The % rates and the base the gateway fee was computed on are saved on the
+    // payment too, so any past booking's fees can be explained even if the
+    // Settings percentages change later.
+    const gatewayBase = fees.gatewayFeeBase;
+    const serviceRate = fees.serviceFeeRate;
+    const gatewayRate = fees.gatewayFeeRate;
     const totalAmount = fees.grandTotal;
 
     // ── Max rental length guard ──────────────────────────────────
@@ -500,6 +506,10 @@ const createBooking = async (req, res) => {
       serviceTypeID: serviceTypeID || null,
       startDateTime,
       endDateTime,
+      // The exact pickup INSTANT (Manila, UTC+8). startDateTime above is parsed
+      // with no timezone, so on a UTC server it is shifted by 8 hours; the
+      // refund policy's 48-hour window needs the real instant.
+      pickupAt:      startDate && startTime ? new Date(`${startDate}T${startTime}:00+08:00`) : startDateTime,
       totalDays:     fees.days || 1,
       location:      destination || "",
       modeOfDriving: driveType === "chauffeur" ? "With Chauffeur" : "Self Drive",
@@ -546,6 +556,9 @@ const createBooking = async (req, res) => {
       extraFee:        extra,
       driversFee:      drivers,
       gatewayFee:      gateway,
+      serviceFeeRate:  serviceRate,   // % of rental only
+      gatewayFeeRate:  gatewayRate,   // % of gatewayFeeBase
+      gatewayFeeBase:  gatewayBase,   // rental + extra + driver's + service fee + security deposit
       // Refundable; already inside `amount`. Becomes payments.deposit (Held)
       // when the first payment settles — see settlePayment.util.js.
       securityDeposit,
@@ -635,6 +648,9 @@ const createBooking = async (req, res) => {
       driversFee: drivers,
       serviceFee: service,
       gatewayFee: gateway,
+      serviceFeeRate: serviceRate,
+      gatewayFeeRate: gatewayRate,
+      gatewayFeeBase: gatewayBase,
       securityDeposit,
       grandTotal: totalAmount,
       payNow,
@@ -753,6 +769,9 @@ const getUserBookings = async (req, res) => {
           driversFee:      p.driversFee       || 0,
           extraFee:        p.extraFee         || 0,
           gatewayFee:      p.gatewayFee       || 0,
+          serviceFeeRate:  p.serviceFeeRate   || 0,
+          gatewayFeeRate:  p.gatewayFeeRate   || 0,
+          gatewayFeeBase:  p.gatewayFeeBase   || 0,
           securityDeposit: p.securityDeposit  || 0,
           serviceFee:      p.serviceFee       || 0,
           rentalFee:       p.rentalFee        || 0,

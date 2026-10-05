@@ -6,7 +6,8 @@ const { BOOKING_STATUS, enforceToPayValidity, promoteBookingToUpcoming, cancelBo
 const { createNotification, notifyStaff } = require("../../services/notification/notification.service");
 const { axios, PAYMONGO_V1, paymongoHeaders, channelLabel } = require("../../utils/payments/paymongoClient.util");
 const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = require("../../utils/payments/settlePayment.util");
-const { computeRefundPlan } = require("../../utils/payments/paymentBreakdown.util");
+const { computeRefundQuote, resolvePickupAt } = require("../../utils/payments/paymentBreakdown.util");
+const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
 
 const lower = (v) => String(v || "").toLowerCase();
 
@@ -230,12 +231,7 @@ const createPaymentLink = async (req, res) => {
     });
 
   } catch (error) {
-    console.error(
-      "createPaymentLink error:",
-      "status:", error?.response?.status,
-      "url:", error?.config?.method?.toUpperCase(), error?.config?.url,
-      "body:", error?.response?.data || error.message
-    );
+    console.error("createPaymentLink error:", error?.response?.data || error.message);
     return res.status(500).json({ message: "Failed to create payment link. Please try again." });
   }
 };
@@ -457,12 +453,15 @@ const handleWebhook = async (req, res) => {
       // The checkout_session payload embeds the underlying PayMongo payment
       // under attributes.payments — that payment's own id (not the session id)
       // is what the Refunds API needs.
-      const paymongoPaymentID = (session?.attributes?.payments || [])[0]?.id || null;
+      const paymentResource   = pickPaidPayment(session?.attributes?.payments);
+      const paymongoPaymentID = paymentResource?.id || null;
+      // PayMongo's own transaction fee for this charge (fee / net_amount on the same object).
+      const charge = chargeFromPaymentResource(paymentResource);
 
       // settlePhasePayment is transactional + idempotent: if the status poll
       // (or the stale-check) already settled this phase it returns
       // { alreadyPaid: true } and does nothing — no duplicate logs/notifications.
-      const result = await settlePhasePayment({ paymentRef: paymentDoc.ref, phase, paymongoPaymentID, source: "webhook" });
+      const result = await settlePhasePayment({ paymentRef: paymentDoc.ref, phase, paymongoPaymentID, source: "webhook", charge });
       console.log(`[PayMongo Webhook] ${phase} payment ${result.settled ? "settled" : "already settled"} for booking:`, paymentDoc.data().bookingID, "paymongoPaymentID:", paymongoPaymentID);
 
       return res.status(200).json({ received: true });
@@ -643,6 +642,124 @@ const VALID_REFUND_REASONS = [
 // refunded; an unpaid ("to pay") booking has nothing to refund and is simply
 // cancelled instead.
 // ─────────────────────────────────────────────────────────────────────────────
+const peso = (n) => `₱${Number(n || 0).toLocaleString()}`;
+
+// An open (Pending/Approved) refund request for this payment, if any.
+const findOpenRefundRequest = async (paymentID) => {
+  const snap = await db.collection("refundRequests")
+    .where("paymentID", "==", paymentID)
+    .where("status", "in", ["Pending", "Approved"])
+    .limit(1)
+    .get();
+  return snap.empty ? null : snap.docs[0].data();
+};
+
+// Loads + validates everything a refund quote needs. Shared by requestRefund
+// (which creates the request) and previewRefund (which shows the customer the
+// amount first). Returns { error: { status, message } } or { payment, booking }.
+const loadRefundContext = async (userID, paymentID) => {
+  const paymentSnap = await db.collection("payments")
+    .where("paymentID", "==", paymentID)
+    .where("userID", "==", userID)
+    .limit(1)
+    .get();
+
+  if (paymentSnap.empty) {
+    return { error: { status: 404, message: "Payment not found or access denied." } };
+  }
+
+  const payment = paymentSnap.docs[0].data();
+
+  // "paid" = confirmed through PayMongo, "Approved" = confirmed by staff (cash).
+  if (!["paid", "approved"].includes(lower(payment.status))) {
+    return { error: { status: 400, message: "Only paid payments can be refunded." } };
+  }
+
+  // ── The booking must not have started ──
+  const bookingSnap = await db.collection("bookings").where("bookingID", "==", payment.bookingID).limit(1).get();
+  if (bookingSnap.empty) {
+    return { error: { status: 404, message: "Booking not found for this payment." } };
+  }
+  const booking = bookingSnap.docs[0].data();
+  let bookingStatus = booking.status;
+  if (bookingStatus === BOOKING_STATUS.TO_PAY && isDepositPaid(payment)) {
+    // Booking created under the older rule (deposit paid but still "to pay") — heal it first.
+    const promo = await promoteBookingToUpcoming(payment.bookingID);
+    bookingStatus = promo.bookingStatus || bookingStatus;
+  }
+  if (bookingStatus !== BOOKING_STATUS.UPCOMING) {
+    const msg = bookingStatus === BOOKING_STATUS.ONGOING
+      ? "A refund can't be requested once the rental has started. Please contact support."
+      : bookingStatus === BOOKING_STATUS.CANCELLED
+        ? "This booking is already cancelled."
+        : "Refunds can only be requested for upcoming bookings.";
+    return { error: { status: 400, message: msg } };
+  }
+
+  return { payment, booking };
+};
+
+// What a refund requested at `requestedAt` is worth under the 48-hour policy
+// (Terms & Conditions → Cancellation & Refund Policy):
+//   48 hours or more before pickup  → everything paid is refunded
+//   under 48 hours / after pickup   → everything paid EXCEPT the deposit
+// The timing is judged by when the customer ASKS, never when staff approve.
+const quoteCustomerRefund = (payment, booking, requestedAt) => {
+  const pickupAt = resolvePickupAt(booking);
+  const { policy, plan } = computeRefundQuote(payment, { pickupAt, requestedAt });
+  return { policy, plan, pickupAt };
+};
+
+const nothingToRefundMessage = (policy, plan) =>
+  policy.forfeit > 0 && plan.grossPaid > 0
+    ? `There's nothing to refund: because the pickup is less than ${policy.windowHours} hours away (or has passed), your ${peso(policy.forfeit)} deposit is non-refundable and your payment only covers that.`
+    : "There's nothing to refund on this payment.";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/paymongo/refunds/preview/:paymentID
+// Shows the customer EXACTLY what a refund would be if they asked right now
+// (tier, deposit kept, amount returned), before they submit anything.
+// The server's clock is the only one that counts — the number shown here is
+// the number requestRefund() will lock in if they submit.
+// ─────────────────────────────────────────────────────────────────────────────
+const previewRefund = async (req, res) => {
+  const userID = req.user.userID;
+  const { paymentID } = req.params;
+
+  try {
+    const ctx = await loadRefundContext(userID, paymentID);
+    if (ctx.error) return res.status(ctx.error.status).json({ eligible: false, message: ctx.error.message });
+
+    if (await findOpenRefundRequest(paymentID)) {
+      return res.status(200).json({ eligible: false, message: "A refund request for this payment is already in progress." });
+    }
+
+    const requestedAt = new Date();
+    const { policy, plan, pickupAt } = quoteCustomerRefund(ctx.payment, ctx.booking, requestedAt);
+
+    return res.status(200).json({
+      eligible: plan.total > 0,
+      message: plan.total > 0 ? null : nothingToRefundMessage(policy, plan),
+      tier: policy.tier,                           // "full" | "late" | "no_show"
+      windowHours: policy.windowHours,             // 48
+      hoursBeforePickup: policy.hoursBeforePickup, // null when the pickup time is unknown
+      pickupAt,
+      fullRefundUntil: policy.fullRefundUntil || null,
+      grossPaid: plan.grossPaid,                   // everything paid
+      depositAmount: policy.depositAmount,
+      depositForfeited: policy.forfeit,            // kept (0 for a full refund)
+      refundAmount: plan.total,                    // what the customer gets back
+      onlineAmount: plan.total - plan.manualAmount,
+      manualAmount: plan.manualAmount,
+      unknownTiming: policy.unknownTiming,
+      asOf: requestedAt,
+    });
+  } catch (error) {
+    console.error("previewRefund error:", error.message);
+    return res.status(500).json({ message: "Failed to calculate the refund." });
+  }
+};
+
 const requestRefund = async (req, res) => {
   const userID = req.user.userID;
   const { paymentID, reason, notes } = req.body;
@@ -655,60 +772,24 @@ const requestRefund = async (req, res) => {
   }
 
   try {
-    const paymentSnap = await db.collection("payments")
-      .where("paymentID", "==", paymentID)
-      .where("userID", "==", userID)
-      .limit(1)
-      .get();
+    const ctx = await loadRefundContext(userID, paymentID);
+    if (ctx.error) return res.status(ctx.error.status).json({ message: ctx.error.message });
+    const { payment, booking } = ctx;
 
-    if (paymentSnap.empty) {
-      return res.status(404).json({ message: "Payment not found or access denied." });
-    }
-
-    const payment = paymentSnap.docs[0].data();
-
-    // "paid" = confirmed through PayMongo, "Approved" = confirmed by staff (cash).
-    if (!["paid", "approved"].includes(lower(payment.status))) {
-      return res.status(400).json({ message: "Only paid payments can be refunded." });
-    }
-
-    // ── The booking must not have started ──
-    const bookingSnap = await db.collection("bookings").where("bookingID", "==", payment.bookingID).limit(1).get();
-    if (bookingSnap.empty) {
-      return res.status(404).json({ message: "Booking not found for this payment." });
-    }
-    let bookingStatus = bookingSnap.docs[0].data().status;
-    if (bookingStatus === BOOKING_STATUS.TO_PAY && isDepositPaid(payment)) {
-      // Booking created under the older rule (deposit paid but still "to pay") — heal it first.
-      const promo = await promoteBookingToUpcoming(payment.bookingID);
-      bookingStatus = promo.bookingStatus || bookingStatus;
-    }
-    if (bookingStatus !== BOOKING_STATUS.UPCOMING) {
-      const msg = bookingStatus === BOOKING_STATUS.ONGOING
-        ? "A refund can't be requested once the rental has started. Please contact support."
-        : bookingStatus === BOOKING_STATUS.CANCELLED
-          ? "This booking is already cancelled."
-          : "Refunds can only be requested for upcoming bookings.";
-      return res.status(400).json({ message: msg });
-    }
-
-    const existingSnap = await db.collection("refundRequests")
-      .where("paymentID", "==", paymentID)
-      .where("status", "in", ["Pending", "Approved"])
-      .limit(1)
-      .get();
-    if (!existingSnap.empty) {
+    if (await findOpenRefundRequest(paymentID)) {
       return res.status(409).json({ message: "A refund request for this payment is already in progress." });
     }
 
-    const plan = computeRefundPlan(payment);
+    // The moment the customer asked — set by the SERVER, so it can't be spoofed.
+    // This is what the 48-hour window is measured from; approving later never changes it.
+    const now = new Date();
+    const { policy, plan, pickupAt } = quoteCustomerRefund(payment, booking, now);
     if (plan.total <= 0) {
-      return res.status(400).json({ message: "There's nothing to refund on this payment." });
+      return res.status(400).json({ message: nothingToRefundMessage(policy, plan) });
     }
     const onlineAmount = plan.total - plan.manualAmount;
 
     const refundRef = db.collection("refundRequests").doc();
-    const now = new Date();
     const refundRequest = {
       refundRequestID: refundRef.id,
       bookingID: payment.bookingID || null,
@@ -716,9 +797,21 @@ const requestRefund = async (req, res) => {
       userID,
       reason,
       notes: notes || "",
-      amount: plan.total,          // everything paid (deposit + balance), net of any staff discount
+      amount: plan.total,          // what the customer gets back: everything paid, minus the deposit if it's under 48 hours
       onlineAmount,                // returned through PayMongo
       manualAmount: plan.manualAmount, // handed back by staff (balance collected in person, cash, etc.)
+
+      // ── 48-hour policy snapshot, locked at the moment of the request ──
+      // Its presence (policyTier) also marks the request as created under the
+      // policy; requests without it (older / auto-opened) are refunded in full.
+      policyTier: policy.tier,                   // "full" | "late" | "no_show"
+      hoursBeforePickup: policy.hoursBeforePickup,
+      grossPaid: plan.grossPaid,                 // everything the customer had paid
+      depositAmount: policy.depositAmount,
+      depositForfeited: policy.forfeit,          // kept from the refund (0 for "full")
+      pickupAt: pickupAt || null,
+      requestedAt: now,
+
       status: "Pending",
       paymongoRefundID: null,      // legacy: first PayMongo refund id (set on approval)
       paymongoRefundIDs: [],       // every PayMongo refund id (set on approval)
@@ -732,9 +825,13 @@ const requestRefund = async (req, res) => {
     };
     await refundRef.set(refundRequest);
 
+    const tierNote = policy.forfeit > 0
+      ? ` (${policy.tier === "no_show" ? "after pickup time" : `under ${policy.windowHours}h before pickup`}; ${peso(policy.forfeit)} deposit withheld)`
+      : "";
+
     recordAudit({
       action: "create",
-      description: `Refund requested by customer for payment ${paymentID}: ₱${plan.total.toLocaleString()} (reason: ${reason}).`,
+      description: `Refund requested by customer for payment ${paymentID}: ${peso(plan.total)} of ${peso(plan.grossPaid)} paid${tierNote} (reason: ${reason}).`,
       userID,
       bookingID: payment.bookingID || null,
       paymentID,
@@ -749,11 +846,13 @@ const requestRefund = async (req, res) => {
       refID: refundRef.id,
       refCollection: "refundRequests",
       title: "Refund Request",
-      message: `A refund request for ₱${plan.total.toLocaleString()} is awaiting review.`,
+      message: `A refund request for ${peso(plan.total)} is awaiting review${tierNote}.`,
     });
 
     return res.status(201).json({
-      message: "Refund request sent. We'll notify you once it's reviewed.",
+      message: policy.forfeit > 0
+        ? `Refund request sent. Because it was made ${policy.tier === "no_show" ? "after your pickup time" : `less than ${policy.windowHours} hours before pickup`}, your ${peso(policy.forfeit)} deposit is non-refundable. ${peso(plan.total)} will be returned once it's reviewed.`
+        : "Refund request sent. We'll notify you once it's reviewed.",
       refundRequest,
     });
   } catch (error) {
@@ -789,4 +888,4 @@ const getMyRefundRequests = async (req, res) => {
   }
 };
 
-module.exports = { createPaymentLink, handleWebhook, getPaymentStatus, requestRefund, getMyRefundRequests };
+module.exports = { createPaymentLink, handleWebhook, getPaymentStatus, requestRefund, previewRefund, getMyRefundRequests };

@@ -26,8 +26,9 @@ const { getPaymentBreakdown } = require("./payments/paymentBreakdown.util");
 // doc yet, or the read fails. Kept identical to the original constants so
 // behavior is unchanged for anyone who hasn't touched the admin panel yet.
 const SETTINGS_DEFAULTS = {
-  serviceFee: 50,
-  gatewayFee: 53,
+  // Percentages (0-100), NOT flat pesos — see computeFeeBreakdown() below.
+  serviceFeePercent: 5,
+  gatewayFeePercent: 5,
   extraFeeOutsideArea: 500,
   // Refundable security deposit — same field the admin System Settings page
   // edits (systemSettings.securityDepositAmount). Now collected as part of
@@ -119,6 +120,41 @@ const calcBillableDays = (startDateTime, endDateTime, durationType) => {
   return { days, diffHrs };
 };
 
+// ── Percentage fees (service + gateway) ─────────────────────────────────────
+// PURE function — no Firestore, so it is trivially testable.
+//
+//   serviceFee  = serviceFeePercent % of the RENTAL FEE ONLY
+//                 (not the extra fee, driver's fee or security deposit)
+//   gatewayBase = rental + extra + driver's fee + serviceFee + securityDeposit
+//                 (everything else on the booking, including the service fee)
+//   gatewayFee  = gatewayFeePercent % of gatewayBase
+//   grandTotal  = gatewayBase + gatewayFee
+//
+// Each fee is rounded to a whole peso so the Partial split and the PayMongo
+// amounts (which already assume whole pesos) keep working.
+const pct = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? Math.min(n, 100) : 0;
+};
+const computeFeeBreakdown = ({
+  rentalFee = 0, extraFee = 0, driversFee = 0, securityDeposit = 0,
+  serviceFeePercent = 0, gatewayFeePercent = 0,
+} = {}) => {
+  const rental  = Math.max(0, Number(rentalFee) || 0);
+  const extra   = Math.max(0, Number(extraFee) || 0);
+  const drivers = Math.max(0, Number(driversFee) || 0);
+  const deposit = Math.max(0, Number(securityDeposit) || 0);
+  const serviceRate = pct(serviceFeePercent);
+  const gatewayRate = pct(gatewayFeePercent);
+
+  const serviceFee  = Math.round(rental * serviceRate / 100);
+  const gatewayBase = rental + extra + drivers + serviceFee + deposit;
+  const gatewayFee  = Math.round(gatewayBase * gatewayRate / 100);
+  const grandTotal  = gatewayBase + gatewayFee;
+
+  return { serviceFee, gatewayFee, gatewayFeeBase: gatewayBase, grandTotal, serviceFeeRate: serviceRate, gatewayFeeRate: gatewayRate };
+};
+
 // ── Full fee breakdown for a booking ────────────────────────────────────────
 // pricePerDay must come from the car's own carPricing doc (looked up by the
 // caller using carID + durationType) — never from the client.
@@ -134,7 +170,7 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   // to slip through even with days === 0 and show a phantom price before
   // the customer had picked any dates.
   if (days === 0) {
-    return { days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, securityDeposit: 0, grandTotal: 0 };
+    return { days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, gatewayFeeBase: 0, serviceFeeRate: pct(settings.serviceFeePercent), gatewayFeeRate: pct(settings.gatewayFeePercent), securityDeposit: 0, grandTotal: 0 };
   }
 
   const rentalFee = days * (Number(pricePerDay) || 0);
@@ -143,15 +179,23 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   const extraFee   = baseArea ? 0 : settings.extraFeeOutsideArea;
   const driversFee = driveType === "chauffeur" ? (baseArea ? settings.driversFeeBaseArea : settings.driversFeeOutsideArea) : 0;
 
-  const serviceFee = settings.serviceFee;
-  const gatewayFee = settings.gatewayFee;
-
   // Refundable security deposit, charged up front with everything else.
   const securityDeposit = Math.max(0, Number(settings.securityDepositAmount) || 0);
 
-  const grandTotal = rentalFee + extraFee + driversFee + serviceFee + gatewayFee + securityDeposit;
+  // Service fee = % of rental only; gateway fee = % of everything else
+  // (including the service fee). See computeFeeBreakdown().
+  const { serviceFee, gatewayFee, gatewayFeeBase, grandTotal, serviceFeeRate, gatewayFeeRate } = computeFeeBreakdown({
+    rentalFee, extraFee, driversFee, securityDeposit,
+    serviceFeePercent: settings.serviceFeePercent,
+    gatewayFeePercent: settings.gatewayFeePercent,
+  });
 
-  return { days, diffHrs, rentalFee, extraFee, driversFee, serviceFee, gatewayFee, securityDeposit, grandTotal };
+  return {
+    days, diffHrs, rentalFee, extraFee, driversFee,
+    serviceFee, gatewayFee,
+    gatewayFeeBase, serviceFeeRate, gatewayFeeRate,
+    securityDeposit, grandTotal,
+  };
 };
 
 // ── Partial (50%) vs Full payment split ─────────────────────────────────────
@@ -201,6 +245,7 @@ module.exports = {
   isBaseArea,
   calcBillableDays,
   computeBookingFees,
+  computeFeeBreakdown,
   computePaymentSplit,
   derivePaymentStatus,
   getSystemSettings,

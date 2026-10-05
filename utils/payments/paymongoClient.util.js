@@ -2,6 +2,7 @@
 // settlement util. Kept separate so both can call PayMongo without importing
 // each other's (large) modules.
 const axios = require("axios");
+const { chargeFromPaymentResource, pickPaidPayment } = require("./paymongoFee.util");
 
 // Per PayMongo's API reference, checkout_sessions live under v1.
 const PAYMONGO_V1 = "https://api.paymongo.com/v1";
@@ -23,7 +24,7 @@ const channelLabel = (channel) => {
 /**
  * Asks PayMongo what happened to a checkout session.
  *
- * Returns { ok, notFound, paid, paymongoPaymentID, expired }:
+ * Returns { ok, notFound, paid, paymongoPaymentID, charge, expired }:
  *   ok        false when we could NOT determine the answer (network error, 5xx,
  *             auth problem). Callers must treat that as "unknown", never as "unpaid".
  *   notFound  PayMongo says the session doesn't exist (404).
@@ -47,12 +48,14 @@ const retrieveCheckoutSession = async (sessionID) => {
       notFound: false,
       paid,
       paymongoPaymentID: paidPay?.id || null,
+      // PayMongo's own fee for that payment (null when PayMongo didn't send one).
+      charge: paidPay ? chargeFromPaymentResource(pickPaidPayment(payments)) : null,
       expired: !paid && String(attrs.status || "").toLowerCase() === "expired",
     };
   } catch (e) {
-    if (e?.response?.status === 404) return { ok: true, notFound: true, paid: false, paymongoPaymentID: null, expired: true };
+    if (e?.response?.status === 404) return { ok: true, notFound: true, paid: false, paymongoPaymentID: null, charge: null, expired: true };
     console.error("retrieveCheckoutSession failed —", e?.response?.status, e?.response?.data || e.message);
-    return { ok: false, notFound: false, paid: false, paymongoPaymentID: null, expired: false };
+    return { ok: false, notFound: false, paid: false, paymongoPaymentID: null, charge: null, expired: false };
   }
 };
 

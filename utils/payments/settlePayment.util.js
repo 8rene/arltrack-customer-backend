@@ -29,6 +29,7 @@ const { createNotification, notifyStaff, resolveNotification } = require("../../
 const { buildAndSendReceipt } = require("../receipt/receipt.util");
 const { computeRefundPlan } = require("./paymentBreakdown.util");
 const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util");
+const { buildFeePatch } = require("./paymongoFee.util");
 
 const num   = (v) => Number(v) || 0;
 const lower = (v) => String(v || "").toLowerCase();
@@ -122,16 +123,26 @@ const openRefundForLatePayment = async ({ payment, phase, charged }) => {
 /**
  * Marks ONE phase of a payment as paid and runs everything that follows.
  *
+ * `charge` (optional) is PayMongo's own fee for the payment — see
+ * paymongoFee.util.js. It is saved on the payment, per phase, with running
+ * totals across both phases. It is also filled in when the phase was ALREADY
+ * settled by a path that didn't have it, and never overwrites a saved fee.
+ *
  * Returns { settled, alreadyPaid, bookingStatus, phase }.
  *   settled      this call did the transition
  *   alreadyPaid  someone else (webhook/poll) already had — nothing was done
  */
-const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null, source = "webhook" }) => {
+const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null, source = "webhook", charge = null }) => {
   const tx = await db.runTransaction(async (t) => {
     const snap = await t.get(paymentRef);
     if (!snap.exists) return { state: "missing" };
     const p = snap.data();
-    if (isPhasePaid(p, phase)) return { state: "already" };
+    const feePatch = buildFeePatch(p, phase, charge);
+    if (isPhasePaid(p, phase)) {
+      // Already settled by another path — just fill in PayMongo's fee if it was missing.
+      if (Object.keys(feePatch).length) t.update(paymentRef, feePatch);
+      return { state: "already" };
+    }
 
     const now = new Date();
     const payload = phase === "balance"
@@ -142,6 +153,7 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
       payload[phase === "balance" ? "balancePaymongoPaymentID" : "depositPaymongoPaymentID"] = paymongoPaymentID;
     }
     payload.lastSettledVia = source;
+    Object.assign(payload, feePatch); // PayMongo's real transaction fee for this charge (+ running totals)
     // The refundable security deposit was part of this first payment, so it is
     // now HELD — same shape admin's penalty.service recordDepositReceived()
     // writes, so settleBooking()/the Penalties page work unchanged.
@@ -284,7 +296,7 @@ const verifyAndSettlePayment = async (paymentDoc, { source = "verify" } = {}) =>
   if (!r.ok) return { ...base, checked: false };
 
   if (r.paid) {
-    const s = await settlePhasePayment({ paymentRef: paymentDoc.ref, phase, paymongoPaymentID: r.paymongoPaymentID, source });
+    const s = await settlePhasePayment({ paymentRef: paymentDoc.ref, phase, paymongoPaymentID: r.paymongoPaymentID, source, charge: r.charge });
     return { ...base, settled: s.settled, alreadyPaid: s.alreadyPaid, bookingStatus: s.bookingStatus };
   }
   return { ...base, expired: r.expired };

@@ -1,9 +1,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Payment breakdown + refund plan — SINGLE SOURCE OF TRUTH (admin backend).
+// Payment breakdown + refund plan — customer backend copy.
 //
-// KEEP IN SYNC with arltrack-customer-backend/utils/payments/paymentBreakdown.util.js
-// (an identical copy — the two apps deploy separately, so it can't be a shared
-// import). If you change one, change the other.
+// GENERATED from arltrack-admin-backend/services/payments/paymentBreakdown.js
+// (the two apps deploy separately, so it can't be a shared import). The only
+// difference is the export line (CommonJS here, ESM there). If you change one,
+// change the other — the logic must stay identical.
 //
 // Pure functions only (no Firestore) so they're trivially testable.
 //
@@ -88,9 +89,23 @@ const getPaymentBreakdown = (payment) => {
   // behaviour kept: it settles the whole amount.
   let balanceInPerson = 0;
   if (p.balanceCollected) {
-    balanceInPerson = Math.max(0, amount - amountPaid);
-    amountPaid = amount;
-    balance    = 0;
+    const rec = p.balanceCollectedAmount;
+    if (rec !== undefined && rec !== null && Number.isFinite(Number(rec)) && Number(rec) >= 0) {
+      // What staff ACTUALLY took in person (collectRemainingBalance stores it
+      // net of any discount already given at that moment). Counting the whole
+      // `amount` as paid here made a discount given BEFORE the balance was
+      // collected look like it had to be handed back — the customer had
+      // already paid the reduced balance. Any discount is applied below,
+      // exactly once.
+      balanceInPerson = Math.min(Number(rec), Math.max(0, amount - amountPaid));
+      amountPaid += balanceInPerson;
+      balance     = amount - amountPaid;
+    } else {
+      // Older records without the collected amount: legacy behaviour kept.
+      balanceInPerson = Math.max(0, amount - amountPaid);
+      amountPaid = amount;
+      balance    = 0;
+    }
   }
 
   // Flat-peso staff discount: comes off the balance first, any excess spills
@@ -139,11 +154,22 @@ const resolvePaymongoIDs = (payment) => {
  *                 unknown — staff hands this back and marks it issued
  *   total         parts + manual = amountPaid (net of discount spillover)
  */
-const computeRefundPlan = (payment) => {
+//
+// opts.forfeit — pesos the customer FORFEITS (the deposit, under the 48-hour
+// policy — see getRefundPolicy below). It comes out of the first (deposit-phase)
+// payment, so the PayMongo refund on that charge is reduced by it; every other
+// charge is refunded in full. Default 0 = refund everything paid.
+//
+//   total        = amountPaid − forfeit      (what the customer actually gets back)
+//   grossPaid    = amountPaid                (everything they paid, before the forfeit)
+//   forfeit      = what is being kept
+const computeRefundPlan = (payment, opts = {}) => {
   const b   = getPaymentBreakdown(payment);
   const ids = resolvePaymongoIDs(payment);
 
-  let remaining = b.amountPaid;
+  const forfeit = Math.min(Math.max(0, num(opts.forfeit)), b.amountPaid);
+
+  let remaining = b.amountPaid - forfeit;
   const parts = [];
   const take = (kind, id, cap) => {
     if (!id || cap <= 0 || remaining <= 0) return;
@@ -151,10 +177,112 @@ const computeRefundPlan = (payment) => {
     parts.push({ kind, paymongoPaymentID: id, amount: amt });
     remaining -= amt;
   };
-  take("deposit", ids.deposit, b.depositCollected);
+  take("deposit", ids.deposit, Math.max(0, b.depositCollected - forfeit));
   take("balance", ids.balance, b.balanceOnline);
 
-  return { total: b.amountPaid, parts, manualAmount: remaining, breakdown: b };
+  return { total: b.amountPaid - forfeit, grossPaid: b.amountPaid, forfeit, parts, manualAmount: remaining, breakdown: b };
 };
 
-export { getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, payTypeOf };
+// ─────────────────────────────────────────────────────────────────────────────
+// 48-hour refund policy (Terms & Conditions → Cancellation & Refund Policy).
+//
+// The tier is judged by WHEN THE CUSTOMER ASKED FOR THE REFUND (requestedAt =
+// the request's server-side createdAt), NOT when staff approve it — a request
+// made 50 hours before pickup and approved 40 hours before is still a "full"
+// refund.
+//
+//   hours before pickup >= 48   → "full"     nothing forfeited
+//   0 <= hours < 48             → "late"     the deposit is forfeited
+//   hours < 0 (after pickup)    → "no_show"  the deposit is forfeited
+//
+// The ONE variable the policy depends on is the deposit amount:
+//   payment.deposit.amount  (the held security deposit, once the first payment cleared)
+//   → payment.securityDeposit (snapshotted on the payment at booking time)
+//   → payment.depositFee      (legacy flat deposit on older payments)
+// It is capped at what the customer actually paid, so a refund is never negative.
+//
+// Everything else the customer paid (rental, extra/driver's fee, service fee,
+// gateway fee…) is refunded.
+//
+// waiveForfeit: staff override (goodwill, duplicate charge, business-caused
+// cancellation). The tier is still reported; the forfeit is just 0.
+// ─────────────────────────────────────────────────────────────────────────────
+const REFUND_FULL_WINDOW_HOURS = 48;
+const HOUR_MS = 60 * 60 * 1000;
+
+const toDate = (v) => {
+  if (!v) return null;
+  const d = typeof v.toDate === "function" ? v.toDate()
+          : v._seconds !== undefined ? new Date(v._seconds * 1000)
+          : new Date(v);
+  return d && !isNaN(d.getTime()) ? d : null;
+};
+
+// The real pickup INSTANT of a booking.
+//   1. booking.pickupAt — saved at booking time with an explicit Manila (+08:00)
+//      offset, so it is exact on any server.
+//   2. Older bookings only have startDateTime, which was parsed from the typed
+//      date+time with NO timezone. The typed time is Manila wall-clock, so read
+//      it back with the same local getters the rest of the code uses and
+//      re-interpret it as Manila. This gives the right instant whether the
+//      server runs in UTC or in Manila time. (Assumes the server reading the
+//      booking runs in the same timezone as the one that created it — normally
+//      the same host. A refund request snapshots the pickup instant at the
+//      moment it is made, so this fallback only matters for the first quote and
+//      for the admin no-show check on bookings made before pickupAt existed.)
+const MANILA_OFFSET_MS = 8 * HOUR_MS;
+const resolvePickupAt = (booking) => {
+  const b = booking || {};
+  const explicit = toDate(b.pickupAt);
+  if (explicit) return explicit;
+  const s = toDate(b.startDateTime);
+  if (!s) return null;
+  return new Date(Date.UTC(s.getFullYear(), s.getMonth(), s.getDate(), s.getHours(), s.getMinutes(), s.getSeconds()) - MANILA_OFFSET_MS);
+};
+
+const getDepositAmount = (payment) => {
+  const p = payment || {};
+  return num(p.deposit && p.deposit.amount) || num(p.securityDeposit) || num(p.depositFee);
+};
+
+const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false } = {}) => {
+  const pickup    = toDate(pickupAt);
+  const requested = toDate(requestedAt);
+  const depositAmount = getDepositAmount(payment);
+  const amountPaid    = getPaymentBreakdown(payment).amountPaid;
+
+  // Can't judge the timing without both timestamps → fail OPEN (full refund)
+  // and say so, so staff can see why and decide.
+  if (!pickup || !requested) {
+    return { tier: "full", hoursBeforePickup: null, depositAmount, forfeit: 0, waived: false, unknownTiming: true, windowHours: REFUND_FULL_WINDOW_HOURS };
+  }
+
+  const hoursBeforePickup = (pickup.getTime() - requested.getTime()) / HOUR_MS;
+  const tier = hoursBeforePickup >= REFUND_FULL_WINDOW_HOURS ? "full"
+             : hoursBeforePickup >= 0                        ? "late"
+             :                                                 "no_show";
+
+  const wouldForfeit = tier === "full" ? 0 : Math.min(depositAmount, amountPaid);
+  const forfeit = waiveForfeit ? 0 : wouldForfeit;
+
+  return {
+    tier,
+    hoursBeforePickup: Math.round(hoursBeforePickup * 100) / 100,
+    depositAmount,
+    forfeit,
+    waived: !!waiveForfeit && wouldForfeit > 0,
+    waivedAmount: waiveForfeit ? wouldForfeit : 0,
+    unknownTiming: false,
+    windowHours: REFUND_FULL_WINDOW_HOURS,
+    fullRefundUntil: new Date(pickup.getTime() - REFUND_FULL_WINDOW_HOURS * HOUR_MS),
+  };
+};
+
+// Policy + plan in one call: what a refund requested at `requestedAt` is worth.
+const computeRefundQuote = (payment, { pickupAt, requestedAt, waiveForfeit = false } = {}) => {
+  const policy = getRefundPolicy(payment, { pickupAt, requestedAt, waiveForfeit });
+  const plan   = computeRefundPlan(payment, { forfeit: policy.forfeit });
+  return { policy, plan };
+};
+
+module.exports = { getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getRefundPolicy, computeRefundQuote, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS };

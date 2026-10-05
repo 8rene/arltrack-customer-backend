@@ -137,6 +137,9 @@ const getBookingDetails = async (req, res) => {
         extraFee:          p.extraFee         || 0,
         driversFee:        p.driversFee       || 0,
         gatewayFee:        p.gatewayFee       || 0,
+        serviceFeeRate:    p.serviceFeeRate   || 0,
+        gatewayFeeRate:    p.gatewayFeeRate   || 0,
+        gatewayFeeBase:    p.gatewayFeeBase   || 0,
         securityDeposit:   p.securityDeposit  || 0,
         methodOfPayment:   p.methodOfPayment  || p.paymentMethod || "",
         paymentMethod:     p.paymentMethod    || p.methodOfPayment || "",
@@ -179,8 +182,6 @@ const getBookingDetails = async (req, res) => {
         carImage,
         serviceType:    booking.serviceType    || "",
         status:         booking.status         || "pending",
-        // Why staff/customer cancelled it (set when status becomes "cancelled").
-        cancellationReason: booking.cancellationReason || "",
         modeOfDriving:  booking.modeOfDriving  || "",
         startDateTime:  booking.startDateTime  || null,
         endDateTime:    booking.endDateTime    || null,
