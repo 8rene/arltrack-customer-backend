@@ -124,8 +124,8 @@ const openRefundForLatePayment = async ({ payment, phase, charged }) => {
  * Marks ONE phase of a payment as paid and runs everything that follows.
  *
  * `charge` (optional) is PayMongo's own fee for the payment — see
- * paymongoFee.util.js. It is saved on the payment, per phase, with running
- * totals across both phases. It is also filled in when the phase was ALREADY
+ * paymongoFee.util.js. It is saved on the payment per phase, plus a running
+ * paymongoFeeTotal. It is also filled in when the phase was ALREADY
  * settled by a path that didn't have it, and never overwrites a saved fee.
  *
  * Returns { settled, alreadyPaid, bookingStatus, phase }.
@@ -153,7 +153,7 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
       payload[phase === "balance" ? "balancePaymongoPaymentID" : "depositPaymongoPaymentID"] = paymongoPaymentID;
     }
     payload.lastSettledVia = source;
-    Object.assign(payload, feePatch); // PayMongo's real transaction fee for this charge (+ running totals)
+    Object.assign(payload, feePatch); // PayMongo's real transaction fee for this charge (+ running total)
     // The refundable security deposit was part of this first payment, so it is
     // now HELD — same shape admin's penalty.service recordDepositReceived()
     // writes, so settleBooking()/the Penalties page work unchanged.

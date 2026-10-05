@@ -2,8 +2,8 @@
 // settled BEFORE fee tracking existed (see utils/payments/paymongoFee.util.js).
 //
 // For every payment that has a stored PayMongo payment id but no saved fee, this
-// asks PayMongo for that payment (GET /v1/payments/:id) and saves its fee / net
-// per phase, plus the running totals — exactly what settlePhasePayment now does
+// asks PayMongo for that payment (GET /v1/payments/:id) and saves its fee
+// per phase, plus the running total — exactly what settlePhasePayment now does
 // at payment time. A fee that is already saved is never overwritten.
 //
 // Payments whose PayMongo id was never stored (older two-phase payments only kept
