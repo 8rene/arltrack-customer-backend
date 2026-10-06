@@ -577,7 +577,7 @@ const createBooking = async (req, res) => {
 
     // ── 3. Save to bookingSessions collection (own doc ID; bookingID is FK only) ──
     // This is the piece that was missing entirely: pickupLocation,
-    // geofenceZones, pickupTime, returnTime, and the codingCheck audit
+    // geofenceZones and the codingCheck audit
     // were always saving as null because nothing ever wrote this doc.
     const pickupZone      = makeZone("Pickup", { lat: pickupLat, lng: pickupLng });
     const destinationZone = makeZone(destination || "Destination", { lat: destinationLat, lng: destinationLng });
@@ -602,8 +602,6 @@ const createBooking = async (req, res) => {
           ? { address: dropoffLocation || "", lat: dropoffLat, lng: dropoffLng }
           : null,
         geofenceZones,
-        pickupTime:  startDateTime,
-        returnTime:  endDateTime,
         codingCheck: {
           blocked:   false, // we only ever reach here when NOT blocked — the 400 above returns early otherwise
           reason:    null,
