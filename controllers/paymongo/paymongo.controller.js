@@ -8,6 +8,7 @@ const { axios, PAYMONGO_V1, paymongoHeaders, channelLabel } = require("../../uti
 const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = require("../../utils/payments/settlePayment.util");
 const { computeRefundQuote, resolvePickupAt } = require("../../utils/payments/paymentBreakdown.util");
 const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
+const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
 
 const lower = (v) => String(v || "").toLowerCase();
 
@@ -221,6 +222,14 @@ const createPaymentLink = async (req, res) => {
       checkoutUrl,
       currentPhase:      phase,
       ...(phase === "balance" ? { balanceStatus: "pending" } : {}),
+      // Transaction entry for this attempt (pending until PayMongo confirms it).
+      paymongoTransactions: upsertTransaction(payment, phase, {
+        amount:    amountToCharge,
+        channel:   paymentMethodTypes[0],
+        source:    "online",
+        status:    "pending",
+        sessionID,
+      }),
       updatedAt: new Date(),
     });
 
@@ -488,7 +497,11 @@ const handleWebhook = async (req, res) => {
         if (phase === "balance") {
           // The deposit is real money already collected — a failed BALANCE attempt
           // never affects the booking, it just needs another try.
-          await failedDoc.ref.update({ balanceStatus: "failed", updatedAt: now });
+          await failedDoc.ref.update({
+            balanceStatus: "failed",
+            paymongoTransactions: upsertTransaction(failedPayment, "balance", { status: "failed" }),
+            updatedAt: now,
+          });
           if (failedPayment.userID) {
             await createNotification({
               type: "payment_failed",

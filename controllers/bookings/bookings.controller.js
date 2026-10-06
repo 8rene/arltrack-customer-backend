@@ -5,6 +5,7 @@ const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
+const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
 
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
@@ -576,6 +577,8 @@ const createBooking = async (req, res) => {
       balanceAmount: Math.max(0, totalAmount - payNow),
       balanceStatus: computedMethod === "Full" ? "not_applicable" : "not_due",
       currentPhase:  "deposit",
+      // One entry per PayMongo / in-person charge, added as each one happens.
+      paymongoTransactions: [],
       createdAt:       now,
       updatedAt:       now,
     });
@@ -891,8 +894,16 @@ const cancelBooking = async (req, res) => {
         if (!paymentSnap.empty) {
           const p = paymentSnap.docs[0].data();
           const updates = { updatedAt: now };
-          if (p.status === "pending") updates.status = "cancelled";
-          if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
+          let txns = p.paymongoTransactions;
+          if (p.status === "pending") {
+            updates.status = "cancelled";
+            txns = upsertTransaction({ paymongoTransactions: txns }, "deposit", { status: "cancelled" });
+          }
+          if (p.balanceStatus === "pending") {
+            updates.balanceStatus = "cancelled";
+            txns = upsertTransaction({ paymongoTransactions: txns }, "balance", { status: "cancelled" });
+          }
+          if (txns !== p.paymongoTransactions) updates.paymongoTransactions = txns;
           if (Object.keys(updates).length > 1) await paymentSnap.docs[0].ref.update(updates);
         }
       } catch (paymentErr) {

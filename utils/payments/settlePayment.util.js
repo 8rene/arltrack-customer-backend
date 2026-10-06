@@ -30,6 +30,7 @@ const { buildAndSendReceipt } = require("../receipt/receipt.util");
 const { computeRefundPlan } = require("./paymentBreakdown.util");
 const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util");
 const { buildFeePatch } = require("./paymongoFee.util");
+const { upsertTransaction } = require("./paymentTransactions.util");
 
 const num   = (v) => Number(v) || 0;
 const lower = (v) => String(v || "").toLowerCase();
@@ -140,7 +141,16 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
     const feePatch = buildFeePatch(p, phase, charge);
     if (isPhasePaid(p, phase)) {
       // Already settled by another path — just fill in PayMongo's fee if it was missing.
-      if (Object.keys(feePatch).length) t.update(paymentRef, feePatch);
+      if (Object.keys(feePatch).length) {
+        t.update(paymentRef, {
+          ...feePatch,
+          paymongoTransactions: upsertTransaction(p, phase, {
+            status: "paid",
+            ref: paymongoPaymentID || undefined,
+            fee: feePatch[phase === "balance" ? "balancePaymongoFee" : "depositPaymongoFee"],
+          }),
+        });
+      }
       return { state: "already" };
     }
 
@@ -154,6 +164,16 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
     }
     payload.lastSettledVia = source;
     Object.assign(payload, feePatch); // PayMongo's real transaction fee for this charge (+ running total)
+    // Same facts, recorded as one transaction entry (written alongside the fields above).
+    payload.paymongoTransactions = upsertTransaction(p, phase, {
+      ref:     paymongoPaymentID || undefined,
+      amount:  chargedAmountFor(p, phase),
+      fee:     feePatch[phase === "balance" ? "balancePaymongoFee" : "depositPaymongoFee"],
+      channel: p.paymongoChannel || undefined,
+      source:  "online",
+      status:  "paid",
+      paidAt:  now,
+    });
     // The refundable security deposit was part of this first payment, so it is
     // now HELD — same shape admin's penalty.service recordDepositReceived()
     // writes, so settleBooking()/the Penalties page work unchanged.

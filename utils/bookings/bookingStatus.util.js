@@ -40,6 +40,7 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { recordAudit } = require("../auditLogs/auditLogs.util");
 const { createNotification } = require("../../services/notification/notification.service");
+const { upsertTransaction } = require("../payments/paymentTransactions.util");
 
 const BOOKING_STATUS = {
   TO_PAY:    "to pay",
@@ -132,8 +133,16 @@ const cancelStaleBooking = async (bookingID, reason) => {
     const paymentDoc = paymentSnap.docs[0];
     const p = paymentDoc.data();
     const updates = { updatedAt: now };
-    if (p.status === "pending") updates.status = "cancelled";
-    if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
+    let txns = p.paymongoTransactions;
+    if (p.status === "pending") {
+      updates.status = "cancelled";
+      txns = upsertTransaction({ paymongoTransactions: txns }, "deposit", { status: "cancelled" });
+    }
+    if (p.balanceStatus === "pending") {
+      updates.balanceStatus = "cancelled";
+      txns = upsertTransaction({ paymongoTransactions: txns }, "balance", { status: "cancelled" });
+    }
+    if (txns !== p.paymongoTransactions) updates.paymongoTransactions = txns;
     if (Object.keys(updates).length > 1) await paymentDoc.ref.update(updates);
   }
 
