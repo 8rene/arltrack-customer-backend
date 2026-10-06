@@ -120,16 +120,26 @@ const getFullProfile = async (req, res) => {
 
     // Who referred this user (if anyone), and who this user has invited.
     // Usernames + status only — no email/phone of other customers.
+    // Both come from the "referrals" connection table.
+    const [myReferralSnap, invitedRefSnap] = await Promise.all([
+      db.collection("referrals").where("referredUserID", "==", userID).limit(1).get(),
+      db.collection("referrals").where("referrerUserID", "==", userID).get(),
+    ]);
+
     let referredBy = null;
-    if (user.referredBy) {
-      const referrerDoc = await db.collection("user").doc(user.referredBy).get();
+    if (!myReferralSnap.empty) {
+      const referrerDoc = await db.collection("user").doc(myReferralSnap.docs[0].data().referrerUserID).get();
       referredBy = {
         username: referrerDoc.exists ? (referrerDoc.data().username || "") : "",
         removed:  !referrerDoc.exists,
       };
     }
-    const invitedSnap = await db.collection("user").where("referredBy", "==", userID).get();
-    const invited = invitedSnap.docs
+
+    const invitedDocs = await Promise.all(
+      invitedRefSnap.docs.map((d) => db.collection("user").doc(d.data().referredUserID).get())
+    );
+    const invited = invitedDocs
+      .filter((d) => d.exists) // an invited account that has since been removed drops off the list
       .map((d) => {
         const u = d.data();
         return {
@@ -192,7 +202,7 @@ const getFullProfile = async (req, res) => {
       // signup started writing it, just never surfaced through this
       // endpoint before.
       referralCode:      referralCode           || "",
-      referralCount:     user.referralCount     || 0,
+      referralCount:     invited.length,
       referredBy,                       // { username, removed } | null
       invited,                          // [{ username, isVerified, status, joinedAt }]
       // userDetails

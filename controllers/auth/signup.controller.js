@@ -121,9 +121,7 @@ const signup = async (req, res) => {
       const userRef = db.collection("user").doc(userID);
       batch.set(userRef, createUser(userID, {
         username, email, phone,
-        referralCode:   ownReferralCode,
-        referredBy:     referrerDoc ? referrerDoc.id : null,
-        referredByCode: referralCode ? String(referralCode).trim().toUpperCase() : null,
+        referralCode: ownReferralCode,
       }));
 
       // ── "userDetails" collection (keyed by userID for easy lookup) ──
@@ -157,21 +155,16 @@ const signup = async (req, res) => {
 
       // ── Referral tracking — only if the entered code matched a real user ──
       // Same batch as everything else: either the whole signup (including
-      // the referral credit) lands together, or none of it does. A code
-      // that didn't match anyone is not an error — referredByCode above
-      // still records what they typed for support/admin visibility, it
-      // just doesn't get credited to anyone.
+      // the referral row) lands together, or none of it does. A code that
+      // didn't match anyone is not an error — it just isn't credited to
+      // anyone (staff still see what was typed in the signup notification
+      // and the audit log below).
       if (referrerDoc) {
         const referralRef = db.collection("referrals").doc();
         batch.set(referralRef, createReferral(referralRef.id, {
-          referrerUserID:   referrerDoc.id,
-          referrerCode:     referrerDoc.data().referralCode,
-          referredUserID:   userID,
-          referredUsername: username || email || "",
+          referrerUserID: referrerDoc.id,
+          referredUserID: userID,
         }));
-        batch.update(referrerDoc.ref, {
-          referralCount: admin.firestore.FieldValue.increment(1),
-        });
       }
 
       await batch.commit();
