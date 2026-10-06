@@ -18,58 +18,6 @@ const loadOwnedBooking = async (req, res, bookingID) => {
   return booking;
 };
 
-// GET /api/bookings/:bookingID/traceback
-//
-// Reads bookingSessions/{bookingID}/archive/{date} — one small doc per
-// calendar day of the trip (each holding just that day's points), written
-// by the admin backend at return/stolen (or nightly for a trip still active
-// past midnight). Concatenating them in date order reconstructs the full
-// trail without ever reading one document large enough to risk Firestore's
-// 1MiB-per-document limit — that's the whole reason it's chunked by day
-// instead of one big array.
-const getBookingTraceback = async (req, res) => {
-  const { bookingID } = req.params;
-  try {
-    const booking = await loadOwnedBooking(req, res, bookingID);
-    if (!booking) return; // response already sent
-
-    const sessionSnap = await db.collection("bookingSessions")
-      .where("bookingID", "==", bookingID)
-      .limit(1)
-      .get();
-    if (sessionSnap.empty) {
-      return res.status(404).json({ message: "No tracking session for this booking yet." });
-    }
-    const sessionRef = sessionSnap.docs[0].ref; // own bookingSessionID — bookingID is FK only now
-
-    // Doc IDs are "YYYY-MM-DD" strings, so sorting by document ID in JS is
-    // the same as sorting by date — no separate date field to order by, and
-    // no need for a Firestore orderBy() import for what's always a small
-    // number of day-docs per trip.
-    const archiveSnap = await sessionRef
-      .collection("archive")
-      .get();
-
-    if (archiveSnap.empty) {
-      // Not an error — a trip that's still ongoing (or just hasn't been
-      // archived yet) legitimately has nothing here.
-      return res.status(200).json({ points: [], message: "No archived trail yet for this booking." });
-    }
-
-    const points = archiveSnap.docs
-      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-      .flatMap((doc) => {
-        const data = doc.data();
-        return Array.isArray(data.points) ? data.points : [];
-      });
-
-    return res.status(200).json({ points });
-  } catch (error) {
-    console.error("getBookingTraceback error:", error);
-    return res.status(500).json({ message: "Failed to fetch traceback." });
-  }
-};
-
 // GET /api/bookings/:bookingID/details
 //
 // Everything BookingDetails.jsx needs in one call: the commercial booking
@@ -205,4 +153,4 @@ const getBookingDetails = async (req, res) => {
 
 };
 
-module.exports = { getBookingTraceback, getBookingDetails };
+module.exports = { getBookingDetails };

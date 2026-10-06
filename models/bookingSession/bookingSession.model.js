@@ -3,6 +3,14 @@
 // but lookups now go through a where("bookingID","==",...) query instead
 // of a direct .doc(bookingID).get()).
 //
+// Fields set HERE at booking creation: status, pickupLocation, dropoffLocation,
+// geofenceZones, codingCheck, pickupTime, returnTime, currentPosition, timestamps.
+// Fields added LATER by the admin backend (not present on a new doc):
+// carID and activatedAt (set at pickup by markSessionActive), droppedOffTime,
+// archiveUrl and lastArchivedAt (set by the history flush).
+// GPS pings are NOT stored on this doc — they go to Google Sheets (one tab per
+// PHT date), matched back to this session by sessionId + carID + activatedAt.
+//
 // NOTE: geofence radius below is a placeholder (500m) — the real fixed
 // radius value hasn't been decided yet. Change GEOFENCE_RADIUS_METERS
 // once that's picked.
@@ -26,8 +34,8 @@ const createBookingSession = (bookingSessionID, bookingID, data = {}) => ({
   // Audit trail from the coding-rule check at booking time — see
   // bookings.controller.js for how this gets populated.
   codingCheck:     data.codingCheck || null,
-  pickupTime:      data.pickupTime || null,
-  returnTime:      data.returnTime || null,
+  pickupTime:      data.pickupTime || null, // SCHEDULED pickup (booking startDateTime), copied once at creation
+  returnTime:      data.returnTime || null, // SCHEDULED return (booking endDateTime), NOT the actual return moment
   currentPosition: null, // { lat, lng, date } — set on first ping, edge-checked after
   createdAt:       new Date(),
   updatedAt:       new Date(),
