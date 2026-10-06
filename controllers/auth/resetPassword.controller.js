@@ -34,6 +34,12 @@ const resetPassword = async (req, res) => {
 
     const otpData = otpDoc.data();
 
+    // Only a code requested with purpose "reset" can reset a password — a
+    // signup/login code for the same email must not.
+    if (otpData.purpose !== "reset") {
+      return res.status(404).json({ message: "OTP not found. Please request a new one." });
+    }
+
     if (new Date() > otpData.expiresAt.toDate()) {
       await otpRef.delete();
       return res.status(400).json({ message: "OTP has expired. Please request a new one." });

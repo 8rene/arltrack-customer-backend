@@ -121,6 +121,13 @@ const verifyOTP = async (req, res) => {
 
     const data = doc.data();
 
+    // Only codes issued for signup / login verification (purpose "signup",
+    // the default) can be verified here. A "reset" code is spent through
+    // /auth/reset-password instead, never this endpoint.
+    if (data.purpose !== "signup") {
+      return res.status(404).json({ message: "OTP not found. Please request a new one." });
+    }
+
     // Check expiry
     if (new Date() > data.expiresAt.toDate()) {
       await db.collection("otpCodes").doc(email).delete();
