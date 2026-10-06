@@ -34,7 +34,7 @@ const getServiceTypes = async (req, res) => {
 // scheduled-maintenance days for availability checking. The car's own
 // `status` field is never used for this — a car flagged "Maintenance" in
 // Fleet.jsx still needs to be bookable on every day that isn't actually
-// covered by one of its own carMaintenance records. Only "Scheduled"
+// covered by one of its own maintenance records. Only "Scheduled"
 // maintenance blocks a day; "Completed"/"Cancelled" records don't (see
 // admin-backend's maintenance.model.js for why "In Progress"/"Overdue"
 // were dropped from the status list).
@@ -47,15 +47,14 @@ const getCarBookings = async (req, res) => {
         .where("carID", "==", carID)
         .where("status", "in", [BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING])
         .get(),
-      db.collection("carMaintenance")
+      db.collection("maintenance")
         .where("carID", "==", carID)
         .where("status", "==", "Scheduled")
         .get(),
       // Recently-completed bookings still carry a 1-day post-rental
       // turnaround buffer (see the availability guard in
-      // bookings.controller.js, which now enforces this the same day the
-      // booking is marked returned — no more waiting on
-      // jobs/postRentalMaintenance.job.js's once-a-day cron). Only the last
+      // bookings.controller.js, which enforces this straight from the
+      // booking's own dates — no maintenance record needed). Only the last
       // 2 days are worth fetching: anything older can't possibly still be
       // inside a 1-day buffer window. Needs a composite index on
       // (carID ASC, status ASC, updatedAt ASC) — Firestore will prompt for

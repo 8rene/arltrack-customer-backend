@@ -20,10 +20,6 @@
     {
       "path": "/api/cron/booking-reminders",
       "schedule": "0 18 * * *"
-    },
-    {
-      "path": "/api/cron/post-rental-maintenance",
-      "schedule": "0 19 * * *"
     }
   ]
 }

@@ -9,13 +9,13 @@ const { BOOKING_STATUS } = require("../utils/bookings/bookingStatus.util");
 // without any change needed in the admin backend itself.
 //
 // What this does: the first time a "completed" booking is seen, schedules a
-// 1-day "Post-Rental" carMaintenance record (status: "Scheduled") for the day
+// 1-day "Post-Rental" maintenance record (status: "Scheduled") for the day
 // after. "Post-Rental" is already one of the admin app's maintenance BASIS
 // options — this just automates creating one instead of it being manual-only.
 //
 // This isn't just cosmetic: createBooking's availability guard (see
 // controllers/bookings/bookings.controller.js) already blocks new bookings
-// against any "Scheduled" carMaintenance record for the car, so this record
+// against any "Scheduled" maintenance record for the car, so this record
 // actually closes the car for that day server-side — the calendar's 1-day
 // "preparation" buffer (Booking.jsx's getDateStatuses) was frontend-only
 // before this. It also means the day shows up in the admin app's Maintenance
@@ -64,7 +64,7 @@ const runPostRentalMaintenance = async () => {
       postRentalDay.setDate(postRentalDay.getDate() + 1);
       postRentalDay.setHours(0, 0, 0, 0);
 
-      const ref = await db.collection("carMaintenance").add({
+      const ref = await db.collection("maintenance").add({
         carID:        booking.carID,
         bookingID:    booking.bookingID || doc.id, // links back to this booking — see maintenance.model.js
         basis:        "Post-Rental",

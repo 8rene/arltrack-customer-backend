@@ -348,10 +348,9 @@ const createBooking = async (req, res) => {
     // enforced a customer-wide 24h "can't book ANY car" cooldown here —
     // removed: it was blocking a customer from booking a different car
     // entirely, which was never the intent. The actual per-car "give the
-    // car a day before it's bookable again" behavior lives in
-    // jobs/postRentalMaintenance.job.js, which only blocks the specific
-    // car that was just returned — see the maintenance-overlap check
-    // further down in this function.)
+    // car a day before it's bookable again" behavior is the turnaround
+    // buffer in the availability guard further down in this function, which
+    // only blocks the specific car that was just returned.)
     const asDate = (v) => (v && v.toDate ? v.toDate() : new Date(v));
     const mineSnap = await db.collection("bookings").where("userID", "==", userID).get();
     const allMine = mineSnap.docs.map((d) => d.data());
@@ -400,25 +399,18 @@ const createBooking = async (req, res) => {
     //
     // The 1-day turnaround buffer (before a confirmed booking starts, and
     // after it ends — cleaning/inspection) is computed HERE directly from
-    // the other booking's own start/end, not from a carMaintenance record.
-    // It used to rely entirely on jobs/postRentalMaintenance.job.js, a
-    // once-a-day cron that only creates that record AFTER a booking is
-    // marked "completed" — leaving a window (up to ~24h, or the entire time
-    // a booking is still "ongoing" and hasn't been marked returned yet)
-    // where the calendar already showed the buffer day as unavailable but
-    // this endpoint would still accept a booking for it. Computing the
-    // buffer synchronously here closes that gap — it's enforced the
-    // instant the other booking exists, no cron delay. The cron job still
-    // runs and still creates the maintenance record (kept for the admin
-    // app's own Maintenance list / staff cleaning checklist), it's just no
-    // longer what's actually blocking the day.
+    // the other booking's own start/end, not from a maintenance record, so
+    // it's enforced the instant the other booking exists. Post-rental
+    // maintenance records are created manually by staff in the admin app's
+    // Maintenance page (cleaning/inspection checklist) and are not what
+    // blocks the buffer day.
     {
       const asDate = (v) => (v && v.toDate ? v.toDate() : new Date(v));
       const BUFFER_MS = 24 * 60 * 60 * 1000;
 
       const [otherSnap, maintSnap] = await Promise.all([
         db.collection("bookings").where("carID", "==", carID).get(),
-        db.collection("carMaintenance")
+        db.collection("maintenance")
           .where("carID", "==", carID)
           .where("status", "==", "Scheduled")
           .get(),
@@ -460,7 +452,7 @@ const createBooking = async (req, res) => {
       // Maintenance records only store a single day (maintenanceDate), with
       // no separate end date — same as GET /api/services/car-bookings/:carID.
       // This still catches any OTHER (manually staff-scheduled) maintenance
-      // window — the post-rental buffer above no longer depends on it.
+      // window — the post-rental buffer above doesn't depend on it.
       const maintOverlap = maintSnap.docs
         .map((d) => d.data().maintenanceDate)
         .filter(Boolean)

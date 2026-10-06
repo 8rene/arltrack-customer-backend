@@ -4,7 +4,6 @@ const router = express.Router();
 const { runExpireSessions } = require("../jobs/expireSessions.job");
 const { runCancelStaleBookings } = require("../jobs/cancelStaleBookings.job");
 const { runBookingReminders } = require("../jobs/bookingNotifications.job");
-const { runPostRentalMaintenance } = require("../jobs/postRentalMaintenance.job");
 
 // Vercel Cron hits this over HTTP on schedule (see vercel.json). If
 // CRON_SECRET is set in this project's env vars, Vercel automatically sends
@@ -63,19 +62,5 @@ router.get("/booking-reminders", verifyCronRequest, async (req, res) => {
     return res.status(200).json({ success: false, message: err.message });
   }
 });
-
-// Watches for bookings marked "completed" on the admin side (car returned)
-// and auto-schedules a 1-day Post-Rental maintenance day. See
-// jobs/postRentalMaintenance.job.js for the full explanation.
-router.get("/post-rental-maintenance", verifyCronRequest, async (req, res) => {
-  try {
-    const result = await runPostRentalMaintenance();
-    return res.status(200).json({ success: true, result });
-  } catch (err) {
-    console.error("[CRON] post-rental-maintenance route error:", err.message);
-    return res.status(200).json({ success: false, message: err.message });
-  }
-});
-
 
 module.exports = router;
