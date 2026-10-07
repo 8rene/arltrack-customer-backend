@@ -10,6 +10,7 @@
 //   buildPaymentEntries     legacy payments doc  -> deposit / balance "in" rows
 //   buildLegacyPenaltyEntry legacy penalties doc -> one "legacy_aggregate" row (or a review reason)
 //   buildPenaltyPaymentEntry a NEW penalty payment -> row (used by recordShortfallPayment)
+//   buildRefundEntries      refundRequests doc -> "out" rows (parts[] + manualRefund)
 //   mergeEntry              how a re-derived row is applied over an existing one
 //   hydratePayment / hydratePenalty  rows -> the OLD field names, so readers don't change
 const { getPaymentBreakdown, resolvePaymongoIDs, payTypeOf } = require("./paymentBreakdown.util");
@@ -314,6 +315,92 @@ const buildPenaltyPaymentEntry = ({ penalty, penaltyID, amount, method, referenc
   };
 };
 
+// ── refundRequests -> "out" entries (STEP 2) ───────────────────────────────
+const refundPartStatus = (raw) => {
+  const s = low(raw);
+  if (["succeeded", "success", "refunded"].includes(s)) return "success";
+  if (s === "failed") return "failed";
+  return "pending";
+};
+
+/**
+ * Derives the "out" rows of ONE refundRequests doc from parts[] (one PayMongo refund per online
+ * charge) and manualRefund (the in-person hand-back). Deterministic ids, so re-running only updates.
+ *   <refundRequestID>_out_<n>      online part n   (parentEntryID = "<paymentID>_<kind>")
+ *   <refundRequestID>_out_manual   in-person portion
+ * Requests with nothing sent (Pending / Rejected / staff "nothing_owed") yield no rows.
+ * Requests from before parts[] existed (only paymongoRefundID) are read as one deposit part.
+ */
+const buildRefundEntries = (r, docID, opts = {}) => {
+  const entries = [];
+  if (!r) return { entries };
+  const refundRequestID = r.refundRequestID || docID;
+  const now = opts.now || new Date();
+  const paymentID = r.paymentID || null;
+  const base = {
+    paymentID, bookingID: r.bookingID || null, userID: r.userID || null,
+    refID: refundRequestID, refCollection: "refundRequests",
+    direction: "out", sessionID: null, transactionFee: null, proofUrl: null, groupID: null,
+    migratedFrom: opts.migratedFrom || null, updatedAt: now,
+  };
+
+  let parts = Array.isArray(r.parts) ? r.parts : [];
+  if (!parts.length && r.paymongoRefundID) {
+    parts = [{ kind: "deposit", paymongoRefundID: r.paymongoRefundID, amount: num(r.amount), status: low(r.status) === "refunded" ? "succeeded" : "pending" }];
+  }
+
+  parts.forEach((part, i) => {
+    const kind = part.kind === "balance" ? "balance" : "deposit";
+    const refundID = nullIfSentinel(part.paymongoRefundID);
+    const noPaymentID = !nullIfSentinel(part.paymongoPaymentID) && !refundID && low(part.status) !== "failed";
+    const flags = [];
+    if (noPaymentID) flags.push("missing_payment_id");
+    const status = noPaymentID ? "unrefundable" : refundPartStatus(part.status);
+    entries.push({
+      ...base,
+      paymentEntryID: `${refundRequestID}_out_${i}`,
+      phase: kind,
+      parentEntryID: paymentID ? entryIDFor(paymentID, kind) : null,
+      source: "online",
+      method: null,
+      amount: num(part.amount),
+      status,
+      referenceNumber: refundID,
+      processedBy: nullIfSentinel(r.processedBy),
+      processedAt: orNull(r.processedAt),
+      settledAt: status === "success" ? (opts.settledAt || r.updatedAt || now) : null,
+      note: noPaymentID ? "Payment ID does not exist" : nullIfSentinel(part.error),
+      flags,
+      createdAt: r.processedAt || r.updatedAt || now,
+    });
+  });
+
+  const m = r.manualRefund;
+  if (m && num(m.amount) > 0) {
+    const nm = normalizeMethod(m.method);
+    const flags = [];
+    if (nm.unmapped) flags.push(`method_unmapped:${nm.unmapped}`);
+    entries.push({
+      ...base,
+      paymentEntryID: `${refundRequestID}_out_manual`,
+      phase: "deposit",
+      parentEntryID: paymentID ? entryIDFor(paymentID, "deposit") : null,
+      source: "in_person",
+      method: nm.method,
+      amount: num(m.amount),
+      status: m.issued ? "success" : "pending",
+      referenceNumber: null,
+      processedBy: nullIfSentinel(m.issuedBy),
+      processedAt: orNull(m.issuedAt),
+      settledAt: m.issued ? (m.issuedAt || now) : null,
+      note: null,
+      flags,
+      createdAt: r.processedAt || r.updatedAt || now,
+    });
+  }
+  return { entries };
+};
+
 // ── applying a re-derived row over an existing one ──────────────────────────
 /**
  * Returns what to write: the whole row when it doesn't exist yet, a patch when it
@@ -445,6 +532,6 @@ const hydratePenalty = (penalty, entries) => {
 
 module.exports = {
   low, num, nullIfSentinel, normalizeMethod, statusFromLegacy, entryIDFor,
-  buildPaymentEntries, buildLegacyPenaltyEntry, buildPenaltyPaymentEntry,
+  buildPaymentEntries, buildLegacyPenaltyEntry, buildPenaltyPaymentEntry, buildRefundEntries,
   mergeEntry, pickEntry, entriesToLegacyTransactions, hydratePayment, hydratePenalty,
 };

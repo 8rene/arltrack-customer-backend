@@ -10,6 +10,7 @@ const svc = makeEntriesDb(db);
 
 module.exports = {
   syncPaymentEntries:      svc.syncPaymentEntries,
+  syncRefundEntries:       svc.syncRefundEntries,
   getEntriesForPaymentIDs: svc.getEntriesForPaymentIDs,
   hydratePayments:         svc.hydratePayments,
 };

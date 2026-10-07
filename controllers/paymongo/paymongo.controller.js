@@ -9,7 +9,7 @@ const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = req
 const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
 const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
 const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
-const { syncPaymentEntries } = require("../../utils/payments/paymentEntries.util");
+const { syncPaymentEntries, syncRefundEntries } = require("../../utils/payments/paymentEntries.util");
 
 const lower = (v) => String(v || "").toLowerCase();
 
@@ -306,6 +306,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
 
   if (outcome.skip) return { found: true, skipped: true };
   const { request: r, part } = outcome;
+  await syncRefundEntries(reqRef.id); // part result -> its "out" paymentEntries row (never throws)
   const now = new Date();
 
   recordTransactionLog({

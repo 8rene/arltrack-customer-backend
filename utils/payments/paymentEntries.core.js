@@ -7,7 +7,7 @@
 // (generated: run scripts/build-customer-payment-entries.mjs).
 const ENTRY_COLLECTION = "paymentEntries";
 const {
-  buildPaymentEntries, mergeEntry, hydratePayment, hydratePenalty,
+  buildPaymentEntries, buildRefundEntries, mergeEntry, hydratePayment, hydratePenalty,
 } = require("./paymentEntries.mapper");
 
 // Firestore `in` accepts at most 30 values.
@@ -49,6 +49,38 @@ const makeEntriesDb = (db) => {
       return { written };
     } catch (err) {
       console.error("[paymentEntries] sync failed (the payment itself is unaffected):", err.message);
+      return { written: 0, error: err.message };
+    }
+  };
+
+  /**
+   * STEP 2: re-derives the "out" rows of ONE refundRequests doc (parts[] + manualRefund).
+   * The refund request stays the source of truth; call this AFTER it was written.
+   * NEVER throws -- a failure here must not block or undo a refund. Returns { written }.
+   */
+  const syncRefundEntries = async (refundDocID) => {
+    try {
+      if (!refundDocID) return { written: 0 };
+      const snap = await db.collection("refundRequests").doc(refundDocID).get();
+      if (!snap.exists) return { written: 0 };
+      const { entries } = buildRefundEntries(snap.data(), snap.id);
+      if (!entries.length) return { written: 0 };
+
+      const refs = entries.map((e) => col().doc(e.paymentEntryID));
+      const existing = await db.getAll(...refs);
+      const batch = db.batch();
+      let written = 0;
+      entries.forEach((e, i) => {
+        const prev = existing[i].exists ? existing[i].data() : null;
+        const patch = mergeEntry(prev, e);
+        if (!patch) return;
+        if (prev) batch.update(refs[i], patch); else batch.set(refs[i], patch);
+        written += 1;
+      });
+      if (written) await batch.commit();
+      return { written };
+    } catch (err) {
+      console.error("[paymentEntries] refund sync failed (the refund itself is unaffected):", err.message);
       return { written: 0, error: err.message };
     }
   };
@@ -103,7 +135,7 @@ const makeEntriesDb = (db) => {
   };
 
   return {
-    syncPaymentEntries, getEntriesForPaymentIDs, getEntriesForPenaltyIDs,
+    syncPaymentEntries, syncRefundEntries, getEntriesForPaymentIDs, getEntriesForPenaltyIDs,
     hydratePayments, hydratePenalties, getEntryRefsForBooking,
   };
 };
