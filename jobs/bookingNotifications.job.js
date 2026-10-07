@@ -71,11 +71,19 @@ const runBookingReminders = async () => {
       // staff dispatch a driver in the admin app; nothing here assigns one.
       // Uses the SAME createNotification() dedup as the customer reminder
       // above, so this is just as safe to run on every cron tick.
-      if (b.driverID) {
+      // The current driver is the booking's "assigned" row in driverAssignments
+      // (legacy booking.driverID is only a fallback until the migration cleanup).
+      const assignSnap = await db.collection("driverAssignments")
+        .where("bookingID", "==", bID)
+        .where("status", "==", "assigned")
+        .limit(1)
+        .get();
+      const driverUID = assignSnap.empty ? (b.driverID || null) : assignSnap.docs[0].data().driverID;
+      if (driverUID) {
         const carName = await resolveCarName(b.carID);
         const driverId = await createNotification({
           type: "driver_trip_reminder",
-          userID: b.driverID,
+          userID: driverUID,
           refID: bID,
           title: "Upcoming Trip in 2 Hours",
           message: `You're assigned to a trip starting at ${fmtDateTime(start)} — ${carName}${b.destination ? ` to ${b.destination}` : ""}.`,

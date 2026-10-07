@@ -976,18 +976,34 @@ const requestCancellation = async (req, res) => {
       return res.status(400).json({ message: "Only ongoing bookings can request cancellation." });
     }
 
-    // Don't allow spamming multiple pending requests on the same booking
-    if (booking.cancellationRequestStatus === "pending") {
+    // Don't allow spamming multiple pending requests on the same booking.
+    // A request is its own row in cancellationRequests now (the old
+    // cancellationRequest* fields on the booking are still honoured as "pending"
+    // until the migration's cleanup phase has removed them).
+    const bookingKey = booking.bookingID || doc.id;
+    const pendingSnap = await db.collection("cancellationRequests")
+      .where("bookingID", "==", bookingKey)
+      .where("status", "==", "pending")
+      .limit(1)
+      .get();
+    if (!pendingSnap.empty || booking.cancellationRequestStatus === "pending") {
       return res.status(400).json({ message: "A cancellation request for this booking is already pending admin review." });
     }
 
     const now = new Date();
-    await doc.ref.update({
-      cancellationRequestStatus: "pending",
-      cancellationRequestReason: reason.trim(),
-      cancellationRequestedAt:   now,
-      updatedAt:                 now,
+    const requestRef = db.collection("cancellationRequests").doc();
+    await requestRef.set({
+      cancellationRequestID: requestRef.id,
+      bookingID:    bookingKey,
+      userID,
+      reason:       reason.trim(),
+      status:       "pending",
+      requestedAt:  now,
+      processedBy:  null,
+      processedAt:  null,
+      rejectReason: null,
     });
+    await doc.ref.update({ updatedAt: now });
 
     // Tell every Owner/Admin/Supervisor (one notification each — the admin bell
     // only shows notifications addressed to the signed-in staff member).
