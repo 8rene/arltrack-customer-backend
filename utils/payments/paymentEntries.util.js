@@ -13,5 +13,8 @@ module.exports = {
   syncRefundEntries:       svc.syncRefundEntries,
   getEntriesForPaymentIDs: svc.getEntriesForPaymentIDs,
   hydratePayments:         svc.hydratePayments,
+  hydratePaymentData:      svc.hydratePaymentData,
+  hydratePenalties:        svc.hydratePenalties,
+  getEntriesForPenaltyIDs: svc.getEntriesForPenaltyIDs,
   hydrateRefundRequests:   svc.hydrateRefundRequests,
 };

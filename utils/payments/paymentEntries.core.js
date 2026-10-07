@@ -8,7 +8,7 @@
 const ENTRY_COLLECTION = "paymentEntries";
 const {
   buildPaymentEntries, mergeEntry, hydratePayment, hydratePenalty,
-  buildRefundEntries, mergeRefundEntry, hydrateRefundRequest,
+  buildRefundEntries, mergeRefundEntry, hydrateRefundRequest, entryIDFor,
 } = require("./paymentEntries.mapper");
 
 // Firestore `in` accepts at most 30 values.
@@ -17,6 +17,11 @@ const chunk = (list, n = 30) => {
   for (let i = 0; i < list.length; i += n) out.push(list.slice(i, i + n));
   return out;
 };
+
+// The id a payment / penalty's entries are keyed by. A live document carries paymentID / penaltyID; an archived
+// copy may only carry originalId (the id the live document had), which is what the migration keyed its rows by.
+const paymentKeyOf = (p) => p.paymentID || p.originalId || p.id;
+const penaltyKeyOf = (p) => p.penaltyID || p.originalId || p.id;
 
 const makeEntriesDb = (db) => {
   const col = () => db.collection(ENTRY_COLLECTION);
@@ -32,18 +37,29 @@ const makeEntriesDb = (db) => {
       if (!paymentDocID) return { written: 0 };
       const snap = await db.collection("payments").doc(paymentDocID).get();
       if (!snap.exists) return { written: 0 };
-      const { entries } = buildPaymentEntries(snap.data(), snap.id);
+      const data = snap.data();
+
+      // After the PHASE 2 cleanup the payment document no longer carries the reference number, fee, channel,
+      // "processed by" ... -- the rows are the only copy. Re-deriving from the thinned document would overwrite
+      // those rows with nulls, so first fill the document's gaps from the rows it already has. A value that IS
+      // on the document (a fresh write by staff or a webhook) still wins, because hydrate only fills what is missing.
+      const paymentID = data.paymentID || snap.id;
+      const refs = ["deposit", "balance"].map((ph) => col().doc(entryIDFor(paymentID, ph)));
+      const existing = await db.getAll(...refs);
+      const priorRows = existing.filter((x) => x.exists).map((x) => x.data());
+      const { entries } = buildPaymentEntries(hydratePayment(data, priorRows), snap.id);
       if (!entries.length) return { written: 0 };
 
-      const refs = entries.map((e) => col().doc(e.paymentEntryID));
-      const existing = await db.getAll(...refs);
+      const refOf = new Map(refs.map((r, i) => [r.id, i]));
       const batch = db.batch();
       let written = 0;
-      entries.forEach((e, i) => {
+      entries.forEach((e) => {
+        const i = refOf.get(e.paymentEntryID);
+        const ref = refs[i];
         const prev = existing[i].exists ? existing[i].data() : null;
         const patch = mergeEntry(prev, e, opts);
         if (!patch) return;
-        if (prev) batch.update(refs[i], patch); else batch.set(refs[i], patch);
+        if (prev) batch.update(ref, patch); else batch.set(ref, patch);
         written += 1;
       });
       if (written) await batch.commit();
@@ -144,15 +160,34 @@ const makeEntriesDb = (db) => {
   /** payments[] -> the same payments with the old moved fields filled in from their entries. */
   const hydratePayments = async (payments) => {
     const list = payments || [];
-    const map = await getEntriesForPaymentIDs(list.map((p) => p.paymentID || p.id));
-    return list.map((p) => hydratePayment(p, map.get(p.paymentID || p.id) || []));
+    const map = await getEntriesForPaymentIDs(list.map(paymentKeyOf));
+    return list.map((p) => hydratePayment(p, map.get(paymentKeyOf(p)) || []));
+  };
+
+  /**
+   * ONE payment document's data (doc.data(), as the readers have it) -> the same data with the moved fields
+   * filled in from its rows. `docID` is the Firestore id, used when the data has no paymentID of its own.
+   * Adds no keys of its own (unlike hydratePayments over {id, ...data}), so it is safe where the object is
+   * written back or spread into another document. Never throws: on any failure the data is returned as it is.
+   */
+  const hydratePaymentData = async (data, docID) => {
+    if (!data) return data;
+    try {
+      const key = data.paymentID || data.originalId || docID;
+      if (!key) return data;
+      const map = await getEntriesForPaymentIDs([key]);
+      return hydratePayment(data, map.get(key) || []);
+    } catch (err) {
+      console.error("[paymentEntries] hydrate failed, using the document as it is:", err.message);
+      return data;
+    }
   };
 
   /** penalties[] -> the same penalties with paymentMethod / referenceNumber / paidAt filled in. */
   const hydratePenalties = async (penalties) => {
     const list = penalties || [];
-    const map = await getEntriesForPenaltyIDs(list.map((p) => p.penaltyID || p.id));
-    return list.map((p) => hydratePenalty(p, map.get(p.penaltyID || p.id) || []));
+    const map = await getEntriesForPenaltyIDs(list.map(penaltyKeyOf));
+    return list.map((p) => hydratePenalty(p, map.get(penaltyKeyOf(p)) || []));
   };
 
   /** Refs of every entry that belongs to a booking -- used by the permanent delete. */
@@ -164,7 +199,7 @@ const makeEntriesDb = (db) => {
 
   return {
     syncPaymentEntries, syncRefundEntries, getEntriesForPaymentIDs, getEntriesForPenaltyIDs,
-    getEntriesForRefundRequestIDs, hydratePayments, hydratePenalties, hydrateRefundRequests,
+    getEntriesForRefundRequestIDs, hydratePayments, hydratePaymentData, hydratePenalties, hydrateRefundRequests,
     getEntryRefsForBooking,
   };
 };
