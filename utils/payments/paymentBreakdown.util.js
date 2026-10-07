@@ -144,6 +144,17 @@ const resolvePaymongoIDs = (payment) => {
   return { deposit, balance };
 };
 
+// The note shown wherever an online payment has no PayMongo payment id on record.
+const PAYMENT_ID_MISSING_NOTE = "Payment ID does not exist — this amount can't be refunded through PayMongo.";
+
+// Was the first (deposit) payment taken ONLINE? Same evidence the paymentEntries mapper uses: a PayMongo
+// payment id, a recorded channel, or a checkout session that staff did not confirm by hand.
+const depositWasOnline = (payment, ids) => {
+  const p = payment || {};
+  const has = (v) => { const s = String(v == null ? "" : v).trim().toLowerCase(); return !!s && !["n/a", "—", "-"].includes(s); };
+  return !!((ids && ids.deposit) || has(p.paymongoChannel) || (has(p.paymongoSessionID) && !has(p.confirmedBy)));
+};
+
 /**
  * How a refund of everything the customer has paid should be executed.
  *
@@ -171,16 +182,52 @@ const computeRefundPlan = (payment, opts = {}) => {
 
   let remaining = b.amountPaid - forfeit;
   const parts = [];
-  const take = (kind, id, cap) => {
-    if (!id || cap <= 0 || remaining <= 0) return;
-    const amt = Math.min(remaining, cap);
-    parts.push({ kind, paymongoPaymentID: id, amount: amt });
-    remaining -= amt;
-  };
-  take("deposit", ids.deposit, Math.max(0, b.depositCollected - forfeit));
-  take("balance", ids.balance, b.balanceOnline);
+  const unrefundable = [];
+  let manualAmount = 0;
 
-  return { total: b.amountPaid - forfeit, grossPaid: b.amountPaid, forfeit, parts, manualAmount: remaining, breakdown: b };
+  // Walk the money in the order it was received. Each bucket takes what is left, up to what it
+  // received (the forfeit comes out of the first, deposit-phase payment). What happens to the
+  // amount depends on WHERE that money actually is:
+  //   has a PayMongo payment id      -> a PayMongo refund part
+  //   paid online but NO payment id  -> unrefundable: it is on PayMongo, not in a drawer, so it must
+  //                                     NOT become a "hand back in person" -- it is reported instead
+  //   collected by staff in person   -> manual hand-back (the only money staff can hand back)
+  const allot = (cap) => {
+    const amt = Math.min(remaining, Math.max(0, cap));
+    remaining -= amt;
+    return amt;
+  };
+
+  // 1. the first payment (the deposit, or the whole amount for a Full payment)
+  const depositCap = Math.max(0, b.depositCollected - forfeit);
+  if (depositCap > 0 && remaining > 0) {
+    const amt = allot(depositCap);
+    if (amt > 0) {
+      if (ids.deposit)                          parts.push({ kind: "deposit", paymongoPaymentID: ids.deposit, amount: amt });
+      else if (depositWasOnline(payment, ids))  unrefundable.push({ kind: "deposit", amount: amt, reason: "payment_id_missing" });
+      else                                      manualAmount += amt; // taken in cash / by staff
+    }
+  }
+  // 2. the balance, when it was paid online
+  if (b.balanceOnline > 0 && remaining > 0) {
+    const amt = allot(b.balanceOnline);
+    if (amt > 0) {
+      if (ids.balance) parts.push({ kind: "balance", paymongoPaymentID: ids.balance, amount: amt });
+      else             unrefundable.push({ kind: "balance", amount: amt, reason: "payment_id_missing" });
+    }
+  }
+  // 3. the balance, when staff collected it in person
+  if (b.balanceInPerson > 0 && remaining > 0) manualAmount += allot(b.balanceInPerson);
+  // Anything the buckets can't explain (rounding, very old records) keeps the old behaviour: staff hand it back.
+  if (remaining > 0) { manualAmount += remaining; remaining = 0; }
+
+  const unrefundableAmount = unrefundable.reduce((s, u) => s + u.amount, 0);
+  // total = what can actually be returned (parts + manual). The unrefundable amount is NOT promised to the customer.
+  return {
+    total: b.amountPaid - forfeit - unrefundableAmount,
+    grossPaid: b.amountPaid, forfeit, parts, manualAmount,
+    unrefundable, unrefundableAmount, breakdown: b,
+  };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -285,4 +332,4 @@ const computeRefundQuote = (payment, { pickupAt, requestedAt, waiveForfeit = fal
   return { policy, plan };
 };
 
-module.exports = { getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getRefundPolicy, computeRefundQuote, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS };
+module.exports = { PAYMENT_ID_MISSING_NOTE, depositWasOnline, getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getRefundPolicy, computeRefundQuote, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS };

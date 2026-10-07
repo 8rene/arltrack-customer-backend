@@ -305,8 +305,8 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
   });
 
   if (outcome.skip) return { found: true, skipped: true };
+  await syncRefundEntries(reqRef.id); // the "out" row for this part becomes success / failed. Never throws.
   const { request: r, part } = outcome;
-  await syncRefundEntries(reqRef.id); // part result -> its "out" paymentEntries row (never throws)
   const now = new Date();
 
   recordTransactionLog({
@@ -736,7 +736,9 @@ const quoteCustomerRefund = (payment, booking, requestedAt) => {
 };
 
 const nothingToRefundMessage = (policy, plan) =>
-  policy.forfeit > 0 && plan.grossPaid > 0
+  plan.unrefundableAmount > 0 && plan.total <= 0
+    ? `We couldn't find the payment reference for ${peso(plan.unrefundableAmount)} of this payment, so it can't be refunded automatically. Please contact support and we'll sort it out.`
+  : policy.forfeit > 0 && plan.grossPaid > 0
     ? `There's nothing to refund: because the pickup is less than ${policy.windowHours} hours away (or has passed), your ${peso(policy.forfeit)} deposit is non-refundable and your payment only covers that.`
     : "There's nothing to refund on this payment.";
 
@@ -776,6 +778,7 @@ const previewRefund = async (req, res) => {
       refundAmount: plan.total,                    // what the customer gets back
       onlineAmount: plan.total - plan.manualAmount,
       manualAmount: plan.manualAmount,
+      unrefundableAmount: plan.unrefundableAmount, // paid online but no payment reference on record
       unknownTiming: policy.unknownTiming,
       asOf: requestedAt,
     });
@@ -825,6 +828,8 @@ const requestRefund = async (req, res) => {
       amount: plan.total,          // what the customer gets back: everything paid, minus the deposit if it's under 48 hours
       onlineAmount,                // returned through PayMongo
       manualAmount: plan.manualAmount, // handed back by staff (balance collected in person, cash, etc.)
+      unrefundable: plan.unrefundable,             // online money with no PayMongo payment id (never a hand-back)
+      unrefundableAmount: plan.unrefundableAmount,
 
       // ── 48-hour policy snapshot, locked at the moment of the request ──
       // Its presence (policyTier) also marks the request as created under the
@@ -878,6 +883,7 @@ const requestRefund = async (req, res) => {
       message: policy.forfeit > 0
         ? `Refund request sent. Because it was made ${policy.tier === "no_show" ? "after your pickup time" : `less than ${policy.windowHours} hours before pickup`}, your ${peso(policy.forfeit)} deposit is non-refundable. ${peso(plan.total)} will be returned once it's reviewed.`
         : "Refund request sent. We'll notify you once it's reviewed.",
+      ...(plan.unrefundableAmount > 0 ? { warning: `${peso(plan.unrefundableAmount)} of this payment has no payment reference on record and can't be refunded automatically — our staff will review it.` } : {}),
       refundRequest,
     });
   } catch (error) {

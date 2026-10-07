@@ -13,4 +13,5 @@ module.exports = {
   syncRefundEntries:       svc.syncRefundEntries,
   getEntriesForPaymentIDs: svc.getEntriesForPaymentIDs,
   hydratePayments:         svc.hydratePayments,
+  hydrateRefundRequests:   svc.hydrateRefundRequests,
 };

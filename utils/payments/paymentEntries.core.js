@@ -7,7 +7,8 @@
 // (generated: run scripts/build-customer-payment-entries.mjs).
 const ENTRY_COLLECTION = "paymentEntries";
 const {
-  buildPaymentEntries, buildRefundEntries, mergeEntry, hydratePayment, hydratePenalty,
+  buildPaymentEntries, mergeEntry, hydratePayment, hydratePenalty,
+  buildRefundEntries, mergeRefundEntry, hydrateRefundRequest,
 } = require("./paymentEntries.mapper");
 
 // Firestore `in` accepts at most 30 values.
@@ -54,16 +55,22 @@ const makeEntriesDb = (db) => {
   };
 
   /**
-   * STEP 2: re-derives the "out" rows of ONE refundRequests doc (parts[] + manualRefund).
-   * The refund request stays the source of truth; call this AFTER it was written.
-   * NEVER throws -- a failure here must not block or undo a refund. Returns { written }.
+   * Re-derives and writes the "out" rows of ONE refund request: its PayMongo refund parts, the in-person
+   * hand-back, and any amount that has no payment id on record. Same guarantees as syncPaymentEntries:
+   * never throws, a settled ("success") refund row is never moved back to pending / failed.
    */
-  const syncRefundEntries = async (refundDocID) => {
+  const syncRefundEntries = async (refundRequestDocID, opts = {}) => {
     try {
-      if (!refundDocID) return { written: 0 };
-      const snap = await db.collection("refundRequests").doc(refundDocID).get();
+      if (!refundRequestDocID) return { written: 0 };
+      const snap = await db.collection("refundRequests").doc(refundRequestDocID).get();
       if (!snap.exists) return { written: 0 };
-      const { entries } = buildRefundEntries(snap.data(), snap.id);
+      const r = snap.data();
+      let payment = null;
+      if (r.paymentID) {
+        const ps = await db.collection("payments").where("paymentID", "==", r.paymentID).limit(1).get();
+        payment = ps.docs.length ? ps.docs[0].data() : null;
+      }
+      const { entries } = buildRefundEntries(r, snap.id, { payment });
       if (!entries.length) return { written: 0 };
 
       const refs = entries.map((e) => col().doc(e.paymentEntryID));
@@ -72,7 +79,7 @@ const makeEntriesDb = (db) => {
       let written = 0;
       entries.forEach((e, i) => {
         const prev = existing[i].exists ? existing[i].data() : null;
-        const patch = mergeEntry(prev, e);
+        const patch = mergeRefundEntry(prev, e, opts);
         if (!patch) return;
         if (prev) batch.update(refs[i], patch); else batch.set(refs[i], patch);
         written += 1;
@@ -83,6 +90,27 @@ const makeEntriesDb = (db) => {
       console.error("[paymentEntries] refund sync failed (the refund itself is unaffected):", err.message);
       return { written: 0, error: err.message };
     }
+  };
+
+  /** refundRequestID[] -> Map(refundRequestID -> "out" entries[]). */
+  const getEntriesForRefundRequestIDs = async (refundRequestIDs) => {
+    const ids = [...new Set((refundRequestIDs || []).filter(Boolean))];
+    const map = new Map(ids.map((id) => [id, []]));
+    for (const part of chunk(ids)) {
+      const snap = await col().where("refID", "in", part).get();
+      snap.docs.forEach((d) => {
+        const row = { id: d.id, ...d.data() };
+        if (row.refCollection === "refundRequests" && map.has(row.refID)) map.get(row.refID).push(row);
+      });
+    }
+    return map;
+  };
+
+  /** refundRequests[] -> the same requests with parts[] / manualRefund / unrefundable[] filled in from their rows. */
+  const hydrateRefundRequests = async (requests) => {
+    const list = requests || [];
+    const map = await getEntriesForRefundRequestIDs(list.map((r) => r.refundRequestID || r.id));
+    return list.map((r) => hydrateRefundRequest(r, map.get(r.refundRequestID || r.id) || []));
   };
 
   /** paymentID[] -> Map(paymentID -> entries[]). One query per 30 ids, not one per payment. */
@@ -136,7 +164,8 @@ const makeEntriesDb = (db) => {
 
   return {
     syncPaymentEntries, syncRefundEntries, getEntriesForPaymentIDs, getEntriesForPenaltyIDs,
-    hydratePayments, hydratePenalties, getEntryRefsForBooking,
+    getEntriesForRefundRequestIDs, hydratePayments, hydratePenalties, hydrateRefundRequests,
+    getEntryRefsForBooking,
   };
 };
 
