@@ -6,6 +6,7 @@ const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
 const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
+const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
@@ -681,6 +682,12 @@ const getUserBookings = async (req, res) => {
         })
     );
 
+    // Why each cancelled booking was cancelled now lives in cancellationRequests.
+    // The old field on the booking is the fallback until the migration has run.
+    const cancelReasons = await getCancellationReasons(
+      bookings.filter((b) => (b.status || "").toLowerCase() === "cancelled").map((b) => b.bookingID || b.id)
+    );
+
     // Collect unique carIDs
     const carIDs = [...new Set(bookings.map((b) => b.carID).filter(Boolean))];
 
@@ -737,7 +744,7 @@ const getUserBookings = async (req, res) => {
         totalFee:      0,
         rentalFee:     0,
         status:               (b.status || "upcoming").toLowerCase(),
-        cancellationReason:   b.cancellationReason        || "",
+        cancellationReason:   cancelReasons[b.bookingID || b.id] || b.cancellationReason || "",
         modeOfDriving:        b.modeOfDriving             || "",
         location:             b.location                  || "",
         destination:          b.destination               || "",
@@ -867,11 +874,13 @@ const cancelBooking = async (req, res) => {
     }
 
     const now = new Date();
-    await doc.ref.update({
-      status:             "cancelled",
-      cancellationReason: reason || "Cancelled by user.",
-      updatedAt:          now,
-    });
+    // The reason lives in cancellationRequests (type "direct"), not on the booking.
+    const cancelBatch = db.batch();
+    cancelBatch.update(doc.ref, { status: "cancelled", updatedAt: now });
+    recordDirectCancellation(booking.bookingID || doc.id, {
+      userID, reason: reason || "Cancelled by user.", cancelledBy: "customer",
+    }, cancelBatch);
+    await cancelBatch.commit();
 
     // If this booking was still unpaid (or only deposit-paid on a Partial),
     // clean up its payment doc's still-pending fields so nothing sits as

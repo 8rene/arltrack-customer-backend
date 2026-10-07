@@ -41,6 +41,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { recordAudit } = require("../auditLogs/auditLogs.util");
 const { createNotification } = require("../../services/notification/notification.service");
 const { upsertTransaction } = require("../payments/paymentTransactions.util");
+const { recordDirectCancellation } = require("./cancellationRequests.util");
 
 const BOOKING_STATUS = {
   TO_PAY:    "to pay",
@@ -119,11 +120,11 @@ const cancelStaleBooking = async (bookingID, reason) => {
   // of "to pay", there's nothing to do here.
   if (booking.status !== BOOKING_STATUS.TO_PAY) return false;
 
-  await bookingDoc.ref.update({
-    status:             BOOKING_STATUS.CANCELLED,
-    cancellationReason: reason,
-    updatedAt:          now,
-  });
+  // The reason lives in cancellationRequests (type "direct"), not on the booking.
+  const cancelBatch = db.batch();
+  cancelBatch.update(bookingDoc.ref, { status: BOOKING_STATUS.CANCELLED, updatedAt: now });
+  recordDirectCancellation(bookingID, { userID: booking.userID || null, reason, cancelledBy: "system" }, cancelBatch);
+  await cancelBatch.commit();
 
   // Mirror onto the payment doc — only touches fields that are still
   // "pending" (never overwrites an already-paid/failed deposit, and never
@@ -297,7 +298,10 @@ const cancelBookingAfterRefund = async (bookingID, reason = "Cancelled: refund a
   const status = doc.data().status;
   if (![BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING].includes(status)) return false;
 
-  await doc.ref.update({ status: BOOKING_STATUS.CANCELLED, cancellationReason: reason, updatedAt: now });
+  const cancelBatch = db.batch();
+  cancelBatch.update(doc.ref, { status: BOOKING_STATUS.CANCELLED, updatedAt: now });
+  recordDirectCancellation(bookingID, { userID: doc.data().userID || null, reason, cancelledBy: "refund" }, cancelBatch);
+  await cancelBatch.commit();
   try {
     const sessionSnap = await db.collection("bookingSessions").where("bookingID", "==", bookingID).limit(1).get();
     if (!sessionSnap.empty) await sessionSnap.docs[0].ref.update({ status: BOOKING_STATUS.CANCELLED, updatedAt: now });
