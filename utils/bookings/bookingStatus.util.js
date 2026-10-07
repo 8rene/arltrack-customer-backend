@@ -41,6 +41,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { recordAudit } = require("../auditLogs/auditLogs.util");
 const { createNotification } = require("../../services/notification/notification.service");
 const { upsertTransaction } = require("../payments/paymentTransactions.util");
+const { syncPaymentEntries } = require("../payments/paymentEntries.util");
 const { recordDirectCancellation } = require("./cancellationRequests.util");
 
 const BOOKING_STATUS = {
@@ -144,7 +145,10 @@ const cancelStaleBooking = async (bookingID, reason) => {
       txns = upsertTransaction({ paymongoTransactions: txns }, "balance", { status: "cancelled" });
     }
     if (txns !== p.paymongoTransactions) updates.paymongoTransactions = txns;
-    if (Object.keys(updates).length > 1) await paymentDoc.ref.update(updates);
+    if (Object.keys(updates).length > 1) {
+      await paymentDoc.ref.update(updates);
+      await syncPaymentEntries(paymentDoc.id);
+    }
   }
 
   // Mirror onto the bookingSession doc — same reasoning as cancelBooking()'s

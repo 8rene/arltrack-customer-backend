@@ -31,6 +31,7 @@ const { computeRefundPlan } = require("./paymentBreakdown.util");
 const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util");
 const { buildFeePatch } = require("./paymongoFee.util");
 const { upsertTransaction } = require("./paymentTransactions.util");
+const { syncPaymentEntries } = require("./paymentEntries.util");
 
 const num   = (v) => Number(v) || 0;
 const lower = (v) => String(v || "").toLowerCase();
@@ -47,6 +48,17 @@ const chargedAmountFor = (payment, phase) =>
   phase === "balance"
     ? num(payment.balanceAmount)
     : num(computePaymentSplit(payment.amount, payment.methodOfPayment, payment.securityDeposit).payNow);
+
+// What the checkout for this phase ACTUALLY charged. The checkout records it on the phase's transaction
+// entry when it is created; the stored balanceAmount is only the booking-time snapshot, which is higher
+// than the real charge whenever a staff discount was applied first.
+const entryAmountFor = (payment, phase) => {
+  const ph = phase === "balance" ? "balance" : "deposit";
+  const list = Array.isArray(payment && payment.paymongoTransactions) ? payment.paymongoTransactions : [];
+  const e = list.find((t) => t && t.phase === ph);
+  const a = e ? num(e.amount) : 0;
+  return a > 0 ? a : chargedAmountFor(payment, phase);
+};
 
 /**
  * Money arrived for a booking that is already cancelled (e.g. the customer paid
@@ -167,7 +179,7 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
     // Same facts, recorded as one transaction entry (written alongside the fields above).
     payload.paymongoTransactions = upsertTransaction(p, phase, {
       ref:     paymongoPaymentID || undefined,
-      amount:  chargedAmountFor(p, phase),
+      amount:  entryAmountFor(p, phase),
       fee:     feePatch[phase === "balance" ? "balancePaymongoFee" : "depositPaymongoFee"],
       channel: p.paymongoChannel || undefined,
       source:  "online",
@@ -192,11 +204,15 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
   });
 
   if (tx.state === "missing") return { settled: false, alreadyPaid: false, bookingStatus: null, phase };
+
+  // Mirror the settled state into paymentEntries (re-derived from the document; never throws, never
+  // blocks the payment). Also runs when another path already settled it, so a missing row is filled in.
+  await syncPaymentEntries(paymentRef.id);
   if (tx.state === "already") return { settled: false, alreadyPaid: true,  bookingStatus: null, phase };
 
   const payment = tx.payment;
   const bID     = payment.bookingID || null;
-  const charged = chargedAmountFor(payment, phase);
+  const charged = entryAmountFor(payment, phase);
 
   if (!paymongoPaymentID) {
     console.warn(`[settle] ${phase} payment for ${bID} had no PayMongo payment id — a refund of it will need a manual lookup.`);

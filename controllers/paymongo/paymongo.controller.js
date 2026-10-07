@@ -6,9 +6,10 @@ const { BOOKING_STATUS, enforceToPayValidity, promoteBookingToUpcoming, cancelBo
 const { createNotification, notifyStaff } = require("../../services/notification/notification.service");
 const { axios, PAYMONGO_V1, paymongoHeaders, channelLabel } = require("../../utils/payments/paymongoClient.util");
 const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = require("../../utils/payments/settlePayment.util");
-const { computeRefundQuote, resolvePickupAt } = require("../../utils/payments/paymentBreakdown.util");
+const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
 const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
 const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
+const { syncPaymentEntries } = require("../../utils/payments/paymentEntries.util");
 
 const lower = (v) => String(v || "").toLowerCase();
 
@@ -127,9 +128,15 @@ const createPaymentLink = async (req, res) => {
       if (payment.balanceCollected) {
         return res.status(400).json({ message: "The balance has already been collected in person." });
       }
-      // Older Partial bookings predate the balanceAmount field — derive it.
-      amountToCharge = Number(payment.balanceAmount)
-        || Math.max(0, (Number(payment.amount) || 0) - computePaymentSplit(payment.amount, payment.methodOfPayment, payment.securityDeposit).payNow);
+      // Charge what is ACTUALLY still owed -- after any staff discount -- not the stored balanceAmount.
+      // That field is a snapshot from booking time, before any discount existed, so charging it would
+      // take the full balance and then hand the discount back by hand. The breakdown also covers older
+      // Partial bookings that predate balanceAmount.
+      const owedNow = Math.round(getPaymentBreakdown(payment).balance * 100) / 100;
+      if (!(owedNow > 0)) {
+        return res.status(400).json({ message: "There is no balance left to pay." });
+      }
+      amountToCharge = owedNow;
     } else {
       // Never open a second checkout for a deposit that's already been paid —
       // that is exactly how a customer ends up paying twice.
@@ -232,6 +239,9 @@ const createPaymentLink = async (req, res) => {
       }),
       updatedAt: new Date(),
     });
+
+    // Mirror this attempt into paymentEntries (pending until PayMongo confirms it). Never throws.
+    await syncPaymentEntries(paymentDoc.id);
 
     return res.status(200).json({
       message: "Payment link created.",
@@ -502,6 +512,7 @@ const handleWebhook = async (req, res) => {
             paymongoTransactions: upsertTransaction(failedPayment, "balance", { status: "failed" }),
             updatedAt: now,
           });
+          await syncPaymentEntries(failedDoc.id);
           if (failedPayment.userID) {
             await createNotification({
               type: "payment_failed",

@@ -6,6 +6,7 @@ const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
 const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
+const { syncPaymentEntries } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 
 // Look up a car's price-per-day for a given durationType straight from
@@ -558,7 +559,7 @@ const createBooking = async (req, res) => {
       securityDeposit,
       methodOfPayment: computedMethod,
       paymentMethod:   paymentMethod  || "",
-      referenceNumber: referenceNumber || "N/A",
+      referenceNumber: referenceNumber || null,
       proofUrl,
       status:          "pending",
       // Two-phase payment (see utils/bookings/bookingStatus.util.js):
@@ -682,8 +683,7 @@ const getUserBookings = async (req, res) => {
         })
     );
 
-    // Why each cancelled booking was cancelled now lives in cancellationRequests.
-    // The old field on the booking is the fallback until the migration has run.
+    // Why each cancelled booking was cancelled lives in cancellationRequests.
     const cancelReasons = await getCancellationReasons(
       bookings.filter((b) => (b.status || "").toLowerCase() === "cancelled").map((b) => b.bookingID || b.id)
     );
@@ -744,7 +744,7 @@ const getUserBookings = async (req, res) => {
         totalFee:      0,
         rentalFee:     0,
         status:               (b.status || "upcoming").toLowerCase(),
-        cancellationReason:   cancelReasons[b.bookingID || b.id] || b.cancellationReason || "",
+        cancellationReason:   cancelReasons[b.bookingID || b.id] || "",
         modeOfDriving:        b.modeOfDriving             || "",
         location:             b.location                  || "",
         destination:          b.destination               || "",
@@ -903,7 +903,10 @@ const cancelBooking = async (req, res) => {
             txns = upsertTransaction({ paymongoTransactions: txns }, "balance", { status: "cancelled" });
           }
           if (txns !== p.paymongoTransactions) updates.paymongoTransactions = txns;
-          if (Object.keys(updates).length > 1) await paymentSnap.docs[0].ref.update(updates);
+          if (Object.keys(updates).length > 1) {
+            await paymentSnap.docs[0].ref.update(updates);
+            await syncPaymentEntries(paymentSnap.docs[0].id);
+          }
         }
       } catch (paymentErr) {
         console.error("cancelBooking: failed to sync payment status:", paymentErr.message);
@@ -995,7 +998,7 @@ const requestCancellation = async (req, res) => {
       .where("status", "==", "pending")
       .limit(1)
       .get();
-    if (!pendingSnap.empty || booking.cancellationRequestStatus === "pending") {
+    if (!pendingSnap.empty) {
       return res.status(400).json({ message: "A cancellation request for this booking is already pending admin review." });
     }
 
