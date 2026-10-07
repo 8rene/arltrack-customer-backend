@@ -2,10 +2,16 @@ const express = require("express");
 const router  = express.Router();
 
 const { createPaymentLink, handleWebhook, getPaymentStatus, requestRefund, previewRefund, getMyRefundRequests } = require("../controllers/paymongo/paymongo.controller");
+const { createPenaltyPaymentLink, getPenaltyPaymentStatus, getMyOutstandingPenalties } = require("../controllers/paymongo/penaltyPayment.controller");
 const verifyToken = require("../middlewares/auth.middleware");
 
 // Create a PayMongo payment link for a booking
 router.post("/create-link",        verifyToken, createPaymentLink);
+
+// Pay a booking's unpaid penalties online
+router.get ("/penalty/outstanding",         verifyToken, getMyOutstandingPenalties);
+router.post("/penalty/create-link",         verifyToken, createPenaltyPaymentLink);
+router.get ("/penalty/status/:checkoutID",  verifyToken, getPenaltyPaymentStatus);
 
 // Webhook — no auth (PayMongo calls this directly; validated by signature)
 router.post("/webhook",            handleWebhook);

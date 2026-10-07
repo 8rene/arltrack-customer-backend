@@ -11,6 +11,8 @@ const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/paym
 const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
 const { syncPaymentEntries, syncRefundEntries } = require("../../utils/payments/paymentEntries.util");
 
+const { handlePenaltyWebhookPaid } = require("./penaltyPayment.controller");
+
 const lower = (v) => String(v || "").toLowerCase();
 
 // Base URL of your frontend, e.g. https://arltrack.com — used to build success_url/cancel_url.
@@ -453,6 +455,12 @@ const handleWebhook = async (req, res) => {
     // We set reference_number = paymentID when creating the session
     const paymentID = session?.attributes?.reference_number;
     const sessionID = session?.id;
+
+    // Penalty checkouts carry reference_number = "PENCO-…" — they have no payments doc, so route them separately.
+    if (typeof paymentID === "string" && paymentID.startsWith("PENCO-")) {
+      if (eventType === "checkout_session.payment.paid") await handlePenaltyWebhookPaid({ checkoutID: paymentID, session });
+      return res.status(200).json({ received: true });
+    }
 
     if (eventType === "checkout_session.payment.paid") {
       let paymentSnap;
