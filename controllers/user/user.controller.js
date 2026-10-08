@@ -173,10 +173,19 @@ const getFullProfile = async (req, res) => {
       .where("userID", "==", userID)
       .where("status", "==", "Confirmed")
       .get();
+    const outstandingByBooking = {};
     const outstandingPenaltyBalance = unpaidPenaltiesSnap.docs.reduce((sum, doc) => {
       const p = doc.data();
-      return sum + Math.max(0, (Number(p.amount) || 0) - (Number(p.paidAmount) || 0));
+      const owed = Math.max(0, (Number(p.amount) || 0) - (Number(p.paidAmount) || 0));
+      if (owed > 0 && p.bookingID) {
+        outstandingByBooking[p.bookingID] = (outstandingByBooking[p.bookingID] || 0) + owed;
+      }
+      return sum + owed;
     }, 0);
+    // Which bookings that balance belongs to — lets MyBookings.jsx's
+    // banner link straight to the booking instead of just showing a total.
+    const outstandingPenaltyBookings = Object.entries(outstandingByBooking)
+      .map(([bookingID, amount]) => ({ bookingID, amount }));
 
     // Primary address = isDefault true, or first one
     const primaryAddress = addresses.find(a => a.isDefault) || addresses[0] || {};
@@ -197,6 +206,7 @@ const getFullProfile = async (req, res) => {
       // Queried live from `penalties` above — see MyBookings.jsx's
       // outstanding-balance banner, which reads this same response field.
       outstandingPenaltyBalance,
+      outstandingPenaltyBookings, // [{ bookingID, amount }] — one entry per booking with unpaid penalties
       // referral — this user's own shareable code and how many people
       // they've referred so far. Was already on the "user" doc since
       // signup started writing it, just never surfaced through this
