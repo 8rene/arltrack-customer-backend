@@ -112,6 +112,48 @@ const makeEntriesDb = (db) => {
     }
   };
 
+  /**
+   * THE writer for a refund's "out" rows (the rows are the source of truth; the request document no longer
+   * carries parts[] / manualRefund / unrefundable[]). Unlike syncRefundEntries it is STRICT: it throws, because
+   * the PayMongo refund ids exist ONLY in these rows -- losing the write would lose the money trail.
+   *   refundRequestDocID  the refundRequests document id
+   *   request             the request AS IT WILL BE after this write (processedBy, processedAt, status ...)
+   *   parts / manualRefund / unrefundable   what the refund did (same shapes buildRefundEntries reads)
+   *   opts.batch          add the rows to the caller's batch so they commit atomically with the request update
+   * Returns { written }.
+   */
+  const writeRefundEntries = async (refundRequestDocID, { request, parts, manualRefund, unrefundable } = {}, opts = {}) => {
+    if (!refundRequestDocID) throw new Error("writeRefundEntries: refundRequestDocID is required");
+    const r = {
+      ...(request || {}),
+      parts: Array.isArray(parts) ? parts : [],
+      manualRefund: manualRefund || null,
+      unrefundable: Array.isArray(unrefundable) ? unrefundable : [],
+      paymongoRefundID: null,   // never fall back to the legacy single id
+    };
+    let payment = null;
+    if (r.paymentID) {
+      const ps = await db.collection("payments").where("paymentID", "==", r.paymentID).limit(1).get();
+      payment = ps.docs.length ? ps.docs[0].data() : null;
+    }
+    const { entries } = buildRefundEntries(r, refundRequestDocID, { payment });
+    if (!entries.length) return { written: 0 };
+
+    const refs = entries.map((e) => col().doc(e.paymentEntryID));
+    const existing = await db.getAll(...refs);
+    const batch = opts.batch || db.batch();
+    let written = 0;
+    entries.forEach((e, i) => {
+      const prev = existing[i].exists ? existing[i].data() : null;
+      const patch = mergeRefundEntry(prev, e, opts);
+      if (!patch) return;
+      if (prev) batch.update(refs[i], patch); else batch.set(refs[i], patch);
+      written += 1;
+    });
+    if (!opts.batch && written) await batch.commit();
+    return { written };
+  };
+
   /** refundRequestID[] -> Map(refundRequestID -> "out" entries[]). */
   const getEntriesForRefundRequestIDs = async (refundRequestIDs) => {
     const ids = [...new Set((refundRequestIDs || []).filter(Boolean))];
@@ -130,7 +172,7 @@ const makeEntriesDb = (db) => {
   const hydrateRefundRequests = async (requests) => {
     const list = requests || [];
     const map = await getEntriesForRefundRequestIDs(list.map((r) => r.refundRequestID || r.id));
-    return list.map((r) => hydrateRefundRequest(r, map.get(r.refundRequestID || r.id) || []));
+    return list.map((r) => hydrateRefundRequest(r, map.get(r.refundRequestID || r.id) || [], { rowsOnly: true }));
   };
 
   /** paymentID[] -> Map(paymentID -> entries[]). One query per 30 ids, not one per payment. */
@@ -165,33 +207,28 @@ const makeEntriesDb = (db) => {
   const hydratePayments = async (payments) => {
     const list = payments || [];
     const map = await getEntriesForPaymentIDs(list.map(paymentKeyOf));
-    return list.map((p) => hydratePayment(p, map.get(paymentKeyOf(p)) || []));
+    return list.map((p) => hydratePayment(p, map.get(paymentKeyOf(p)) || [], { rowsOnly: true }));
   };
 
   /**
    * ONE payment document's data (doc.data(), as the readers have it) -> the same data with the moved fields
    * filled in from its rows. `docID` is the Firestore id, used when the data has no paymentID of its own.
-   * Adds no keys of its own (unlike hydratePayments over {id, ...data}), so it is safe where the object is
-   * written back or spread into another document. Never throws: on any failure the data is returned as it is.
+   * Rows only: the moved fields on the document are ignored. If the rows can't be read this THROWS -- a read
+   * that fails must not quietly serve the old fields instead.
    */
   const hydratePaymentData = async (data, docID) => {
     if (!data) return data;
-    try {
-      const key = data.paymentID || data.originalId || docID;
-      if (!key) return data;
-      const map = await getEntriesForPaymentIDs([key]);
-      return hydratePayment(data, map.get(key) || []);
-    } catch (err) {
-      console.error("[paymentEntries] hydrate failed, using the document as it is:", err.message);
-      return data;
-    }
+    const key = data.paymentID || data.originalId || docID;
+    if (!key) return hydratePayment(data, [], { rowsOnly: true });
+    const map = await getEntriesForPaymentIDs([key]);
+    return hydratePayment(data, map.get(key) || [], { rowsOnly: true });
   };
 
   /** penalties[] -> the same penalties with paymentMethod / referenceNumber / paidAt filled in. */
   const hydratePenalties = async (penalties) => {
     const list = penalties || [];
     const map = await getEntriesForPenaltyIDs(list.map(penaltyKeyOf));
-    return list.map((p) => hydratePenalty(p, map.get(penaltyKeyOf(p)) || []));
+    return list.map((p) => hydratePenalty(p, map.get(penaltyKeyOf(p)) || [], { rowsOnly: true }));
   };
 
   /** Refs of every entry that belongs to a booking -- used by the permanent delete. */
@@ -202,7 +239,7 @@ const makeEntriesDb = (db) => {
   };
 
   return {
-    syncPaymentEntries, syncRefundEntries, getEntriesForPaymentIDs, getEntriesForPenaltyIDs,
+    syncPaymentEntries, syncRefundEntries, writeRefundEntries, getEntriesForPaymentIDs, getEntriesForPenaltyIDs,
     getEntriesForRefundRequestIDs, hydratePayments, hydratePaymentData, hydratePenalties, hydrateRefundRequests,
     getEntryRefsForBooking,
   };

@@ -8,8 +8,7 @@ const { axios, PAYMONGO_V1, paymongoHeaders, channelLabel } = require("../../uti
 const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = require("../../utils/payments/settlePayment.util");
 const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
 const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
-const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
-const { syncPaymentEntries, syncRefundEntries } = require("../../utils/payments/paymentEntries.util");
+const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefundRequests } = require("../../utils/payments/paymentEntries.util");
 
 const { handlePenaltyWebhookPaid } = require("./penaltyPayment.controller");
 
@@ -227,23 +226,28 @@ const createPaymentLink = async (req, res) => {
     // 4. Save sessionID + checkoutUrl to Firestore
     await paymentDoc.ref.update({
       paymongoSessionID: sessionID,
-      paymongoChannel:   paymentMethodTypes[0],
       checkoutUrl,
       currentPhase:      phase,
       ...(phase === "balance" ? { balanceStatus: "pending" } : {}),
-      // Transaction entry for this attempt (pending until PayMongo confirms it).
-      paymongoTransactions: upsertTransaction(payment, phase, {
-        amount:    amountToCharge,
-        channel:   paymentMethodTypes[0],
-        source:    "online",
-        status:    "pending",
-        sessionID,
-      }),
       updatedAt: new Date(),
     });
 
-    // Mirror this attempt into paymentEntries (pending until PayMongo confirms it). Never throws.
-    await syncPaymentEntries(paymentDoc.id);
+    // Record this attempt as a paymentEntries row (pending until PayMongo confirms it). The channel and the amount
+    // this checkout really charges (a staff discount can make it lower than the stored balanceAmount) go to the
+    // row only -- they are handed to the sync and never written on the payment document. Never throws.
+    await syncPaymentEntries(paymentDoc.id, {
+      fields: {
+        paymongoChannel: paymentMethodTypes[0],
+        paymongoTransactions: [{
+          phase,
+          amount:  amountToCharge,
+          channel: paymentMethodTypes[0],
+          source:  "online",
+          status:  "pending",
+          sessionID,
+        }],
+      },
+    });
 
     return res.status(200).json({
       message: "Payment link created.",
@@ -262,7 +266,8 @@ const createPaymentLink = async (req, res) => {
 //
 // A refund can now have SEVERAL parts — one PayMongo refund per online charge
 // (deposit + balance), plus an optional manual/in-person portion staff hand back
-// themselves. refundRequests.parts[] tracks each PayMongo refund; the request is
+// themselves. Each part is an "out" row in paymentEntries (<refundRequestID>_part<n>,
+// referenceNumber = the PayMongo refund id); the request is
 // only "Refunded" once every part succeeded AND any manual portion is marked
 // issued (admin: markManualRefundIssued). Runs in a transaction so two parts
 // reporting at the same moment can't overwrite each other. Idempotent.
@@ -281,7 +286,41 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
   const outcome = await db.runTransaction(async (t) => {
     const s2 = await t.get(reqRef);
     const r  = s2.data();
-    // Requests created before multi-part refunds have no parts[] — treat the
+
+    // The parts live in paymentEntries ("out" rows), not on the request. All reads come before any write.
+    const rowsSnap = await t.get(db.collection("paymentEntries").where("refID", "==", r.refundRequestID || reqRef.id));
+    const outRows  = rowsSnap.docs.filter((d) => {
+      const x = d.data();
+      return x.refCollection === "refundRequests" && x.direction === "out";
+    });
+    const partRows  = outRows.filter((d) => d.data().source === "online" && d.data().status !== "unrefundable");
+    const manualRow = outRows.find((d) => d.data().source === "in_person");
+    const target    = partRows.find((d) => d.data().referenceNumber === refundID);
+
+    if (target) {
+      const rowStatus = partStatus === "succeeded" ? "success" : "failed";
+      const td = target.data();
+      if (td.status === rowStatus) return { skip: true }; // duplicate delivery
+
+      const statuses          = partRows.map((d) => (d.id === target.id ? rowStatus : d.data().status));
+      const anyFailed         = statuses.some((s) => s === "failed");
+      const allSucceeded      = statuses.every((s) => s === "success");
+      const manualOutstanding = !!(manualRow && manualRow.data().status !== "success");
+      const newStatus = anyFailed ? "Failed" : (allSucceeded && !manualOutstanding ? "Refunded" : r.status);
+      const at = new Date();
+
+      t.update(target.ref, { status: rowStatus, settledAt: rowStatus === "success" ? (td.settledAt || at) : null, updatedAt: at });
+      t.update(reqRef, { status: newStatus, updatedAt: at });
+      return {
+        request:   { ...r, status: newStatus },
+        part:      { kind: td.phase, amount: td.amount },
+        finalized: newStatus === "Refunded" && r.status !== "Refunded",
+        failedNow: newStatus === "Failed"   && r.status !== "Failed",
+      };
+    }
+
+    // No row carries this refund id: a request that was never migrated to paymentEntries. Fall back to the
+    // request's own parts[]. Requests created before multi-part refunds have no parts[] — treat the
     // single paymongoRefundID as one part covering the whole amount.
     const parts = Array.isArray(r.parts) && r.parts.length
       ? r.parts.map((x) => ({ ...x }))
@@ -299,6 +338,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
 
     t.update(reqRef, { parts, status: newStatus, updatedAt: new Date() });
     return {
+      legacy:    true,
       request:   { ...r, parts, status: newStatus },
       part:      parts[idx],
       finalized: newStatus === "Refunded" && r.status !== "Refunded",
@@ -307,7 +347,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
   });
 
   if (outcome.skip) return { found: true, skipped: true };
-  await syncRefundEntries(reqRef.id); // the "out" row for this part becomes success / failed. Never throws.
+  if (outcome.legacy) await syncRefundEntries(reqRef.id); // un-migrated request: derive its "out" rows now. Never throws.
   const { request: r, part } = outcome;
   const now = new Date();
 
@@ -517,8 +557,7 @@ const handleWebhook = async (req, res) => {
           // The deposit is real money already collected — a failed BALANCE attempt
           // never affects the booking, it just needs another try.
           await failedDoc.ref.update({
-            balanceStatus: "failed",
-            paymongoTransactions: upsertTransaction(failedPayment, "balance", { status: "failed" }),
+            balanceStatus: "failed",   // the row's "failed" status is derived from this by the sync below
             updatedAt: now,
           });
           await syncPaymentEntries(failedDoc.id);
@@ -701,7 +740,8 @@ const loadRefundContext = async (userID, paymentID) => {
     return { error: { status: 404, message: "Payment not found or access denied." } };
   }
 
-  const payment = paymentSnap.docs[0].data();
+  // The refund plan needs the PayMongo payment ids / channel, which live in paymentEntries rows now.
+  const payment = await hydratePaymentData(paymentSnap.docs[0].data(), paymentSnap.docs[0].id);
 
   // "paid" = confirmed through PayMongo, "Approved" = confirmed by staff (cash).
   if (!["paid", "approved"].includes(lower(payment.status))) {
@@ -836,8 +876,6 @@ const requestRefund = async (req, res) => {
       amount: plan.total,          // what the customer gets back: everything paid, minus the deposit if it's under 48 hours
       onlineAmount,                // returned through PayMongo
       manualAmount: plan.manualAmount, // handed back by staff (balance collected in person, cash, etc.)
-      unrefundable: plan.unrefundable,             // online money with no PayMongo payment id (never a hand-back)
-      unrefundableAmount: plan.unrefundableAmount,
 
       // ── 48-hour policy snapshot, locked at the moment of the request ──
       // Its presence (policyTier) also marks the request as created under the
@@ -851,10 +889,9 @@ const requestRefund = async (req, res) => {
       requestedAt: now,
 
       status: "Pending",
-      paymongoRefundID: null,      // legacy: first PayMongo refund id (set on approval)
+      // parts[] / manualRefund / unrefundable[] are NOT stored on the request any more: staff approval writes
+      // them as "out" rows in paymentEntries (see admin refundRequest.service). Only the webhook lookup key stays.
       paymongoRefundIDs: [],       // every PayMongo refund id (set on approval)
-      parts: [],                   // per-charge refund tracking (set on approval)
-      manualRefund: null,          // { amount, issued, ... } (set on approval)
       processedBy: null,
       processedAt: null,
       rejectReason: null,
@@ -912,8 +949,8 @@ const getMyRefundRequests = async (req, res) => {
       .where("userID", "==", userID)
       .get();
 
-    const requests = snap.docs
-      .map(d => d.data())
+    // parts[] / manualRefund / unrefundable[] are rebuilt from the refund's paymentEntries rows.
+    const requests = (await hydrateRefundRequests(snap.docs.map(d => d.data())))
       .sort((a, b) => {
         const aT = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
         const bT = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);

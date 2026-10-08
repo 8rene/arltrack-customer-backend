@@ -5,8 +5,7 @@ const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
-const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
-const { syncPaymentEntries } = require("../../utils/payments/paymentEntries.util");
+const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 
 // Look up a car's price-per-day for a given durationType straight from
@@ -571,8 +570,6 @@ const createBooking = async (req, res) => {
       balanceAmount: Math.max(0, totalAmount - payNow),
       balanceStatus: computedMethod === "Full" ? "not_applicable" : "not_due",
       currentPhase:  "deposit",
-      // One entry per PayMongo / in-person charge, added as each one happens.
-      paymongoTransactions: [],
       createdAt:       now,
       updatedAt:       now,
     });
@@ -760,6 +757,16 @@ const getUserBookings = async (req, res) => {
       )
     );
 
+    // proofUrl is one of the fields that moved into paymentEntries rows once a payment is confirmed; before that
+    // it is still on the document, so the document is the fallback. A display field must never fail the list.
+    const proofByPaymentID = new Map();
+    try {
+      const rawPayments = paymentSnaps.filter((s) => !s.empty).map((s) => s.docs[0].data());
+      (await hydratePayments(rawPayments)).forEach((h) => proofByPaymentID.set(h.paymentID, h.proofUrl));
+    } catch (hydrateErr) {
+      console.warn("getUserBookings: could not read paymentEntries, using the payment documents:", hydrateErr.message);
+    }
+
     paymentSnaps.forEach((snap, i) => {
       if (!snap.empty) {
         const p = snap.docs[0].data();
@@ -778,7 +785,7 @@ const getUserBookings = async (req, res) => {
           methodOfPayment: p.methodOfPayment  || p.paymentMethod || "",
           paymentMethod:   p.paymentMethod    || p.methodOfPayment || "",
           referenceNumber: p.referenceNumber  || "",
-          proofUrl:        p.proofUrl         || "",
+          proofUrl:        proofByPaymentID.get(p.paymentID) || p.proofUrl || "",
           status:          p.status           || "",
           // Two-phase payment fields — see utils/bookings/bookingStatus.util.js.
           // MyBookings.jsx needs these to know whether a "to pay" booking
@@ -893,16 +900,9 @@ const cancelBooking = async (req, res) => {
         if (!paymentSnap.empty) {
           const p = paymentSnap.docs[0].data();
           const updates = { updatedAt: now };
-          let txns = p.paymongoTransactions;
-          if (p.status === "pending") {
-            updates.status = "cancelled";
-            txns = upsertTransaction({ paymongoTransactions: txns }, "deposit", { status: "cancelled" });
-          }
-          if (p.balanceStatus === "pending") {
-            updates.balanceStatus = "cancelled";
-            txns = upsertTransaction({ paymongoTransactions: txns }, "balance", { status: "cancelled" });
-          }
-          if (txns !== p.paymongoTransactions) updates.paymongoTransactions = txns;
+          // The row's "cancelled" status is derived from these two fields by syncPaymentEntries below.
+          if (p.status === "pending") updates.status = "cancelled";
+          if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
           if (Object.keys(updates).length > 1) {
             await paymentSnap.docs[0].ref.update(updates);
             await syncPaymentEntries(paymentSnap.docs[0].id);

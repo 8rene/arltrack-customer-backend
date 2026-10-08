@@ -1,4 +1,5 @@
 const { db } = require("../../config/firebaseConnection/firebase");
+const { hydratePenalties } = require("../../utils/payments/paymentEntries.util");
 
 // Firestore Timestamp | Date | string -> ISO string (or null), so the
 // frontend never has to deal with {_seconds,_nanoseconds}.
@@ -53,9 +54,16 @@ const getMyBookingPenalties = async (req, res) => {
     const paymentDoc = paymentSnap.empty ? null : paymentSnap.docs[0];
 
     const SHOWN = ["Confirmed", "Waived", "Voided"];
-    const penalties = penaltiesSnap.docs
-      .map((d) => d.data())
-      .filter((p) => SHOWN.includes(p.status))
+    // paymentMethod / referenceNumber / paidAt are paymentEntries rows now: hydrate from them.
+    // A display field must never fail this card, so fall back to the documents if the rows can't be read.
+    const shownDocs = penaltiesSnap.docs.map((d) => d.data()).filter((p) => SHOWN.includes(p.status));
+    let shownPenalties = shownDocs;
+    try {
+      shownPenalties = await hydratePenalties(shownDocs);
+    } catch (hydrateErr) {
+      console.warn("getMyBookingPenalties: could not read paymentEntries, using the penalty documents:", hydrateErr.message);
+    }
+    const penalties = shownPenalties
       .map((p) => ({
         penaltyID: p.penaltyID,
         status: p.status,

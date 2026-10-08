@@ -1,5 +1,6 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { isPhasePaid, chargedAmountFor } = require("../../utils/payments/settlePayment.util");
+const { hydratePaymentData } = require("../../utils/payments/paymentEntries.util");
 const { buildAndSendCombinedReceipt } = require("../../utils/receipt/receipt.util");
 
 const RESEND_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between clicks, per booking
@@ -42,7 +43,8 @@ const resendReceipt = async (req, res) => {
       return res.status(404).json({ message: "No payment found for this booking yet." });
     }
     const paymentDoc = pSnap.docs[0];
-    const payment    = paymentDoc.data();
+    // PayMongo payment ids / channel live in paymentEntries rows now -- read them from there.
+    const payment    = await hydratePaymentData(paymentDoc.data(), paymentDoc.id);
 
     // Cooldown — refuse if the last send was under 5 minutes ago.
     const lastSentAt = payment.lastReceiptSentAt?.toDate

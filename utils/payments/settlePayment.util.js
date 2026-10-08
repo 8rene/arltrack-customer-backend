@@ -30,8 +30,7 @@ const { buildAndSendReceipt } = require("../receipt/receipt.util");
 const { computeRefundPlan } = require("./paymentBreakdown.util");
 const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util");
 const { buildFeePatch } = require("./paymongoFee.util");
-const { upsertTransaction } = require("./paymentTransactions.util");
-const { syncPaymentEntries } = require("./paymentEntries.util");
+const { syncPaymentEntries, hydratePaymentData } = require("./paymentEntries.util");
 
 const num   = (v) => Number(v) || 0;
 const lower = (v) => String(v || "").toLowerCase();
@@ -49,9 +48,10 @@ const chargedAmountFor = (payment, phase) =>
     ? num(payment.balanceAmount)
     : num(computePaymentSplit(payment.amount, payment.methodOfPayment, payment.securityDeposit).payNow);
 
-// What the checkout for this phase ACTUALLY charged. The checkout records it on the phase's transaction
-// entry when it is created; the stored balanceAmount is only the booking-time snapshot, which is higher
-// than the real charge whenever a staff discount was applied first.
+// What the checkout for this phase ACTUALLY charged. The checkout records it on the phase's paymentEntries
+// row when it is created (createPaymentLink); `payment` must be a row-hydrated view (hydratePaymentData),
+// whose paymongoTransactions[] is rebuilt from those rows. The stored balanceAmount is only the booking-time
+// snapshot, which is higher than the real charge whenever a staff discount was applied first.
 const entryAmountFor = (payment, phase) => {
   const ph = phase === "balance" ? "balance" : "deposit";
   const list = Array.isArray(payment && payment.paymongoTransactions) ? payment.paymongoTransactions : [];
@@ -89,10 +89,7 @@ const openRefundForLatePayment = async ({ payment, phase, charged }) => {
       manualAmount: plan.manualAmount,
       status: "Pending",
       autoCreated: true,
-      paymongoRefundID: null,
-      paymongoRefundIDs: [],
-      parts: [],
-      manualRefund: null,
+      paymongoRefundIDs: [],   // webhook lookup key; parts / manualRefund become paymentEntries rows on approval
       processedBy: null,
       processedAt: null,
       rejectReason: null,
@@ -146,46 +143,57 @@ const openRefundForLatePayment = async ({ payment, phase, charged }) => {
  *   alreadyPaid  someone else (webhook/poll) already had — nothing was done
  */
 const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null, source = "webhook", charge = null }) => {
+  // The "moved" fields (PayMongo payment ids, fees, channel, paidAt, the amount the checkout really charged)
+  // live in paymentEntries rows now, not on the payment document. Read them from the rows once, before the
+  // transaction; the transaction itself only decides on the document's own fields (status, balanceStatus ...).
+  const pre  = await paymentRef.get();
+  let rows = null;
+  if (pre.exists) {
+    try {
+      rows = await hydratePaymentData(pre.data(), pre.id);
+    } catch (err) {
+      // Reading the rows must never block a real payment from settling: fall back to what the document has.
+      console.warn("[settle] could not read paymentEntries, using the payment document as-is:", err.message);
+      rows = pre.data();
+    }
+  }
+
   const tx = await db.runTransaction(async (t) => {
     const snap = await t.get(paymentRef);
     if (!snap.exists) return { state: "missing" };
     const p = snap.data();
-    const feePatch = buildFeePatch(p, phase, charge);
+    const view = { ...rows, ...p };                       // fresh document + row-derived moved fields
+    const feePatch = buildFeePatch(view, phase, charge);  // { <phase>PaymongoFee, paymongoFeeTotal } or {}
+    const { paymongoFeeTotal, ...feeFields } = feePatch;  // the fee goes to the row, the running total stays on the document
+    const idField = phase === "balance" ? "balancePaymongoPaymentID" : "depositPaymongoPaymentID";
     if (isPhasePaid(p, phase)) {
       // Already settled by another path — just fill in PayMongo's fee if it was missing.
       if (Object.keys(feePatch).length) {
-        t.update(paymentRef, {
-          ...feePatch,
-          paymongoTransactions: upsertTransaction(p, phase, {
-            status: "paid",
-            ref: paymongoPaymentID || undefined,
-            fee: feePatch[phase === "balance" ? "balancePaymongoFee" : "depositPaymongoFee"],
-          }),
-        });
+        t.update(paymentRef, { paymongoFeeTotal });
       }
-      return { state: "already" };
+      return {
+        state: "already",
+        fields: { ...feeFields, ...(paymongoPaymentID ? { [idField]: paymongoPaymentID } : {}) },
+      };
     }
 
     const now = new Date();
+    // Document: only what is NOT a moved field.
     const payload = phase === "balance"
-      ? { balanceStatus: "paid", balancePaidAt: now, updatedAt: now }
-      : { status: "paid", paidAt: now, updatedAt: now };
+      ? { balanceStatus: "paid", updatedAt: now }
+      : { status: "paid", updatedAt: now };
+    if (paymongoFeeTotal !== undefined) payload.paymongoFeeTotal = paymongoFeeTotal;
+    // Rows: handed to syncPaymentEntries below (laid over the document before the rows are derived), so the
+    // paymentEntries row is written directly with them and the payment document never carries them.
+    const fields = {
+      ...feeFields,                                              // PayMongo's real transaction fee for this charge
+      lastSettledVia: source,
+      [phase === "balance" ? "balancePaidAt" : "paidAt"]: now,
+    };
     if (paymongoPaymentID) {
-      payload.paymongoPaymentID = paymongoPaymentID; // legacy: latest charge
-      payload[phase === "balance" ? "balancePaymongoPaymentID" : "depositPaymongoPaymentID"] = paymongoPaymentID;
+      fields.paymongoPaymentID = paymongoPaymentID;              // legacy: latest charge
+      fields[idField] = paymongoPaymentID;
     }
-    payload.lastSettledVia = source;
-    Object.assign(payload, feePatch); // PayMongo's real transaction fee for this charge (+ running total)
-    // Same facts, recorded as one transaction entry (written alongside the fields above).
-    payload.paymongoTransactions = upsertTransaction(p, phase, {
-      ref:     paymongoPaymentID || undefined,
-      amount:  entryAmountFor(p, phase),
-      fee:     feePatch[phase === "balance" ? "balancePaymongoFee" : "depositPaymongoFee"],
-      channel: p.paymongoChannel || undefined,
-      source:  "online",
-      status:  "paid",
-      paidAt:  now,
-    });
     // The refundable security deposit was part of this first payment, so it is
     // now HELD — same shape admin's penalty.service recordDepositReceived()
     // writes, so settleBooking()/the Penalties page work unchanged.
@@ -200,14 +208,14 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
       };
     }
     t.update(paymentRef, payload);
-    return { state: "settled", payment: { ...p, ...payload } };
+    return { state: "settled", payment: { ...view, ...payload, ...fields }, fields };
   });
 
   if (tx.state === "missing") return { settled: false, alreadyPaid: false, bookingStatus: null, phase };
 
   // Mirror the settled state into paymentEntries (re-derived from the document; never throws, never
   // blocks the payment). Also runs when another path already settled it, so a missing row is filled in.
-  await syncPaymentEntries(paymentRef.id);
+  await syncPaymentEntries(paymentRef.id, { fields: tx.fields });
   if (tx.state === "already") return { settled: false, alreadyPaid: true,  bookingStatus: null, phase };
 
   const payment = tx.payment;

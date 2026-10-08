@@ -40,7 +40,6 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { recordAudit } = require("../auditLogs/auditLogs.util");
 const { createNotification } = require("../../services/notification/notification.service");
-const { upsertTransaction } = require("../payments/paymentTransactions.util");
 const { syncPaymentEntries } = require("../payments/paymentEntries.util");
 const { recordDirectCancellation } = require("./cancellationRequests.util");
 
@@ -135,16 +134,9 @@ const cancelStaleBooking = async (bookingID, reason) => {
     const paymentDoc = paymentSnap.docs[0];
     const p = paymentDoc.data();
     const updates = { updatedAt: now };
-    let txns = p.paymongoTransactions;
-    if (p.status === "pending") {
-      updates.status = "cancelled";
-      txns = upsertTransaction({ paymongoTransactions: txns }, "deposit", { status: "cancelled" });
-    }
-    if (p.balanceStatus === "pending") {
-      updates.balanceStatus = "cancelled";
-      txns = upsertTransaction({ paymongoTransactions: txns }, "balance", { status: "cancelled" });
-    }
-    if (txns !== p.paymongoTransactions) updates.paymongoTransactions = txns;
+    // The row's "cancelled" status is derived from these two fields by syncPaymentEntries below.
+    if (p.status === "pending") updates.status = "cancelled";
+    if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
     if (Object.keys(updates).length > 1) {
       await paymentDoc.ref.update(updates);
       await syncPaymentEntries(paymentDoc.id);

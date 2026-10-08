@@ -375,11 +375,27 @@ const entriesToLegacyTransactions = (rows) =>
  * that still carries the legacy fields is returned unchanged. This is what lets
  * the cleanup phase remove those fields without changing a single reader.
  */
-const hydratePayment = (payment, entries) => {
+const MOVED_PAYMENT_FIELDS = [
+  "depositPaymongoPaymentID", "balancePaymongoPaymentID", "paymongoPaymentID",
+  "depositPaymongoFee", "balancePaymongoFee", "paymongoChannel", "proofUrl", "lastSettledVia",
+  "paidAt", "balancePaidAt", "confirmedBy", "confirmedAt",
+  "balanceMethod", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
+];
+const MOVED_PENALTY_FIELDS = ["paymentMethod", "referenceNumber", "paidAt"];
+const MOVED_REFUND_FIELDS  = ["parts", "manualRefund", "unrefundable", "unrefundableAmount", "paymongoRefundID"];
+
+/**
+ * opts.rowsOnly  READ mode: the rows are the ONLY source. Whatever the document still carries in the moved fields
+ *                is dropped first and the values come from the rows alone -- there is no "else try the old field".
+ *                (The default, doc-first mode exists for the writers: syncPaymentEntries lays a fresh webhook / staff
+ *                write over the document and needs it to win while it derives the row.)
+ */
+const hydratePayment = (payment, entries, opts = {}) => {
   if (!payment) return payment;
   const rows = (entries || []).filter((e) => e && e.direction !== "out" && e.phase !== "penalty");
-  if (!rows.length) return payment;
+  if (!rows.length && !opts.rowsOnly) return payment;
   const out = { ...payment };
+  if (opts.rowsOnly) for (const k of MOVED_PAYMENT_FIELDS) delete out[k];
   const fill = (k, v) => {
     if ((out[k] === undefined || out[k] === null || out[k] === "") && v !== undefined && v !== null && v !== "") out[k] = v;
   };
@@ -426,10 +442,11 @@ const hydratePayment = (payment, entries) => {
  * Penalty: fills paymentMethod / referenceNumber / paidAt from its entries when the
  * penalty no longer stores them. No rows but paidAmount > 0 => it was paid from the deposit.
  */
-const hydratePenalty = (penalty, entries) => {
+const hydratePenalty = (penalty, entries, opts = {}) => {
   if (!penalty) return penalty;
   const rows = (entries || []).filter((e) => e && e.direction !== "out" && e.phase === "penalty" && e.status === "success");
   const out = { ...penalty };
+  if (opts.rowsOnly) for (const k of MOVED_PENALTY_FIELDS) delete out[k];   // rows only -- no fallback to the old fields
   const fill = (k, v) => {
     if ((out[k] === undefined || out[k] === null || out[k] === "") && v !== undefined && v !== null && v !== "") out[k] = v;
   };
@@ -558,37 +575,40 @@ const mergeRefundEntry = (existing, built, opts = {}) => {
  * Refund request: rebuilds parts[] / manualRefund / paymongoRefundID(s) / unrefundable[] from its "out" rows
  * -- only where the request no longer carries them, so a request that still has them is returned unchanged.
  */
-const hydrateRefundRequest = (request, entries) => {
+const hydrateRefundRequest = (request, entries, opts = {}) => {
   if (!request) return request;
   const rows = (entries || []).filter((e) => e && e.direction === "out");
-  if (!rows.length) return request;
+  if (!rows.length && !opts.rowsOnly) return request;
   const out = { ...request };
-  const missing = (k) => out[k] === undefined || out[k] === null || (Array.isArray(out[k]) && out[k].length === 0);
+  if (opts.rowsOnly) for (const k of MOVED_REFUND_FIELDS) delete out[k];   // rows only -- no fallback to the old fields
+  if (!rows.length) return out;
+  // The "out" rows are the source of truth: where a row exists it OVERRIDES whatever legacy parts / manualRefund /
+  // unrefundable the document may still carry (they go stale -- nothing writes them any more).
   const seq = (e) => Number(String(e.paymentEntryID || "").match(/(\d+)$/)?.[1] || 0);
 
   const online = rows.filter((e) => e.source === "online" && e.status !== "unrefundable").sort((a, b) => seq(a) - seq(b));
-  if (missing("parts") && online.length) {
+  if (online.length) {
     out.parts = online.map((e) => ({
       kind: e.phase === "balance" ? "balance" : "deposit", paymongoPaymentID: null, amount: e.amount,
       paymongoRefundID: e.referenceNumber, status: e.status === "success" ? "succeeded" : e.status === "failed" ? "failed" : "pending",
       ...(e.note ? { error: e.note } : {}),
     }));
   }
-  if (missing("paymongoRefundIDs") && online.length) out.paymongoRefundIDs = online.map((e) => e.referenceNumber).filter(Boolean);
-  if (missing("paymongoRefundID") && online.length) out.paymongoRefundID = online[0].referenceNumber || null;
+  if (online.length) out.paymongoRefundIDs = online.map((e) => e.referenceNumber).filter(Boolean);
+  if (online.length) out.paymongoRefundID = online[0].referenceNumber || null;
 
   const manual = rows.find((e) => e.source === "in_person");
-  if (missing("manualRefund") && manual) {
+  if (manual) {
     out.manualRefund = {
       amount: manual.amount, issued: manual.status === "success", issuedBy: manual.processedBy || null,
       issuedAt: manual.processedAt || null, method: BALANCE_METHOD_LABEL[manual.method] || null,
     };
   }
   const unref = rows.filter((e) => e.status === "unrefundable").sort((a, b) => seq(a) - seq(b));
-  if (missing("unrefundable") && unref.length) {
+  if (unref.length) {
     out.unrefundable = unref.map((e) => ({ kind: e.phase === "balance" ? "balance" : "deposit", amount: e.amount, reason: "payment_id_missing" }));
   }
-  if ((out.unrefundableAmount === undefined || out.unrefundableAmount === null) && unref.length) {
+  if (unref.length) {
     out.unrefundableAmount = unref.reduce((s, e) => s + e.amount, 0);
   }
   return out;
@@ -596,6 +616,7 @@ const hydrateRefundRequest = (request, entries) => {
 
 module.exports = {
   buildRefundEntries, mergeRefundEntry, hydrateRefundRequest, PAYMENT_ID_MISSING_NOTE,
+  MOVED_PAYMENT_FIELDS, MOVED_PENALTY_FIELDS, MOVED_REFUND_FIELDS,
   low, num, nullIfSentinel, normalizeMethod, statusFromLegacy, entryIDFor,
   buildPaymentEntries, buildLegacyPenaltyEntry, buildPenaltyPaymentEntry,
   mergeEntry, pickEntry, entriesToLegacyTransactions, hydratePayment, hydratePenalty,
