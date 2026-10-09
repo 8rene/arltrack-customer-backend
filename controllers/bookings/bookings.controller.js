@@ -5,7 +5,8 @@ const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
-const { syncPaymentEntries } = require("../../utils/payments/paymentEntries.util");
+const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
+const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 
 // Look up a car's price-per-day for a given durationType straight from
