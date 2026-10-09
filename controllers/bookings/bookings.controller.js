@@ -5,7 +5,8 @@ const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
-const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
+const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
+const { syncPaymentEntries } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 
 // Look up a car's price-per-day for a given durationType straight from
@@ -28,6 +29,36 @@ const getPricePerDay = async (carID, durationType) => {
 const codingCache = {
   cars:        {},   // { [carID]: plateNumber }
   codingRules: null, // full rules array
+  rulesFetchedAt: 0, // ms timestamp — rules are re-read after CODING_RULES_TTL_MS
+};
+const CODING_RULES_TTL_MS = 5 * 60 * 1000;
+
+// Number coding is a Philippine (Asia/Manila, UTC+8, no DST) rule. The browser
+// sends dates as UTC ISO strings, so reading getDay()/getHours() on the server
+// gives the *server's* local time — on a UTC host a 6:00 AM Manila pickup is
+// evaluated as 10:00 PM of the PREVIOUS day, the wrong weekday, so the rule
+// silently stops matching. Always read the weekday / minutes / date in Manila time.
+const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+const toManila = (d) => {
+  const m = new Date(d.getTime() + MANILA_OFFSET_MS);
+  return {
+    dow:  m.getUTCDay(),                                  // 0=Sun … 6=Sat
+    mins: m.getUTCHours() * 60 + m.getUTCMinutes(),       // minutes from Manila midnight
+    day:  m.toISOString().slice(0, 10),                   // "YYYY-MM-DD" in Manila
+  };
+};
+const manilaDayRange = (day) => ({
+  start: new Date(`${day}T00:00:00.000+08:00`),
+  end:   new Date(`${day}T23:59:59.999+08:00`),
+});
+const getCodingRules = async () => {
+  const stale = Date.now() - codingCache.rulesFetchedAt > CODING_RULES_TTL_MS;
+  if (!codingCache.codingRules || stale) {
+    const rulesSnap = await db.collection("codingRules").get();
+    codingCache.codingRules = rulesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    codingCache.rulesFetchedAt = Date.now();
+  }
+  return codingCache.codingRules;
 };
 
 // Helper: detect MIME type from base64 magic bytes
@@ -249,12 +280,12 @@ const createBooking = async (req, res) => {
         const lastDigit = parseInt(plateNumber[plateNumber.length - 1], 10);
         if (isNaN(lastDigit)) return null;
 
-        const dayOfWeek = startDateTime.getDay();
+        const _startPH  = toManila(startDateTime);
+        const dayOfWeek = _startPH.dow;
 
         // Holiday check — if the start date is a public holiday, coding is suspended
         // holidayDate is stored as a Firestore Timestamp, so we query by day range
-        const _hDayStart = new Date(startDateTime); _hDayStart.setHours(0, 0, 0, 0);
-        const _hDayEnd   = new Date(startDateTime); _hDayEnd.setHours(23, 59, 59, 999);
+        const { start: _hDayStart, end: _hDayEnd } = manilaDayRange(_startPH.day);
         const holidaySnap = await db.collection("holidays")
           .where("holidayDate", ">=", _hDayStart)
           .where("holidayDate", "<=", _hDayEnd)
@@ -265,15 +296,14 @@ const createBooking = async (req, res) => {
         }
 
         // Booking window in minutes-from-midnight (start of booking day)
-        const bookingStartMins = startDateTime.getHours() * 60 + startDateTime.getMinutes();
+        const bookingStartMins = _startPH.mins;
         // If end is on a later calendar day, treat end-of-day as 23:59
         let bookingEndMins;
-        const startDay = startDateTime.toISOString().split("T")[0];
-        const endDay   = endDateTime.toISOString().split("T")[0];
-        if (endDay > startDay) {
+        const _endPH = toManila(endDateTime);
+        if (_endPH.day > _startPH.day) {
           bookingEndMins = 23 * 60 + 59;
         } else {
-          bookingEndMins = endDateTime.getHours() * 60 + endDateTime.getMinutes();
+          bookingEndMins = _endPH.mins;
         }
 
         const parseTime = (t) => {
@@ -288,11 +318,8 @@ const createBooking = async (req, res) => {
         };
 
         // Use shared cache — same rules array as checkCodingRule endpoint
-        if (!codingCache.codingRules) {
-          const rulesSnap = await db.collection("codingRules").get();
-          codingCache.codingRules = rulesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        }
-        for (const rule of codingCache.codingRules) {
+        const _codingRules = await getCodingRules();
+        for (const rule of _codingRules) {
 
           // Day-of-week match (JS: 0=Sun,1=Mon,...6=Sat)
           const ruleDayOfWeek = Number(rule.dayOfWeek);
@@ -570,6 +597,8 @@ const createBooking = async (req, res) => {
       balanceAmount: Math.max(0, totalAmount - payNow),
       balanceStatus: computedMethod === "Full" ? "not_applicable" : "not_due",
       currentPhase:  "deposit",
+      // One entry per PayMongo / in-person charge, added as each one happens.
+      paymongoTransactions: [],
       createdAt:       now,
       updatedAt:       now,
     });
@@ -757,16 +786,6 @@ const getUserBookings = async (req, res) => {
       )
     );
 
-    // proofUrl is one of the fields that moved into paymentEntries rows once a payment is confirmed; before that
-    // it is still on the document, so the document is the fallback. A display field must never fail the list.
-    const proofByPaymentID = new Map();
-    try {
-      const rawPayments = paymentSnaps.filter((s) => !s.empty).map((s) => s.docs[0].data());
-      (await hydratePayments(rawPayments)).forEach((h) => proofByPaymentID.set(h.paymentID, h.proofUrl));
-    } catch (hydrateErr) {
-      console.warn("getUserBookings: could not read paymentEntries, using the payment documents:", hydrateErr.message);
-    }
-
     paymentSnaps.forEach((snap, i) => {
       if (!snap.empty) {
         const p = snap.docs[0].data();
@@ -785,7 +804,7 @@ const getUserBookings = async (req, res) => {
           methodOfPayment: p.methodOfPayment  || p.paymentMethod || "",
           paymentMethod:   p.paymentMethod    || p.methodOfPayment || "",
           referenceNumber: p.referenceNumber  || "",
-          proofUrl:        proofByPaymentID.get(p.paymentID) || p.proofUrl || "",
+          proofUrl:        p.proofUrl         || "",
           status:          p.status           || "",
           // Two-phase payment fields — see utils/bookings/bookingStatus.util.js.
           // MyBookings.jsx needs these to know whether a "to pay" booking
@@ -900,9 +919,16 @@ const cancelBooking = async (req, res) => {
         if (!paymentSnap.empty) {
           const p = paymentSnap.docs[0].data();
           const updates = { updatedAt: now };
-          // The row's "cancelled" status is derived from these two fields by syncPaymentEntries below.
-          if (p.status === "pending") updates.status = "cancelled";
-          if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
+          let txns = p.paymongoTransactions;
+          if (p.status === "pending") {
+            updates.status = "cancelled";
+            txns = upsertTransaction({ paymongoTransactions: txns }, "deposit", { status: "cancelled" });
+          }
+          if (p.balanceStatus === "pending") {
+            updates.balanceStatus = "cancelled";
+            txns = upsertTransaction({ paymongoTransactions: txns }, "balance", { status: "cancelled" });
+          }
+          if (txns !== p.paymongoTransactions) updates.paymongoTransactions = txns;
           if (Object.keys(updates).length > 1) {
             await paymentSnap.docs[0].ref.update(updates);
             await syncPaymentEntries(paymentSnap.docs[0].id);
@@ -1087,22 +1113,24 @@ const checkCodingRule = async (req, res) => {
 
     // 2. Parse the booking start date/time
     const bookingStart = new Date(startDateTime);
-    const dayOfWeek    = bookingStart.getDay(); // 0=Sun … 6=Sat
+    if (isNaN(bookingStart.getTime())) {
+      return res.status(400).json({ message: "startDateTime is not a valid date." });
+    }
+    const startPH      = toManila(bookingStart);
+    const dayOfWeek    = startPH.dow; // 0=Sun … 6=Sat, in Manila time
 
     // Booking start & end in minutes-from-midnight (same calendar day for comparison)
-    const bookingStartMins = bookingStart.getHours() * 60 + bookingStart.getMinutes();
+    const bookingStartMins = startPH.mins;
 
     // If endDateTime provided, compute end minutes; if it spans past midnight cap at 1439 (23:59)
     let bookingEndMins;
     if (endDateTime) {
-      const bookingEnd = new Date(endDateTime);
+      const endPH = toManila(new Date(endDateTime));
       // If the end is on a later calendar day, treat end as end-of-day (23:59) for overlap check
-      const startDay = bookingStart.toISOString().split("T")[0];
-      const endDay   = bookingEnd.toISOString().split("T")[0];
-      if (endDay > startDay) {
+      if (endPH.day > startPH.day) {
         bookingEndMins = 23 * 60 + 59; // booking goes past midnight → covers rest of day
       } else {
-        bookingEndMins = bookingEnd.getHours() * 60 + bookingEnd.getMinutes();
+        bookingEndMins = endPH.mins;
       }
     } else {
       // No end time provided — treat the whole day as blocked
@@ -1112,8 +1140,7 @@ const checkCodingRule = async (req, res) => {
     // 3. Holiday check — if the booking's start date is a public holiday,
     //    coding rules are suspended for that day and booking is always allowed.
     // holidayDate is stored as a Firestore Timestamp, so query by day range.
-    const hDayStart = new Date(bookingStart); hDayStart.setHours(0, 0, 0, 0);
-    const hDayEnd   = new Date(bookingStart); hDayEnd.setHours(23, 59, 59, 999);
+    const { start: hDayStart, end: hDayEnd } = manilaDayRange(startPH.day);
     const holidaySnap = await db.collection("holidays")
       .where("holidayDate", ">=", hDayStart)
       .where("holidayDate", "<=", hDayEnd)
@@ -1129,12 +1156,9 @@ const checkCodingRule = async (req, res) => {
       });
     }
 
-    // 4. Fetch all codingRules (cached — rules rarely change)
-    if (!codingCache.codingRules) {
-      const rulesSnap = await db.collection("codingRules").get();
-      codingCache.codingRules = rulesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    }
-    if (!codingCache.codingRules.length) return res.status(200).json({ blocked: false });
+    // 4. Fetch all codingRules (cached for a few minutes so admin edits show up without a restart)
+    const codingRules = await getCodingRules();
+    if (!codingRules.length) return res.status(200).json({ blocked: false });
 
     // Helper: parse "7:00 AM" → minutes from midnight
     const parseTime = (timeStr) => {
@@ -1154,11 +1178,11 @@ const checkCodingRule = async (req, res) => {
       console.log("[checkCodingRule] plateNumber:", plateNumber, "lastDigit:", lastDigit);
       console.log("[checkCodingRule] dayOfWeek (JS 0=Sun):", dayOfWeek, "bookingStartMins:", bookingStartMins, "bookingEndMins:", bookingEndMins);
       console.log("[checkCodingRule] destination:", destination);
-      console.log("[checkCodingRule] total rules to check:", codingCache.codingRules.length);
+      console.log("[checkCodingRule] total rules to check:", codingRules.length);
     }
 
     // 4. Check each rule
-    for (const rule of codingCache.codingRules) {
+    for (const rule of codingRules) {
       const ruleDoc = { id: rule.id };
 
       if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] rule:", JSON.stringify({
