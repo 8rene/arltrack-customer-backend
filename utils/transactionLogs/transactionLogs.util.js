@@ -1,5 +1,8 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const admin  = require("firebase-admin");
+// Generated copy of the admin mapper (see scripts/build-customer-payment-entries.mjs): one method vocabulary for
+// paymentEntries and transactionLogs.
+const { normalizeMethod, nullIfSentinel } = require("../payments/paymentEntries.mapper");
 
 // Matches the 'transactionLogs' collection the admin panel already reads
 // (admin-backend/services/transactionLogs/transactionLogs.service.js):
@@ -28,8 +31,8 @@ const recordTransactionLog = async ({
   type,
   amount,
   status,
-  paymentMethod = "",
-  referenceNumber = "",
+  paymentMethod = null,    // any label ("GCash", "Maya" ...): stored as a method code (gcash | maya | qrph | cash | bank_transfer)
+  referenceNumber = null,  // "", "—", "N/A" are stored as null
   description = "",
   performedBy = null,
   // Optional idempotency key. When given, the log is written to a doc with
@@ -48,6 +51,9 @@ const recordTransactionLog = async ({
       return null;
     }
 
+    const { method, unmapped } = normalizeMethod(paymentMethod);
+    if (unmapped) console.warn(`recordTransactionLog: unknown payment method "${unmapped}" stored as null`);
+
     const ref = logID ? db.collection("transactionLogs").doc(logID) : db.collection("transactionLogs").doc();
     const payload = {
       transactionLogsID: ref.id,
@@ -60,8 +66,8 @@ const recordTransactionLog = async ({
       type,
       amount: Number(amount) || 0,
       status,
-      paymentMethod,
-      referenceNumber,
+      paymentMethod: method,
+      referenceNumber: nullIfSentinel(referenceNumber),
       description,
       performedBy,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),

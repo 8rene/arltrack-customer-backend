@@ -8,7 +8,6 @@ const { axios, PAYMONGO_V1, paymongoHeaders, channelLabel } = require("../../uti
 const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = require("../../utils/payments/settlePayment.util");
 const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
 const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
-const { isPaidStatus, isPendingStatus } = require("../../utils/payments/paymentStatus.util");
 const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefundRequests } = require("../../utils/payments/paymentEntries.util");
 
 const { handlePenaltyWebhookPaid } = require("./penaltyPayment.controller");
@@ -67,7 +66,10 @@ const createPaymentLink = async (req, res) => {
     }
 
     const paymentDoc = paymentSnap.docs[0];
-    const payment    = paymentDoc.data();
+    // Read through paymentEntries: "staff collected the balance in person" (balanceCollected) is no longer stored on
+    // the payment document, and this is the guard that stops the customer paying that balance a second time online.
+    // No fallback to the bare document on purpose -- if the rows can't be read, don't open a checkout.
+    const payment    = await hydratePaymentData(paymentDoc.data(), paymentDoc.id);
 
     // ── Only allow starting payment/confirmation if the booking's own
     // schedule is still valid (hasn't passed its 12h "to pay" window, and
@@ -121,10 +123,10 @@ const createPaymentLink = async (req, res) => {
       if (!isPartial) {
         return res.status(400).json({ message: "This booking doesn't have a separate balance payment." });
       }
-      if (!isPaidStatus(payment.status)) {
+      if (payment.status !== "paid") {
         return res.status(400).json({ message: "Please complete the deposit payment first." });
       }
-      if (isPaidStatus(payment.balanceStatus)) {
+      if (payment.balanceStatus === "paid") {
         return res.status(400).json({ message: "The balance has already been paid." });
       }
       if (payment.balanceCollected) {
@@ -161,7 +163,7 @@ const createPaymentLink = async (req, res) => {
     //   • still open                             → reuse the same link
     //   • expired                                → fall through and create a fresh session
     const phaseStatus = phase === "balance" ? payment.balanceStatus : payment.status;
-    if (payment.paymongoSessionID && payment.currentPhase === phase && isPendingStatus(phaseStatus)) {
+    if (payment.paymongoSessionID && payment.currentPhase === phase && phaseStatus === "pending") {
       const v = await verifyAndSettlePayment(paymentDoc, { source: "pay-now" });
       if (v.settled || v.alreadyPaid) {
         return res.status(200).json({

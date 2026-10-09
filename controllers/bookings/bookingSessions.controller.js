@@ -85,7 +85,10 @@ const getBookingDetails = async (req, res) => {
       } catch (hydrateErr) {
         console.warn("getBookingDetails: could not read paymentEntries, using the payment document:", hydrateErr.message);
       }
-      const { balance } = derivePaymentStatus(p);
+      // The money math reads the row-hydrated view (balanceCollected comes from the balance entry); if the rows
+      // could not be read (h is empty) it falls back to the document, as the rest of this block does.
+      const hp = Object.keys(h).length ? h : p;
+      const { balance } = derivePaymentStatus(hp);
       payment = {
         paymentID:         p.paymentID        || paymentSnap.docs[0].id,
         amount:            p.amount           || 0,
@@ -124,7 +127,7 @@ const getBookingDetails = async (req, res) => {
         lastReceiptSentAt: p.lastReceiptSentAt || null,
         // Was previously computed inline in BookingDetails.jsx — now the
         // server's own math.
-        paymentStatus:     derivePaymentStatus(p),
+        paymentStatus:     derivePaymentStatus(hp),
         balanceDue:        balance,
       };
     }

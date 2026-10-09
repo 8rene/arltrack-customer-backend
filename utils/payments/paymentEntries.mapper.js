@@ -343,6 +343,8 @@ const MOVED_PAYMENT_FIELDS = [
   "depositPaymongoFee", "balancePaymongoFee", "paymongoFeeTotal", "paymongoChannel", "lastSettledVia",
   "paidAt", "balancePaidAt", "confirmedBy", "confirmedAt",
   "balanceMethod", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
+  // staff collected the balance in person / handed a discount spillover back: both are facts of an entry row
+  "balanceCollected", "balanceCollectedAmount", "refundIssuedBy", "refundIssuedAt",
 ];
 const MOVED_PENALTY_FIELDS = ["paymentMethod", "referenceNumber", "paidAt"];
 const MOVED_REFUND_FIELDS  = ["parts", "manualRefund", "unrefundable", "unrefundableAmount", "paymongoRefundID"];
@@ -386,7 +388,18 @@ const hydratePayment = (payment, entries, opts = {}) => {
       fill("balanceMethod", BALANCE_METHOD_LABEL[bal.method] || null);
       fill("balanceCollectedBy", bal.processedBy);
       fill("balanceCollectedAt", bal.processedAt || bal.settledAt);
+      // "staff collected the balance" is no longer stored on the payment: it IS a settled in-person balance row.
+      if (bal.status === "success") {
+        if (!out.balanceCollected) out.balanceCollected = true;   // a stored `false` must not hide a settled row
+        fill("balanceCollectedAmount", bal.amount);
+      }
     }
+  }
+  // A discount spillover handed back in person is the "<paymentID>_discountrefund" out-row: who / when come from it.
+  const handBack = (entries || []).find((e) => e && e.direction === "out" && String(e.paymentEntryID || "").endsWith("_discountrefund") && e.status === "success");
+  if (handBack) {
+    fill("refundIssuedBy", handBack.processedBy);
+    fill("refundIssuedAt", handBack.processedAt || handBack.settledAt);
   }
   // PayMongo's total fee across the successful online charges (was stored as payments.paymongoFeeTotal).
   const feeRows = rows.filter((e) => e.source === "online" && e.status === "success" && e.transactionFee !== undefined && e.transactionFee !== null);
@@ -404,7 +417,8 @@ const hydratePayment = (payment, entries, opts = {}) => {
 
 /**
  * Penalty: fills paymentMethod / referenceNumber / paidAt from its entries when the
- * penalty no longer stores them. No rows but paidAmount > 0 => it was paid from the deposit.
+ * penalty no longer stores them. No rows but paidAmount > 0 => it was paid from the deposit (its paidAt is the
+ * deposit settlement's settledAt, which the penalty service reads off the payment).
  */
 const hydratePenalty = (penalty, entries, opts = {}) => {
   if (!penalty) return penalty;
@@ -421,7 +435,9 @@ const hydratePenalty = (penalty, entries, opts = {}) => {
     fill("referenceNumber", last.referenceNumber);
     fill("paidAt", last.settledAt);
   } else if (num(penalty.paidAmount) > 0) {
-    fill("paymentMethod", "Deposit");
+    // No money moved: it was paid from the held deposit. Fully covered = "Deposit", only part of it = "DepositPartial"
+    // (derived, so settleBooking no longer has to store the label on the penalty).
+    fill("paymentMethod", num(penalty.paidAmount) >= num(penalty.amount) ? "Deposit" : "DepositPartial");
   }
   return out;
 };

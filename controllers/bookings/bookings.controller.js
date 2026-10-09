@@ -5,8 +5,7 @@ const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
-const { syncPaymentEntries } = require("../../utils/payments/paymentEntries.util");
-const { isPendingStatus } = require("../../utils/payments/paymentStatus.util");
+const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 
 // Look up a car's price-per-day for a given durationType straight from
@@ -729,9 +728,20 @@ const getUserBookings = async (req, res) => {
       )
     );
 
+    // balanceCollected / paidAt live in paymentEntries rows, not on the payment document: read the payments
+    // through them. A display list must never fail on this, so fall back to the bare documents.
+    const hydratedByDocID = {};
+    try {
+      const docs = paymentSnaps.filter((s) => !s.empty).map((s) => ({ id: s.docs[0].id, ...s.docs[0].data() }));
+      const hydrated = await hydratePayments(docs);
+      docs.forEach((d, n) => { hydratedByDocID[d.id] = hydrated[n]; });
+    } catch (hydrateErr) {
+      console.warn("getUserBookings: could not read paymentEntries, using the payment documents:", hydrateErr.message);
+    }
+
     paymentSnaps.forEach((snap, i) => {
       if (!snap.empty) {
-        const p = snap.docs[0].data();
+        const p = hydratedByDocID[snap.docs[0].id] || snap.docs[0].data();
         result[i].payment = {
           paymentID:       p.paymentID        || snap.docs[0].id,
           amount:          p.amount           || 0,
@@ -861,8 +871,8 @@ const cancelBooking = async (req, res) => {
           const p = paymentSnap.docs[0].data();
           const updates = { updatedAt: now };
           // The row's "cancelled" status is derived from these two fields by syncPaymentEntries below.
-          if (isPendingStatus(p.status)) updates.status = "cancelled";
-          if (p.balanceStatus && isPendingStatus(p.balanceStatus)) updates.balanceStatus = "cancelled";
+          if (p.status === "pending") updates.status = "cancelled";
+          if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
           if (Object.keys(updates).length > 1) {
             await paymentSnap.docs[0].ref.update(updates);
             await syncPaymentEntries(paymentSnap.docs[0].id);
