@@ -98,7 +98,14 @@ const isBaseArea = (destination, { destinationCity, destinationProvince } = {}, 
 };
 
 // ── Day count with the 22h/25h billing-block rule ──────────────────────────
-// 22 Hours duration type: each 22-hour block = 1 billing day.
+// 22 Hours duration type: each billing day is a 22-hour rental PLUS a 2-hour
+// buffer, i.e. one 24-hour cycle. Booking.jsx sets the return time to
+// "pickup time - 2 hours" on the chosen end date, so a rental of N calendar
+// days is (24 * N - 2) hours long. Billing therefore counts
+// ceil((hours + 2) / 24), which gives exactly N days:
+//     1 day  = 22h -> 1     2 days = 46h -> 2     3 days = 70h -> 3
+// (The old rule, ceil(hours / 22), billed 46h as 3 days and 70h as 4 days,
+// so the days shown at checkout did not match the dates the customer picked.)
 // 12 Hours / anything else: each 25-hour block = 1 billing day (12-Hour
 // bookings are always auto-calculated to fit inside a single block).
 //
@@ -115,8 +122,9 @@ const calcBillableDays = (startDateTime, endDateTime, durationType) => {
   const diffHrs = (endDT - startDT) / 3600000;
   if (diffHrs <= 0) return { days: 0, diffHrs: 0 };
 
-  const blockHrs = durationType === "22 Hours" ? 22 : 25;
-  const days = Math.max(1, Math.ceil(diffHrs / blockHrs));
+  const days = durationType === "22 Hours"
+    ? Math.max(1, Math.ceil((diffHrs + 2) / 24))
+    : Math.max(1, Math.ceil(diffHrs / 25));
   return { days, diffHrs };
 };
 
