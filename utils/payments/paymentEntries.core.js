@@ -159,10 +159,10 @@ const makeEntriesDb = (db) => {
     const ids = [...new Set((refundRequestIDs || []).filter(Boolean))];
     const map = new Map(ids.map((id) => [id, []]));
     for (const part of chunk(ids)) {
-      const snap = await col().where("refID", "in", part).get();
+      const snap = await col().where("refundReqID", "in", part).get();
       snap.docs.forEach((d) => {
         const row = { id: d.id, ...d.data() };
-        if (row.refCollection === "refundRequests" && map.has(row.refID)) map.get(row.refID).push(row);
+        if (map.has(row.refundReqID)) map.get(row.refundReqID).push(row);
       });
     }
     return map;
@@ -194,10 +194,10 @@ const makeEntriesDb = (db) => {
     const ids = [...new Set((penaltyIDs || []).filter(Boolean))];
     const map = new Map(ids.map((id) => [id, []]));
     for (const part of chunk(ids)) {
-      const snap = await col().where("refID", "in", part).get();
+      const snap = await col().where("penaltyID", "in", part).get();
       snap.docs.forEach((d) => {
         const row = { id: d.id, ...d.data() };
-        if (row.refCollection === "penalties" && map.has(row.refID)) map.get(row.refID).push(row);
+        if (map.has(row.penaltyID)) map.get(row.penaltyID).push(row);
       });
     }
     return map;

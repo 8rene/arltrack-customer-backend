@@ -1,5 +1,5 @@
 const { db } = require("../../config/firebaseConnection/firebase");
-const { derivePaymentStatus } = require("../../utils/pricing");
+const { derivePaymentStatus, computePaymentSplit } = require("../../utils/pricing");
 const { hydratePaymentData } = require("../../utils/payments/paymentEntries.util");
 
 // Shared ownership check — same pattern as cancelBooking in bookings.controller.js.
@@ -77,8 +77,8 @@ const getBookingDetails = async (req, res) => {
     let payment = null;
     if (!paymentSnap.empty) {
       const p = paymentSnap.docs[0].data();
-      // proofUrl / paidAt moved into paymentEntries rows once a payment is confirmed (before that proofUrl is
-      // still on the document). A display field must never fail this page, so fall back to the document.
+      // paidAt moved into paymentEntries rows once a payment is confirmed. A display field must never fail
+      // this page, so fall back to the document.
       let h = {};
       try {
         h = await hydratePaymentData(p, paymentSnap.docs[0].id);
@@ -100,13 +100,11 @@ const getBookingDetails = async (req, res) => {
         securityDeposit:   p.securityDeposit  || 0,
         methodOfPayment:   p.methodOfPayment  || p.paymentMethod || "",
         paymentMethod:     p.paymentMethod    || p.methodOfPayment || "",
-        referenceNumber:   p.referenceNumber  || "",
-        proofUrl:          h.proofUrl         || p.proofUrl || "",
         status:            p.status           || "pending",
         // Two-phase payment fields (see utils/bookings/bookingStatus.util.js)
         // — lets the frontend offer "Complete Payment" for a still-pending
         // deposit OR a still-pending balance, not just the deposit.
-        payNow:            p.payNow           || 0,
+        payNow:            computePaymentSplit(p.amount, p.methodOfPayment, p.securityDeposit).payNow,
         balanceAmount:     p.balanceAmount    || 0,
         balanceStatus:     p.balanceStatus    || "not_applicable",
         currentPhase:      p.currentPhase     || "deposit",

@@ -205,7 +205,8 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
 const computePaymentSplit = (grandTotal, paymentAmount, securityDeposit = 0) => {
   const total = Number(grandTotal) || 0;
   const sec = Math.min(Math.max(0, Number(securityDeposit) || 0), total);
-  const isPartial = String(paymentAmount).toLowerCase() !== "full";
+  // "Full" and "Full Payment" (an older stored label) both mean pay everything now.
+  const isPartial = !String(paymentAmount).toLowerCase().startsWith("full");
   const payNow  = isPartial ? sec + Math.floor((total - sec) * 0.5) : total;
   const balance = Math.max(0, total - payNow);
   return { payNow, balance, methodOfPayment: isPartial ? "Partial" : "Full" };

@@ -288,11 +288,8 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
     const r  = s2.data();
 
     // The parts live in paymentEntries ("out" rows), not on the request. All reads come before any write.
-    const rowsSnap = await t.get(db.collection("paymentEntries").where("refID", "==", r.refundRequestID || reqRef.id));
-    const outRows  = rowsSnap.docs.filter((d) => {
-      const x = d.data();
-      return x.refCollection === "refundRequests" && x.direction === "out";
-    });
+    const rowsSnap = await t.get(db.collection("paymentEntries").where("refundReqID", "==", r.refundRequestID || reqRef.id));
+    const outRows  = rowsSnap.docs.filter((d) => d.data().direction === "out");
     const partRows  = outRows.filter((d) => d.data().source === "online" && d.data().status !== "unrefundable");
     const manualRow = outRows.find((d) => d.data().source === "in_person");
     const target    = partRows.find((d) => d.data().referenceNumber === refundID);
@@ -355,7 +352,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
     logID: `${r.refundRequestID}_refund_${refundID}`,
     bookingID: r.bookingID,
     paymentID: r.paymentID,
-    refundRequestID: r.refundRequestID,
+    refundReqID: r.refundRequestID,
     userID: r.userID || null,
     type: "Refund",
     amount: part.amount || 0,

@@ -1,11 +1,11 @@
-const { db, bucket } = require("../../config/firebaseConnection/firebase");
+const { db } = require("../../config/firebaseConnection/firebase");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require("../../utils/pricing");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
-const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
+const { syncPaymentEntries } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 
 // Look up a car's price-per-day for a given durationType straight from
@@ -28,15 +28,6 @@ const getPricePerDay = async (carID, durationType) => {
 const codingCache = {
   cars:        {},   // { [carID]: plateNumber }
   codingRules: null, // full rules array
-};
-
-// Helper: detect MIME type from base64 magic bytes
-const getMimeType = (base64) => {
-  if (base64.startsWith("/9j/"))   return "image/jpeg";
-  if (base64.startsWith("iVBOR"))  return "image/png";
-  if (base64.startsWith("UklGR"))  return "image/webp";
-  if (base64.startsWith("JVBERi")) return "application/pdf";
-  return "image/jpeg"; // fallback
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -133,7 +124,6 @@ const createBooking = async (req, res) => {
     specialNotes,
     paymentAmount,
     paymentMethod,
-    referenceNumber,
     // NOTE: totalDays / rentalFee / extraFee / driversFee / serviceFee /
     // gatewayFee / grandTotal / methodOfPayment are intentionally
     // NOT read from the request body anymore. Those used to be computed in
@@ -154,8 +144,6 @@ const createBooking = async (req, res) => {
     destinationCity,
     destinationProvince,
     extraDestinations,
-    // screenshot handled separately (base64 or URL)
-    proofBase64,
   } = req.body;
 
   if (!carID) {
@@ -525,21 +513,6 @@ const createBooking = async (req, res) => {
     const paymentRef = db.collection("payments").doc();
     const paymentID  = paymentRef.id;
 
-    // Upload proof of payment to Firebase Storage and save the URL
-    let proofUrl = "";
-    if (proofBase64) {
-      const rawBase64  = proofBase64.includes(",") ? proofBase64.split(",")[1] : proofBase64;
-      const mimeType   = getMimeType(rawBase64);
-      const extension  = mimeType.split("/")[1] || "jpg";
-      const filePath   = `proofs/${paymentID}.${extension}`;
-      const file       = bucket.file(filePath);
-      const buffer     = Buffer.from(rawBase64, "base64");
-
-      await file.save(buffer, { contentType: mimeType });
-      await file.makePublic();
-      proofUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
-    }
-
     await paymentRef.set({
       paymentID,
       bookingID,
@@ -558,15 +531,13 @@ const createBooking = async (req, res) => {
       securityDeposit,
       methodOfPayment: computedMethod,
       paymentMethod:   paymentMethod  || "",
-      referenceNumber: referenceNumber || null,
-      proofUrl,
       status:          "pending",
       // Two-phase payment (see utils/bookings/bookingStatus.util.js):
       // "Partial" pays payNow (50%) now, then the remaining balance
       // separately later, via its own PayMongo checkout, before the
       // booking is promoted to "upcoming". "Full" has no balance phase —
       // balanceStatus stays "not_applicable" and is never touched.
-      payNow,
+      // payNow is NOT stored: it is always computePaymentSplit(amount, methodOfPayment, securityDeposit).payNow.
       balanceAmount: Math.max(0, totalAmount - payNow),
       balanceStatus: computedMethod === "Full" ? "not_applicable" : "not_due",
       currentPhase:  "deposit",
@@ -757,16 +728,6 @@ const getUserBookings = async (req, res) => {
       )
     );
 
-    // proofUrl is one of the fields that moved into paymentEntries rows once a payment is confirmed; before that
-    // it is still on the document, so the document is the fallback. A display field must never fail the list.
-    const proofByPaymentID = new Map();
-    try {
-      const rawPayments = paymentSnaps.filter((s) => !s.empty).map((s) => s.docs[0].data());
-      (await hydratePayments(rawPayments)).forEach((h) => proofByPaymentID.set(h.paymentID, h.proofUrl));
-    } catch (hydrateErr) {
-      console.warn("getUserBookings: could not read paymentEntries, using the payment documents:", hydrateErr.message);
-    }
-
     paymentSnaps.forEach((snap, i) => {
       if (!snap.empty) {
         const p = snap.docs[0].data();
@@ -784,14 +745,12 @@ const getUserBookings = async (req, res) => {
           rentalFee:       p.rentalFee        || 0,
           methodOfPayment: p.methodOfPayment  || p.paymentMethod || "",
           paymentMethod:   p.paymentMethod    || p.methodOfPayment || "",
-          referenceNumber: p.referenceNumber  || "",
-          proofUrl:        proofByPaymentID.get(p.paymentID) || p.proofUrl || "",
           status:          p.status           || "",
           // Two-phase payment fields — see utils/bookings/bookingStatus.util.js.
           // MyBookings.jsx needs these to know whether a "to pay" booking
           // already has its deposit paid (Partial, awaiting balance) so it
           // can show "Pay Balance" instead of "Pay Now" / hide "Cancel".
-          payNow:          p.payNow           || 0,
+          payNow:          computePaymentSplit(p.amount, p.methodOfPayment, p.securityDeposit).payNow,
           // Bookings created before two-phase payments have no balance fields:
           // for a Partial one, infer them so Pay Balance / the balance math work.
           balanceAmount:   p.balanceAmount    || (String(p.methodOfPayment).toLowerCase() === "partial"

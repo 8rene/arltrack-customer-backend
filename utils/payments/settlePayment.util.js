@@ -245,6 +245,7 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
 
   recordTransactionLog({
     logID: `${payment.paymentID}_${phase}`, // one settlement = one row, however many paths report it
+    paymentEntryID: `${payment.paymentID}_${phase}`, // the deposit / balance paymentEntries row this log describes
     bookingID: bID,
     paymentID: payment.paymentID,
     userID: payment.userID || null,

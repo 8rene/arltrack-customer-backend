@@ -3,7 +3,7 @@ const admin  = require("firebase-admin");
 
 // Matches the 'transactionLogs' collection the admin panel already reads
 // (admin-backend/services/transactionLogs/transactionLogs.service.js):
-//   { bookingID, paymentID, refundRequestID, userID, type, amount, status,
+//   { bookingID, paymentID, refundReqID, paymentEntryID, maintenanceID, userID, type, amount, status,
 //     paymentMethod, referenceNumber, description, performedBy, createdAt }
 //
 // Write at the moment money actually moves or a request is finally
@@ -11,7 +11,7 @@ const admin  = require("firebase-admin");
 // "checkout_session.payment.paid" (money received) and
 // "payment.refund.updated" (refund succeeded/failed) handlers.
 
-const VALID_TYPES    = ["Payment", "Refund", "Deposit", "Discount"];
+const VALID_TYPES    = ["Payment", "Refund", "Deposit", "DepositReturn", "Discount", "Expense"];
 const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
 
 // Never throws — a logging failure should never block the webhook from
@@ -20,7 +20,10 @@ const VALID_STATUSES = ["Success", "Failed", "Pending", "Refunded", "Rejected"];
 const recordTransactionLog = async ({
   bookingID,
   paymentID,
-  refundRequestID = null,
+  // Link to the record that caused this entry -- one column per kind, at most one is set.
+  refundReqID = null,     // a refundRequests doc
+  paymentEntryID = null,  // the paymentEntries row that was settled
+  maintenanceID = null,   // a maintenance record (admin-written Expense logs only)
   userID,
   type,
   amount,
@@ -50,7 +53,9 @@ const recordTransactionLog = async ({
       transactionLogsID: ref.id,
       bookingID: bookingID || null,
       paymentID: paymentID || null,
-      refundRequestID,
+      refundReqID,
+      paymentEntryID,
+      maintenanceID,
       userID: userID || null,
       type,
       amount: Number(amount) || 0,

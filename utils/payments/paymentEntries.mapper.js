@@ -8,7 +8,7 @@
 //
 // What lives here:
 //   buildPaymentEntries     legacy payments doc  -> deposit / balance "in" rows
-//   buildLegacyPenaltyEntry legacy penalties doc -> one "legacy_aggregate" row (or a review reason)
+//   buildLegacyPenaltyEntry legacy penalties doc -> one aggregate row (or a review reason)
 //   buildPenaltyPaymentEntry a NEW penalty payment -> row (used by recordShortfallPayment)
 //   mergeEntry              how a re-derived row is applied over an existing one
 //   hydratePayment / hydratePenalty  rows -> the OLD field names, so readers don't change
@@ -84,7 +84,6 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
   const ids = resolvePaymongoIDs(p);
   const payType = payTypeOf(p);
   const amount = num(p.amount);
-  const discount = num(p.discountAmount);
   const arr = Array.isArray(p.paymongoTransactions) ? p.paymongoTransactions : [];
   const arrOf = (phase) => arr.find((t) => t && t.phase === phase) || null;
 
@@ -101,14 +100,12 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
     paymentID,
     bookingID: p.bookingID || null,
     userID: p.userID || null,
-    refID: paymentID,
-    refCollection: "payments",
+    refundReqID: null,
+    penaltyID: null,
     direction: "in",
     phase,
-    parentEntryID: null,
     groupID: null,
-    note: null,
-    migratedFrom: opts.migratedFrom || null,
+    transactionErrorNote: null,
     updatedAt: now,
   });
 
@@ -134,24 +131,18 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
     );
     const status = statusFromLegacy(p.status);
     const m = normalizeMethod(online ? p.paymongoChannel : p.paymentMethod);
-    const flags = [];
-    if (m.unmapped) flags.push(`method_unmapped:${m.unmapped}`);
-    if (online && status === "success" && !ids.deposit) flags.push("missing_payment_id");
-    if (depStatusRaw === "refunded") flags.push("refunded_legacy");
     entries.push({
       ...common("deposit"),
       source: online ? "online" : "in_person",
       method: m.method,
       amount: expectedDeposit,
       status,
-      referenceNumber: online ? (ids.deposit || null) : nullIfSentinel(p.referenceNumber),
+      referenceNumber: online ? (ids.deposit || null) : null,
       sessionID: online ? sessionOf("deposit") : null,
       transactionFee: online ? orNull(p.depositPaymongoFee) : null,
-      proofUrl: nullIfSentinel(p.proofUrl),
       processedBy: online ? null : nullIfSentinel(p.confirmedBy),
       processedAt: online ? null : orNull(p.confirmedAt),
       settledAt: status === "success" ? (orNull(p.paidAt) || orNull(p.confirmedAt) || null) : null,
-      flags,
       createdAt: p.createdAt || now,
     });
   }
@@ -164,10 +155,6 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
     const rec = p.balanceCollectedAmount;
     const recorded = rec !== null && rec !== undefined && Number.isFinite(Number(rec));
     const m = normalizeMethod(p.balanceMethod);
-    const flags = [];
-    if (m.unmapped) flags.push(`method_unmapped:${m.unmapped}`);
-    if (!recorded) flags.push("amount_inferred");
-    if (!recorded && discount > 0) flags.push("discount_review");
     entries.push({
       ...common("balance"),
       source: "in_person",
@@ -177,11 +164,9 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
       referenceNumber: null,
       sessionID: null,
       transactionFee: null,
-      proofUrl: null,
       processedBy: nullIfSentinel(p.balanceCollectedBy),
       processedAt: orNull(p.balanceCollectedAt),
       settledAt: orNull(p.balanceCollectedAt),
-      flags,
       createdAt: p.balanceCollectedAt || p.createdAt || now,
     });
   } else {
@@ -192,10 +177,6 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
       const status = statusFromLegacy(bs);
       const m = normalizeMethod(ids.balance || bs === "pending" ? p.paymongoChannel : null);
       const fromArr = num(arrOf("balance") && arrOf("balance").amount);   // what the checkout really charged
-      const flags = [];
-      if (m.unmapped) flags.push(`method_unmapped:${m.unmapped}`);
-      if (status === "success" && !ids.balance) flags.push("missing_payment_id");
-      if (!fromArr && discount > 0) flags.push("discount_review");
       entries.push({
         ...common("balance"),
         source: "online",
@@ -205,11 +186,9 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
         referenceNumber: ids.balance || null,
         sessionID: sessionOf("balance"),
         transactionFee: orNull(p.balancePaymongoFee),
-        proofUrl: null,
         processedBy: null,
         processedAt: null,
         settledAt: status === "success" ? (orNull(p.balancePaidAt) || null) : null,
-        flags,
         createdAt: p.balancePaidAt || p.updatedAt || now,
       });
     }
@@ -244,21 +223,16 @@ const buildLegacyPenaltyEntry = (pen, docID, payment, opts = {}) => {
   const penaltyID = pen.penaltyID || docID;
   const online = methodKey === "paymongo";
   const m = normalizeMethod(pen.paymentMethod);
-  const flags = ["legacy_aggregate"];
-  if (m.unmapped) flags.push(`method_unmapped:${m.unmapped}`);
-  const st = low(pen.status);
-  if (st && st !== "confirmed") flags.push(`penalty_${st}`);
   return {
     entry: {
       paymentEntryID: `${penaltyID}_legacy`,
       paymentID: pen.paymentID || null,
       bookingID: pen.bookingID || null,
       userID: pen.userID || null,
-      refID: penaltyID,
-      refCollection: "penalties",
+      refundReqID: null,
+      penaltyID,
       direction: "in",
       phase: "penalty",
-      parentEntryID: null,
       source: online ? "online" : "in_person",
       method: m.method,
       amount: paid,
@@ -266,14 +240,11 @@ const buildLegacyPenaltyEntry = (pen, docID, payment, opts = {}) => {
       referenceNumber: nullIfSentinel(pen.referenceNumber),
       sessionID: null,
       transactionFee: null,
-      proofUrl: null,
       processedBy: null,
       processedAt: null,
       settledAt: orNull(pen.paidAt),
       groupID: null,
-      note: null,
-      flags,
-      migratedFrom: opts.migratedFrom || null,
+      transactionErrorNote: null,
       createdAt: pen.paidAt || pen.updatedAt || pen.createdAt || now,
       updatedAt: now,
     },
@@ -285,17 +256,14 @@ const buildPenaltyPaymentEntry = ({ penalty, penaltyID, amount, method, referenc
   const at = now || new Date();
   const m = normalizeMethod(method);
   const online = low(method).replace(/[\s_-]/g, "") === "paymongo";
-  const flags = [];
-  if (m.unmapped) flags.push(`method_unmapped:${m.unmapped}`);
   return {
     paymentID: (penalty && penalty.paymentID) || null,
     bookingID: (penalty && penalty.bookingID) || null,
     userID: (penalty && penalty.userID) || null,
-    refID: penaltyID,
-    refCollection: "penalties",
+    refundReqID: null,
+    penaltyID,
     direction: "in",
     phase: "penalty",
-    parentEntryID: null,
     source: online ? "online" : "in_person",
     method: m.method,
     amount: num(amount),
@@ -303,14 +271,11 @@ const buildPenaltyPaymentEntry = ({ penalty, penaltyID, amount, method, referenc
     referenceNumber: nullIfSentinel(referenceNumber),
     sessionID: null,
     transactionFee: null,
-    proofUrl: null,
     processedBy: nullIfSentinel(processedBy),
     processedAt: at,
     settledAt: at,
     groupID: groupID || null,
-    note: null,
-    flags,
-    migratedFrom: null,
+    transactionErrorNote: null,
     createdAt: at,
     updatedAt: at,
   };
@@ -321,7 +286,6 @@ const buildPenaltyPaymentEntry = ({ penalty, penaltyID, amount, method, referenc
  * Returns what to write: the whole row when it doesn't exist yet, a patch when it
  * does, or null when nothing should change.
  *  - createdAt / paymentEntryID of an existing row are never touched
- *  - migratedFrom is only ever set by the migration, never cleared by a sync
  *  - a "success" row is never downgraded by a late pending/failed/cancelled event
  *    (same rule the old upsertTransaction had) unless opts.force (a deliberate manual change)
  */
@@ -331,7 +295,6 @@ const mergeEntry = (existing, built, opts = {}) => {
   const next = { ...built };
   delete next.createdAt;
   delete next.paymentEntryID;
-  if (!next.migratedFrom) delete next.migratedFrom;
   return next;
 };
 
@@ -377,7 +340,7 @@ const entriesToLegacyTransactions = (rows) =>
  */
 const MOVED_PAYMENT_FIELDS = [
   "depositPaymongoPaymentID", "balancePaymongoPaymentID", "paymongoPaymentID",
-  "depositPaymongoFee", "balancePaymongoFee", "paymongoChannel", "proofUrl", "lastSettledVia",
+  "depositPaymongoFee", "balancePaymongoFee", "paymongoChannel", "lastSettledVia",
   "paidAt", "balancePaidAt", "confirmedBy", "confirmedAt",
   "balanceMethod", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
 ];
@@ -410,9 +373,7 @@ const hydratePayment = (payment, entries, opts = {}) => {
     } else {
       fill("confirmedBy", dep.processedBy);
       fill("confirmedAt", dep.processedAt);
-      fill("referenceNumber", dep.referenceNumber);
     }
-    fill("proofUrl", dep.proofUrl);
     if (dep.status === "success") fill("paidAt", dep.settledAt);
   }
   if (bal) {
@@ -473,28 +434,25 @@ const hydratePenalty = (penalty, entries, opts = {}) => {
  *   <refundRequestID>_manual           staff handed money back in person (cash taken in person only)
  *   <refundRequestID>_unrefundable<n>  paid online but NO PayMongo payment id: nothing to refund -- NOT a hand-back
  *
- * parentEntryID points at the "in" row being refunded. A pending / rejected request has no parts yet, so
- * it produces no rows.
+ * A refund row is tied to what it refunds by paymentID + phase (no separate parent link). A pending / rejected
+ * request has no parts yet, so it produces no rows.
  */
 const buildRefundEntries = (r, docID, opts = {}) => {
   r = r || {};
   const now = opts.now || new Date();
   const refundRequestID = r.refundRequestID || docID;
   const paymentID = r.paymentID || null;
-  const parentOf = (phase) => (paymentID ? entryIDFor(paymentID, phase) : null);
   const base = (suffix, extra) => ({
     paymentEntryID: `${refundRequestID}_${suffix}`,
     paymentID,
     bookingID: r.bookingID || null,
     userID: r.userID || null,
-    refID: refundRequestID,
-    refCollection: "refundRequests",
+    refundReqID: refundRequestID,
+    penaltyID: null,
     direction: "out",
     sessionID: null,
     transactionFee: null,
-    proofUrl: null,
     groupID: null,
-    migratedFrom: opts.migratedFrom || null,
     createdAt: r.processedAt || r.createdAt || now,
     updatedAt: now,
     ...extra,
@@ -515,13 +473,12 @@ const buildRefundEntries = (r, docID, opts = {}) => {
     const phase = p.kind === "balance" ? "balance" : "deposit";
     const status = partStatus(p.status);
     entries.push(base(`part${i + 1}`, {
-      phase, parentEntryID: parentOf(phase), source: "online", method: null,
+      phase, source: "online", method: null,
       amount: num(p.amount), status,
       referenceNumber: nullIfSentinel(p.paymongoRefundID),
       processedBy: nullIfSentinel(r.processedBy), processedAt: orNull(r.processedAt),
       settledAt: status === "success" ? (orNull(p.settledAt) || orNull(r.updatedAt)) : null,
-      note: p.error ? String(p.error) : null,
-      flags: [],
+      transactionErrorNote: p.error ? String(p.error) : null,
     }));
   });
 
@@ -532,13 +489,12 @@ const buildRefundEntries = (r, docID, opts = {}) => {
     const issued = !!m.issued;
     entries.push(base("manual", {
       phase: opts.payment && opts.payment.balanceCollected ? "balance" : "deposit",
-      parentEntryID: null, source: "in_person", method: mm.method,
+      source: "in_person", method: mm.method,
       amount: num(m.amount), status: issued ? "success" : "pending",
       referenceNumber: null,
       processedBy: nullIfSentinel(m.issuedBy), processedAt: orNull(m.issuedAt),
       settledAt: issued ? orNull(m.issuedAt) : null,
-      note: null,
-      flags: mm.unmapped ? [`method_unmapped:${mm.unmapped}`] : [],
+      transactionErrorNote: null,
     }));
   }
 
@@ -546,10 +502,10 @@ const buildRefundEntries = (r, docID, opts = {}) => {
   (Array.isArray(r.unrefundable) ? r.unrefundable : []).forEach((u, i) => {
     const phase = u.kind === "balance" ? "balance" : "deposit";
     entries.push(base(`unrefundable${i + 1}`, {
-      phase, parentEntryID: parentOf(phase), source: "online", method: null,
+      phase, source: "online", method: null,
       amount: num(u.amount), status: "unrefundable",
       referenceNumber: null, processedBy: null, processedAt: null, settledAt: null,
-      note: PAYMENT_ID_MISSING_NOTE, flags: ["payment_id_missing"],
+      transactionErrorNote: PAYMENT_ID_MISSING_NOTE,
     }));
   });
 
@@ -566,7 +522,6 @@ const mergeRefundEntry = (existing, built, opts = {}) => {
   const next = { ...built };
   delete next.createdAt;
   delete next.paymentEntryID;
-  if (!next.migratedFrom) delete next.migratedFrom;
   next.settledAt = existing.settledAt || (built.status === "success" ? (built.settledAt || stamp) : null);
   return next;
 };
@@ -591,7 +546,7 @@ const hydrateRefundRequest = (request, entries, opts = {}) => {
     out.parts = online.map((e) => ({
       kind: e.phase === "balance" ? "balance" : "deposit", paymongoPaymentID: null, amount: e.amount,
       paymongoRefundID: e.referenceNumber, status: e.status === "success" ? "succeeded" : e.status === "failed" ? "failed" : "pending",
-      ...(e.note ? { error: e.note } : {}),
+      ...(e.transactionErrorNote ? { error: e.transactionErrorNote } : {}),
     }));
   }
   if (online.length) out.paymongoRefundIDs = online.map((e) => e.referenceNumber).filter(Boolean);
