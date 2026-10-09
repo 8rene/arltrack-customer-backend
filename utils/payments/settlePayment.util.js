@@ -30,7 +30,7 @@ const { buildAndSendReceipt } = require("../receipt/receipt.util");
 const { computeRefundPlan } = require("./paymentBreakdown.util");
 const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util");
 const { buildFeePatch } = require("./paymongoFee.util");
-const { syncPaymentEntries, hydratePaymentData } = require("./paymentEntries.util");
+const { syncPaymentEntries, hydratePaymentData, getEntriesForPaymentIDs } = require("./paymentEntries.util");
 
 const num   = (v) => Number(v) || 0;
 const lower = (v) => String(v || "").toLowerCase();
@@ -49,13 +49,12 @@ const chargedAmountFor = (payment, phase) =>
     : num(computePaymentSplit(payment.amount, payment.methodOfPayment, payment.securityDeposit).payNow);
 
 // What the checkout for this phase ACTUALLY charged. The checkout records it on the phase's paymentEntries
-// row when it is created (createPaymentLink); `payment` must be a row-hydrated view (hydratePaymentData),
-// whose paymongoTransactions[] is rebuilt from those rows. The stored balanceAmount is only the booking-time
+// row when it is created (createPaymentLink), so it is read straight from that row: `entryRows` are the
+// payment's paymentEntries rows (getEntriesForPaymentIDs). The stored balanceAmount is only the booking-time
 // snapshot, which is higher than the real charge whenever a staff discount was applied first.
-const entryAmountFor = (payment, phase) => {
+const entryAmountFor = (entryRows, payment, phase) => {
   const ph = phase === "balance" ? "balance" : "deposit";
-  const list = Array.isArray(payment && payment.paymongoTransactions) ? payment.paymongoTransactions : [];
-  const e = list.find((t) => t && t.phase === ph);
+  const e = (Array.isArray(entryRows) ? entryRows : []).find((r) => r && r.direction !== "out" && r.phase === ph);
   const a = e ? num(e.amount) : 0;
   return a > 0 ? a : chargedAmountFor(payment, phase);
 };
@@ -149,9 +148,16 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
   // transaction; the transaction itself only decides on the document's own fields (status, balanceStatus ...).
   const pre  = await paymentRef.get();
   let rows = null;
+  let entryRows = [];   // this payment's raw paymentEntries rows (for the amount the checkout really charged)
   if (pre.exists) {
     try {
-      rows = await hydratePaymentData(pre.data(), pre.id);
+      const key = pre.data().paymentID || pre.id;
+      const [hydrated, byPayment] = await Promise.all([
+        hydratePaymentData(pre.data(), pre.id),
+        getEntriesForPaymentIDs([key]),
+      ]);
+      rows = hydrated;
+      entryRows = byPayment.get(key) || [];
     } catch (err) {
       // Reading the rows must never block a real payment from settling: fall back to what the document has.
       console.warn("[settle] could not read paymentEntries, using the payment document as-is:", err.message);
@@ -214,7 +220,7 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
 
   const payment = tx.payment;
   const bID     = payment.bookingID || null;
-  const charged = entryAmountFor(payment, phase);
+  const charged = entryAmountFor(entryRows, payment, phase);
 
   if (!paymongoPaymentID) {
     console.warn(`[settle] ${phase} payment for ${bID} had no PayMongo payment id — a refund of it will need a manual lookup.`);

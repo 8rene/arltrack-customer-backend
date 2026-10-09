@@ -5,7 +5,6 @@ const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
-const { upsertTransaction } = require("../../utils/payments/paymentTransactions.util");
 const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 
@@ -607,8 +606,8 @@ const createBooking = async (req, res) => {
       balanceAmount: Math.max(0, totalAmount - payNow),
       balanceStatus: computedMethod === "Full" ? "not_applicable" : "not_due",
       currentPhase:  "deposit",
-      // One entry per PayMongo / in-person charge, added as each one happens.
-      paymongoTransactions: [],
+      // No paymongoTransactions array: every charge is a row in paymentEntries,
+      // written by syncPaymentEntries() as each one happens.
       createdAt:       now,
       updatedAt:       now,
     });
@@ -934,22 +933,17 @@ const cancelBooking = async (req, res) => {
     // "pending" forever (and can't still be paid via a stale PayMongo
     // checkout link). Never touches an already-paid deposit OR balance;
     // refunding those goes through the separate requestRefund flow instead.
+    // The deposit / balance rows in paymentEntries take their status from
+    // payments.status / payments.balanceStatus, so syncPaymentEntries() below
+    // is all that is needed to mark the pending rows cancelled.
     if (booking.status === BOOKING_STATUS.TO_PAY) {
       try {
         const paymentSnap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
         if (!paymentSnap.empty) {
           const p = paymentSnap.docs[0].data();
           const updates = { updatedAt: now };
-          let txns = p.paymongoTransactions;
-          if (p.status === "pending") {
-            updates.status = "cancelled";
-            txns = upsertTransaction({ paymongoTransactions: txns }, "deposit", { status: "cancelled" });
-          }
-          if (p.balanceStatus === "pending") {
-            updates.balanceStatus = "cancelled";
-            txns = upsertTransaction({ paymongoTransactions: txns }, "balance", { status: "cancelled" });
-          }
-          if (txns !== p.paymongoTransactions) updates.paymongoTransactions = txns;
+          if (p.status === "pending") updates.status = "cancelled";
+          if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
           if (Object.keys(updates).length > 1) {
             await paymentSnap.docs[0].ref.update(updates);
             await syncPaymentEntries(paymentSnap.docs[0].id);
