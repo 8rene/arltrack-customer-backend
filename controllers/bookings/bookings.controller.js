@@ -1,11 +1,11 @@
-const { db } = require("../../config/firebaseConnection/firebase");
+const { db, bucket } = require("../../config/firebaseConnection/firebase");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require("../../utils/pricing");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
-const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
+const { syncPaymentEntries } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 
 // Look up a car's price-per-day for a given durationType straight from
@@ -26,8 +26,66 @@ const getPricePerDay = async (carID, durationType) => {
 // cars: keyed by carID (plateNumber almost never changes)
 // codingRules: full collection, rarely updated
 const codingCache = {
-  cars:        {},   // { [carID]: plateNumber }
+  cars:        {},   // { [carID]: { plate, at } }
   codingRules: null, // full rules array
+  rulesFetchedAt: 0, // ms timestamp — rules/plates are re-read after CODING_CACHE_TTL_MS
+};
+// Admin edits to coding rules or a car's plate show up within this time (no server restart needed).
+const CODING_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// Number coding is a Philippine (Asia/Manila, UTC+8, no DST) rule. The browser sends
+// dates as UTC ISO strings, so reading getDay()/getHours() on the server gives the
+// SERVER's local time — on a UTC host a Monday 6:00 AM Manila pickup is read as Sunday
+// 10:00 PM, the wrong weekday, so the rule silently never matches. Always read the
+// weekday / minutes / date in Manila time, whatever timezone the server runs in.
+const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+const toManila = (d) => {
+  const m = new Date(d.getTime() + MANILA_OFFSET_MS);
+  return {
+    dow:  m.getUTCDay(),                              // 0=Sun … 6=Sat
+    mins: m.getUTCHours() * 60 + m.getUTCMinutes(),   // minutes from Manila midnight
+    day:  m.toISOString().slice(0, 10),               // "YYYY-MM-DD" in Manila
+  };
+};
+const manilaDayRange = (day) => ({
+  start: new Date(`${day}T00:00:00.000+08:00`),
+  end:   new Date(`${day}T23:59:59.999+08:00`),
+});
+
+// City matching. A map pin returns the OpenStreetMap name ("City of Manila"), while
+// the admin's rule says "Manila" — an exact string compare silently skipped the rule.
+// "base" drops "City of"; "core" also drops the word "city" ("Quezon City" -> "quezon").
+const placeBase = (v) => String(v || "").toLowerCase().replace(/\bcity of\b/g, " ").replace(/[^a-z0-9ñ ]+/g, " ").replace(/\s+/g, " ").trim();
+const placeCore = (v) => placeBase(v).replace(/\bcity\b/g, " ").replace(/\s+/g, " ").trim();
+const cityMatchesRule = (ruleCity, destinationCity, destination) => {
+  const ruleBase = placeBase(ruleCity);
+  if (!ruleBase) return true;                       // rule applies to every city
+  const ruleCore = placeCore(ruleCity);
+  const cityCore = placeCore(destinationCity);
+  if (cityCore && ruleCore && (cityCore === ruleCore || ruleCore.includes(cityCore) || cityCore.includes(ruleCore))) return true;
+  // Also accept the free-text address, so a typed destination still matches
+  // when the pin's city name is missing or spelled differently.
+  const destBase = placeBase(destination);
+  return !!destBase && destBase.includes(ruleBase);
+};
+
+const getCodingRules = async () => {
+  const stale = Date.now() - codingCache.rulesFetchedAt > CODING_CACHE_TTL_MS;
+  if (!codingCache.codingRules || stale) {
+    const rulesSnap = await db.collection("codingRules").get();
+    codingCache.codingRules = rulesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    codingCache.rulesFetchedAt = Date.now();
+  }
+  return codingCache.codingRules;
+};
+
+// Helper: detect MIME type from base64 magic bytes
+const getMimeType = (base64) => {
+  if (base64.startsWith("/9j/"))   return "image/jpeg";
+  if (base64.startsWith("iVBOR"))  return "image/png";
+  if (base64.startsWith("UklGR"))  return "image/webp";
+  if (base64.startsWith("JVBERi")) return "application/pdf";
+  return "image/jpeg"; // fallback
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +182,7 @@ const createBooking = async (req, res) => {
     specialNotes,
     paymentAmount,
     paymentMethod,
+    referenceNumber,
     // NOTE: totalDays / rentalFee / extraFee / driversFee / serviceFee /
     // gatewayFee / grandTotal / methodOfPayment are intentionally
     // NOT read from the request body anymore. Those used to be computed in
@@ -144,6 +203,8 @@ const createBooking = async (req, res) => {
     destinationCity,
     destinationProvince,
     extraDestinations,
+    // screenshot handled separately (base64 or URL)
+    proofBase64,
   } = req.body;
 
   if (!carID) {
@@ -237,12 +298,12 @@ const createBooking = async (req, res) => {
         const lastDigit = parseInt(plateNumber[plateNumber.length - 1], 10);
         if (isNaN(lastDigit)) return null;
 
-        const dayOfWeek = startDateTime.getDay();
+        const _startPH  = toManila(startDateTime);
+        const dayOfWeek = _startPH.dow;
 
         // Holiday check — if the start date is a public holiday, coding is suspended
         // holidayDate is stored as a Firestore Timestamp, so we query by day range
-        const _hDayStart = new Date(startDateTime); _hDayStart.setHours(0, 0, 0, 0);
-        const _hDayEnd   = new Date(startDateTime); _hDayEnd.setHours(23, 59, 59, 999);
+        const { start: _hDayStart, end: _hDayEnd } = manilaDayRange(_startPH.day);
         const holidaySnap = await db.collection("holidays")
           .where("holidayDate", ">=", _hDayStart)
           .where("holidayDate", "<=", _hDayEnd)
@@ -253,15 +314,14 @@ const createBooking = async (req, res) => {
         }
 
         // Booking window in minutes-from-midnight (start of booking day)
-        const bookingStartMins = startDateTime.getHours() * 60 + startDateTime.getMinutes();
+        const bookingStartMins = _startPH.mins;
         // If end is on a later calendar day, treat end-of-day as 23:59
         let bookingEndMins;
-        const startDay = startDateTime.toISOString().split("T")[0];
-        const endDay   = endDateTime.toISOString().split("T")[0];
-        if (endDay > startDay) {
+        const _endPH = toManila(endDateTime);
+        if (_endPH.day > _startPH.day) {
           bookingEndMins = 23 * 60 + 59;
         } else {
-          bookingEndMins = endDateTime.getHours() * 60 + endDateTime.getMinutes();
+          bookingEndMins = _endPH.mins;
         }
 
         const parseTime = (t) => {
@@ -276,28 +336,16 @@ const createBooking = async (req, res) => {
         };
 
         // Use shared cache — same rules array as checkCodingRule endpoint
-        if (!codingCache.codingRules) {
-          const rulesSnap = await db.collection("codingRules").get();
-          codingCache.codingRules = rulesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        }
-        for (const rule of codingCache.codingRules) {
+        const _codingRules = await getCodingRules();
+        for (const rule of _codingRules) {
 
           // Day-of-week match (JS: 0=Sun,1=Mon,...6=Sat)
           const ruleDayOfWeek = Number(rule.dayOfWeek);
           if (isNaN(ruleDayOfWeek) || ruleDayOfWeek !== dayOfWeek) continue;
 
-          // City match — prefer exact match on the structured city (from the
-          // map pin) over the fuzzy substring search on the free-text address.
+          // City match — same tolerant matcher as the check-coding endpoint.
           if (rule.city && rule.city.trim() !== "") {
-            const ruleCity = rule.city.toLowerCase().trim();
-            let cityMatches;
-            if (destinationCity && destinationCity.trim() !== "") {
-              cityMatches = destinationCity.toLowerCase().trim() === ruleCity;
-            } else {
-              const dest = (destination || "").toLowerCase();
-              cityMatches = dest.includes(ruleCity);
-            }
-            if (!cityMatches) continue;
+            if (!cityMatchesRule(rule.city, destinationCity, destination)) continue;
           }
 
           // Overlap check
@@ -513,6 +561,21 @@ const createBooking = async (req, res) => {
     const paymentRef = db.collection("payments").doc();
     const paymentID  = paymentRef.id;
 
+    // Upload proof of payment to Firebase Storage and save the URL
+    let proofUrl = "";
+    if (proofBase64) {
+      const rawBase64  = proofBase64.includes(",") ? proofBase64.split(",")[1] : proofBase64;
+      const mimeType   = getMimeType(rawBase64);
+      const extension  = mimeType.split("/")[1] || "jpg";
+      const filePath   = `proofs/${paymentID}.${extension}`;
+      const file       = bucket.file(filePath);
+      const buffer     = Buffer.from(rawBase64, "base64");
+
+      await file.save(buffer, { contentType: mimeType });
+      await file.makePublic();
+      proofUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+    }
+
     await paymentRef.set({
       paymentID,
       bookingID,
@@ -531,16 +594,20 @@ const createBooking = async (req, res) => {
       securityDeposit,
       methodOfPayment: computedMethod,
       paymentMethod:   paymentMethod  || "",
+      referenceNumber: referenceNumber || null,
+      proofUrl,
       status:          "pending",
       // Two-phase payment (see utils/bookings/bookingStatus.util.js):
       // "Partial" pays payNow (50%) now, then the remaining balance
       // separately later, via its own PayMongo checkout, before the
       // booking is promoted to "upcoming". "Full" has no balance phase —
       // balanceStatus stays "not_applicable" and is never touched.
-      // payNow is NOT stored: it is always computePaymentSplit(amount, methodOfPayment, securityDeposit).payNow.
+      payNow,
       balanceAmount: Math.max(0, totalAmount - payNow),
       balanceStatus: computedMethod === "Full" ? "not_applicable" : "not_due",
       currentPhase:  "deposit",
+      // One entry per PayMongo / in-person charge, added as each one happens.
+      paymongoTransactions: [],
       createdAt:       now,
       updatedAt:       now,
     });
@@ -756,12 +823,14 @@ const getUserBookings = async (req, res) => {
           rentalFee:       p.rentalFee        || 0,
           methodOfPayment: p.methodOfPayment  || p.paymentMethod || "",
           paymentMethod:   p.paymentMethod    || p.methodOfPayment || "",
+          referenceNumber: p.referenceNumber  || "",
+          proofUrl:        p.proofUrl         || "",
           status:          p.status           || "",
           // Two-phase payment fields — see utils/bookings/bookingStatus.util.js.
           // MyBookings.jsx needs these to know whether a "to pay" booking
           // already has its deposit paid (Partial, awaiting balance) so it
           // can show "Pay Balance" instead of "Pay Now" / hide "Cancel".
-          payNow:          computePaymentSplit(p.amount, p.methodOfPayment, p.securityDeposit).payNow,
+          payNow:          p.payNow           || 0,
           // Bookings created before two-phase payments have no balance fields:
           // for a Partial one, infer them so Pay Balance / the balance math work.
           balanceAmount:   p.balanceAmount    || (String(p.methodOfPayment).toLowerCase() === "partial"
@@ -870,9 +939,16 @@ const cancelBooking = async (req, res) => {
         if (!paymentSnap.empty) {
           const p = paymentSnap.docs[0].data();
           const updates = { updatedAt: now };
-          // The row's "cancelled" status is derived from these two fields by syncPaymentEntries below.
-          if (p.status === "pending") updates.status = "cancelled";
-          if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
+          let txns = p.paymongoTransactions;
+          if (p.status === "pending") {
+            updates.status = "cancelled";
+            txns = upsertTransaction({ paymongoTransactions: txns }, "deposit", { status: "cancelled" });
+          }
+          if (p.balanceStatus === "pending") {
+            updates.balanceStatus = "cancelled";
+            txns = upsertTransaction({ paymongoTransactions: txns }, "balance", { status: "cancelled" });
+          }
+          if (txns !== p.paymongoTransactions) updates.paymongoTransactions = txns;
           if (Object.keys(updates).length > 1) {
             await paymentSnap.docs[0].ref.update(updates);
             await syncPaymentEntries(paymentSnap.docs[0].id);
@@ -1037,12 +1113,13 @@ const checkCodingRule = async (req, res) => {
 
   try {
     // 1. Get the car's plate number (cached by carID)
-    let plateNumber = codingCache.cars[carID];
+    const _cachedCar = codingCache.cars[carID];
+    let plateNumber = _cachedCar && Date.now() - _cachedCar.at < CODING_CACHE_TTL_MS ? _cachedCar.plate : null;
     if (!plateNumber) {
       const carDoc = await db.collection("cars").doc(carID).get();
       if (!carDoc.exists) return res.status(404).json({ message: "Car not found." });
       plateNumber = (carDoc.data().plateNumber || "").trim().toUpperCase();
-      if (plateNumber) codingCache.cars[carID] = plateNumber;
+      if (plateNumber) codingCache.cars[carID] = { plate: plateNumber, at: Date.now() };
     }
 
     if (!plateNumber) {
@@ -1057,22 +1134,24 @@ const checkCodingRule = async (req, res) => {
 
     // 2. Parse the booking start date/time
     const bookingStart = new Date(startDateTime);
-    const dayOfWeek    = bookingStart.getDay(); // 0=Sun … 6=Sat
+    if (isNaN(bookingStart.getTime())) {
+      return res.status(400).json({ message: "startDateTime is not a valid date." });
+    }
+    const startPH      = toManila(bookingStart);
+    const dayOfWeek    = startPH.dow; // 0=Sun … 6=Sat, in Manila time
 
     // Booking start & end in minutes-from-midnight (same calendar day for comparison)
-    const bookingStartMins = bookingStart.getHours() * 60 + bookingStart.getMinutes();
+    const bookingStartMins = startPH.mins;
 
     // If endDateTime provided, compute end minutes; if it spans past midnight cap at 1439 (23:59)
     let bookingEndMins;
     if (endDateTime) {
-      const bookingEnd = new Date(endDateTime);
+      const endPH = toManila(new Date(endDateTime));
       // If the end is on a later calendar day, treat end as end-of-day (23:59) for overlap check
-      const startDay = bookingStart.toISOString().split("T")[0];
-      const endDay   = bookingEnd.toISOString().split("T")[0];
-      if (endDay > startDay) {
+      if (endPH.day > startPH.day) {
         bookingEndMins = 23 * 60 + 59; // booking goes past midnight → covers rest of day
       } else {
-        bookingEndMins = bookingEnd.getHours() * 60 + bookingEnd.getMinutes();
+        bookingEndMins = endPH.mins;
       }
     } else {
       // No end time provided — treat the whole day as blocked
@@ -1082,8 +1161,7 @@ const checkCodingRule = async (req, res) => {
     // 3. Holiday check — if the booking's start date is a public holiday,
     //    coding rules are suspended for that day and booking is always allowed.
     // holidayDate is stored as a Firestore Timestamp, so query by day range.
-    const hDayStart = new Date(bookingStart); hDayStart.setHours(0, 0, 0, 0);
-    const hDayEnd   = new Date(bookingStart); hDayEnd.setHours(23, 59, 59, 999);
+    const { start: hDayStart, end: hDayEnd } = manilaDayRange(startPH.day);
     const holidaySnap = await db.collection("holidays")
       .where("holidayDate", ">=", hDayStart)
       .where("holidayDate", "<=", hDayEnd)
@@ -1099,12 +1177,9 @@ const checkCodingRule = async (req, res) => {
       });
     }
 
-    // 4. Fetch all codingRules (cached — rules rarely change)
-    if (!codingCache.codingRules) {
-      const rulesSnap = await db.collection("codingRules").get();
-      codingCache.codingRules = rulesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    }
-    if (!codingCache.codingRules.length) return res.status(200).json({ blocked: false });
+    // 4. Fetch all codingRules (cached for a few minutes so admin edits show up without a restart)
+    const codingRules = await getCodingRules();
+    if (!codingRules.length) return res.status(200).json({ blocked: false });
 
     // Helper: parse "7:00 AM" → minutes from midnight
     const parseTime = (timeStr) => {
@@ -1124,11 +1199,11 @@ const checkCodingRule = async (req, res) => {
       console.log("[checkCodingRule] plateNumber:", plateNumber, "lastDigit:", lastDigit);
       console.log("[checkCodingRule] dayOfWeek (JS 0=Sun):", dayOfWeek, "bookingStartMins:", bookingStartMins, "bookingEndMins:", bookingEndMins);
       console.log("[checkCodingRule] destination:", destination);
-      console.log("[checkCodingRule] total rules to check:", codingCache.codingRules.length);
+      console.log("[checkCodingRule] total rules to check:", codingRules.length);
     }
 
     // 4. Check each rule
-    for (const rule of codingCache.codingRules) {
+    for (const rule of codingRules) {
       const ruleDoc = { id: rule.id };
 
       if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] rule:", JSON.stringify({
@@ -1149,21 +1224,11 @@ const checkCodingRule = async (req, res) => {
         continue;
       }
 
-      // b. City check — prefer an exact match against the structured city
-      // (from the map pin) over a fuzzy substring search on the free-text
-      // address. Falls back to the old behavior when no structured city
-      // was sent (a typed address with no pin used).
+      // b. City check — tolerant match (see cityMatchesRule): the pin's city name
+      // ("City of Manila") and the free-text address are both considered.
       if (rule.city && rule.city.trim() !== "") {
-        const ruleCity = rule.city.toLowerCase().trim();
-        let cityMatches;
-        if (destinationCity && destinationCity.trim() !== "") {
-          cityMatches = destinationCity.toLowerCase().trim() === ruleCity;
-        } else {
-          const dest = (destination || "").toLowerCase();
-          cityMatches = dest.includes(ruleCity);
-        }
-        if (!cityMatches) {
-          if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] → SKIP: city mismatch (rule city:", ruleCity, "dest:", destinationCity || destination, ")");
+        if (!cityMatchesRule(rule.city, destinationCity, destination)) {
+          if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] → SKIP: city mismatch (rule city:", rule.city, "dest:", destinationCity || destination, ")");
           continue;
         }
       }
