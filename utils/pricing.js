@@ -178,7 +178,7 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   // to slip through even with days === 0 and show a phantom price before
   // the customer had picked any dates.
   if (days === 0) {
-    return { days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, gatewayFeeBase: 0, serviceFeeRate: pct(settings.serviceFeePercent), gatewayFeeRate: pct(settings.gatewayFeePercent), securityDeposit: 0, grandTotal: 0 };
+    return { driversFeeBaseArea: Number(settings.driversFeeBaseArea) || 0, driversFeeOutsideArea: Number(settings.driversFeeOutsideArea) || 0, days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, gatewayFeeBase: 0, serviceFeeRate: pct(settings.serviceFeePercent), gatewayFeeRate: pct(settings.gatewayFeePercent), securityDeposit: 0, grandTotal: 0 };
   }
 
   const rentalFee = days * (Number(pricePerDay) || 0);
@@ -200,6 +200,10 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
 
   return {
     days, diffHrs, rentalFee, extraFee, driversFee,
+    // Both rates are always returned (even before dates/destination are picked)
+    // so the booking page can show what "With Driver" costs up front.
+    driversFeeBaseArea:    Number(settings.driversFeeBaseArea)    || 0,
+    driversFeeOutsideArea: Number(settings.driversFeeOutsideArea) || 0,
     serviceFee, gatewayFee,
     gatewayFeeBase, serviceFeeRate, gatewayFeeRate,
     securityDeposit, grandTotal,
