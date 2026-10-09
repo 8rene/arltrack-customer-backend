@@ -31,6 +31,7 @@ const { computeRefundPlan } = require("./paymentBreakdown.util");
 const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util");
 const { buildFeePatch } = require("./paymongoFee.util");
 const { syncPaymentEntries, hydratePaymentData } = require("./paymentEntries.util");
+const { isPaidStatus } = require("./paymentStatus.util");
 
 const num   = (v) => Number(v) || 0;
 const lower = (v) => String(v || "").toLowerCase();
@@ -39,8 +40,8 @@ const phaseOf = (payment) => (payment && payment.currentPhase === "balance" ? "b
 
 const isPhasePaid = (payment, phase) =>
   phase === "balance"
-    ? lower(payment.balanceStatus) === "paid"
-    : ["paid", "approved"].includes(lower(payment.status));
+    ? isPaidStatus(payment.balanceStatus)
+    : isPaidStatus(payment.status);
 
 // What THIS phase charged (not the grand total).
 const chargedAmountFor = (payment, phase) =>
@@ -134,8 +135,9 @@ const openRefundForLatePayment = async ({ payment, phase, charged }) => {
  * Marks ONE phase of a payment as paid and runs everything that follows.
  *
  * `charge` (optional) is PayMongo's own fee for the payment — see
- * paymongoFee.util.js. It is saved on the payment per phase, plus a running
- * paymongoFeeTotal. It is also filled in when the phase was ALREADY
+ * paymongoFee.util.js. It is saved on the phase's paymentEntries row (the
+ * payment document carries no fees; paymongoFeeTotal is summed from the rows
+ * when read). It is also filled in when the phase was ALREADY
  * settled by a path that didn't have it, and never overwrites a saved fee.
  *
  * Returns { settled, alreadyPaid, bookingStatus, phase }.
@@ -164,13 +166,10 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
     const p = snap.data();
     const view = { ...rows, ...p };                       // fresh document + row-derived moved fields
     const feePatch = buildFeePatch(view, phase, charge);  // { <phase>PaymongoFee, paymongoFeeTotal } or {}
-    const { paymongoFeeTotal, ...feeFields } = feePatch;  // the fee goes to the row, the running total stays on the document
+    const { paymongoFeeTotal: _derivedTotal, ...feeFields } = feePatch;  // the fee goes to the row; the total is summed from the rows when read, never stored
     const idField = phase === "balance" ? "balancePaymongoPaymentID" : "depositPaymongoPaymentID";
     if (isPhasePaid(p, phase)) {
-      // Already settled by another path — just fill in PayMongo's fee if it was missing.
-      if (Object.keys(feePatch).length) {
-        t.update(paymentRef, { paymongoFeeTotal });
-      }
+      // Already settled by another path — a missing fee / payment id only goes to the row (via syncPaymentEntries below).
       return {
         state: "already",
         fields: { ...feeFields, ...(paymongoPaymentID ? { [idField]: paymongoPaymentID } : {}) },
@@ -182,7 +181,6 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
     const payload = phase === "balance"
       ? { balanceStatus: "paid", updatedAt: now }
       : { status: "paid", updatedAt: now };
-    if (paymongoFeeTotal !== undefined) payload.paymongoFeeTotal = paymongoFeeTotal;
     // Rows: handed to syncPaymentEntries below (laid over the document before the rows are derived), so the
     // paymentEntries row is written directly with them and the payment document never carries them.
     const fields = {

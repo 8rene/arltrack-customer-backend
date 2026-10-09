@@ -340,7 +340,7 @@ const entriesToLegacyTransactions = (rows) =>
  */
 const MOVED_PAYMENT_FIELDS = [
   "depositPaymongoPaymentID", "balancePaymongoPaymentID", "paymongoPaymentID",
-  "depositPaymongoFee", "balancePaymongoFee", "paymongoChannel", "lastSettledVia",
+  "depositPaymongoFee", "balancePaymongoFee", "paymongoFeeTotal", "paymongoChannel", "lastSettledVia",
   "paidAt", "balancePaidAt", "confirmedBy", "confirmedAt",
   "balanceMethod", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
 ];
@@ -388,6 +388,9 @@ const hydratePayment = (payment, entries, opts = {}) => {
       fill("balanceCollectedAt", bal.processedAt || bal.settledAt);
     }
   }
+  // PayMongo's total fee across the successful online charges (was stored as payments.paymongoFeeTotal).
+  const feeRows = rows.filter((e) => e.source === "online" && e.status === "success" && e.transactionFee !== undefined && e.transactionFee !== null);
+  if (feeRows.length) fill("paymongoFeeTotal", Math.round(feeRows.reduce((a, e) => a + num(e.transactionFee), 0) * 100) / 100);
   // Latest charge id + the open checkout session.
   const paidOnline = rows.filter((e) => e.source === "online" && e.status === "success" && e.referenceNumber);
   fill("paymongoPaymentID", (latestOf(paidOnline) || {}).referenceNumber);

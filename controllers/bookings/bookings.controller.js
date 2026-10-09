@@ -6,6 +6,7 @@ const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
 const { syncPaymentEntries } = require("../../utils/payments/paymentEntries.util");
+const { isPendingStatus } = require("../../utils/payments/paymentStatus.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 
 // Look up a car's price-per-day for a given durationType straight from
@@ -860,8 +861,8 @@ const cancelBooking = async (req, res) => {
           const p = paymentSnap.docs[0].data();
           const updates = { updatedAt: now };
           // The row's "cancelled" status is derived from these two fields by syncPaymentEntries below.
-          if (p.status === "pending") updates.status = "cancelled";
-          if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
+          if (isPendingStatus(p.status)) updates.status = "cancelled";
+          if (p.balanceStatus && isPendingStatus(p.balanceStatus)) updates.balanceStatus = "cancelled";
           if (Object.keys(updates).length > 1) {
             await paymentSnap.docs[0].ref.update(updates);
             await syncPaymentEntries(paymentSnap.docs[0].id);

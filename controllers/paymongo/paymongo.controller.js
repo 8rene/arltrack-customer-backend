@@ -8,6 +8,7 @@ const { axios, PAYMONGO_V1, paymongoHeaders, channelLabel } = require("../../uti
 const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = require("../../utils/payments/settlePayment.util");
 const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
 const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
+const { isPaidStatus, isPendingStatus } = require("../../utils/payments/paymentStatus.util");
 const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefundRequests } = require("../../utils/payments/paymentEntries.util");
 
 const { handlePenaltyWebhookPaid } = require("./penaltyPayment.controller");
@@ -120,10 +121,10 @@ const createPaymentLink = async (req, res) => {
       if (!isPartial) {
         return res.status(400).json({ message: "This booking doesn't have a separate balance payment." });
       }
-      if (payment.status !== "paid") {
+      if (!isPaidStatus(payment.status)) {
         return res.status(400).json({ message: "Please complete the deposit payment first." });
       }
-      if (payment.balanceStatus === "paid") {
+      if (isPaidStatus(payment.balanceStatus)) {
         return res.status(400).json({ message: "The balance has already been paid." });
       }
       if (payment.balanceCollected) {
@@ -160,7 +161,7 @@ const createPaymentLink = async (req, res) => {
     //   • still open                             → reuse the same link
     //   • expired                                → fall through and create a fresh session
     const phaseStatus = phase === "balance" ? payment.balanceStatus : payment.status;
-    if (payment.paymongoSessionID && payment.currentPhase === phase && phaseStatus === "pending") {
+    if (payment.paymongoSessionID && payment.currentPhase === phase && isPendingStatus(phaseStatus)) {
       const v = await verifyAndSettlePayment(paymentDoc, { source: "pay-now" });
       if (v.settled || v.alreadyPaid) {
         return res.status(200).json({

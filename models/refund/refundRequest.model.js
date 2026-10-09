@@ -34,20 +34,12 @@ const createRefundRequest = (refundRequestID, data = {}) => ({
   status:     data.status     || "Pending",
   autoCreated: !!data.autoCreated, // true for a payment that arrived after cancellation
 
-  // Filled in on approval / as PayMongo responds
-  paymongoRefundID:  data.paymongoRefundID  || null, // legacy: first PayMongo refund id
+  // Filled in on approval / as PayMongo responds.
+  // paymongoRefundIDs is the only PayMongo field kept on the request: the refund.updated webhook finds the
+  // request by it. Everything else about the refund -- each PayMongo refund id, the per-charge parts, the
+  // staff-handled (manual) part and any money that cannot be refunded through PayMongo -- is a paymentEntries
+  // "out" row written on approval (see admin refundRequest.service), so none of it is stored here.
   paymongoRefundIDs: data.paymongoRefundIDs || [],   // every PayMongo refund id (webhook lookup key)
-  // one entry per online charge: { kind: "deposit"|"balance", paymongoPaymentID,
-  //   amount, paymongoRefundID, status: "pending"|"succeeded"|"failed" }
-  parts:             data.parts             || [],
-  // null when PayMongo returns everything; otherwise
-  //   { amount, issued, issuedBy, issuedAt, method }
-  manualRefund:      data.manualRefund      || null,
-  // Money the customer paid ONLINE whose PayMongo payment id was never saved. It can't be refunded through
-  // PayMongo and is NOT handed back by staff either -- it is reported here instead.
-  //   [{ kind: "deposit"|"balance", amount, reason: "payment_id_missing" }]   (unrefundableAmount = their sum)
-  unrefundable:       data.unrefundable       || [],
-  unrefundableAmount: data.unrefundableAmount || 0,
 
   processedBy:       data.processedBy      || null, // staff userID who approved/rejected
   processedAt:       data.processedAt      || null,

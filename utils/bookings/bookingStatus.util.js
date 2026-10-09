@@ -41,6 +41,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { recordAudit } = require("../auditLogs/auditLogs.util");
 const { createNotification } = require("../../services/notification/notification.service");
 const { syncPaymentEntries } = require("../payments/paymentEntries.util");
+const { isPaidStatus, isPendingStatus } = require("../payments/paymentStatus.util");
 const { recordDirectCancellation } = require("./cancellationRequests.util");
 
 const BOOKING_STATUS = {
@@ -74,15 +75,15 @@ const isPastToPayWindow = (createdAt) => {
 };
 
 // Has the deposit (first/only payment) actually cleared?
-const isDepositPaid = (payment) => !!payment && payment.status === "paid";
+const isDepositPaid = (payment) => !!payment && isPaidStatus(payment.status);
 
 // Is this booking's payment fully settled? "Full" method needs just the one
 // payment; "Partial" needs BOTH the deposit AND the balance paid.
 const isFullyPaid = (payment) => {
   if (!payment) return false;
   const method = String(payment.methodOfPayment || "").toLowerCase();
-  if (method === "full") return payment.status === "paid";
-  return payment.status === "paid" && payment.balanceStatus === "paid";
+  if (method === "full") return isPaidStatus(payment.status);
+  return isPaidStatus(payment.status) && isPaidStatus(payment.balanceStatus);
 };
 
 // Returns a cancellation reason string if this "to pay" booking is no longer
@@ -135,8 +136,8 @@ const cancelStaleBooking = async (bookingID, reason) => {
     const p = paymentDoc.data();
     const updates = { updatedAt: now };
     // The row's "cancelled" status is derived from these two fields by syncPaymentEntries below.
-    if (p.status === "pending") updates.status = "cancelled";
-    if (p.balanceStatus === "pending") updates.balanceStatus = "cancelled";
+    if (isPendingStatus(p.status)) updates.status = "cancelled";
+    if (p.balanceStatus && isPendingStatus(p.balanceStatus)) updates.balanceStatus = "cancelled";
     if (Object.keys(updates).length > 1) {
       await paymentDoc.ref.update(updates);
       await syncPaymentEntries(paymentDoc.id);
