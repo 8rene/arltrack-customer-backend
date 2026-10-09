@@ -1,4 +1,4 @@
-const { db, bucket } = require("../../config/firebaseConnection/firebase");
+const { db } = require("../../config/firebaseConnection/firebase");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require("../../utils/pricing");
@@ -77,15 +77,6 @@ const getCodingRules = async () => {
     codingCache.rulesFetchedAt = Date.now();
   }
   return codingCache.codingRules;
-};
-
-// Helper: detect MIME type from base64 magic bytes
-const getMimeType = (base64) => {
-  if (base64.startsWith("/9j/"))   return "image/jpeg";
-  if (base64.startsWith("iVBOR"))  return "image/png";
-  if (base64.startsWith("UklGR"))  return "image/webp";
-  if (base64.startsWith("JVBERi")) return "application/pdf";
-  return "image/jpeg"; // fallback
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,7 +173,6 @@ const createBooking = async (req, res) => {
     specialNotes,
     paymentAmount,
     paymentMethod,
-    referenceNumber,
     // NOTE: totalDays / rentalFee / extraFee / driversFee / serviceFee /
     // gatewayFee / grandTotal / methodOfPayment are intentionally
     // NOT read from the request body anymore. Those used to be computed in
@@ -203,8 +193,6 @@ const createBooking = async (req, res) => {
     destinationCity,
     destinationProvince,
     extraDestinations,
-    // screenshot handled separately (base64 or URL)
-    proofBase64,
   } = req.body;
 
   if (!carID) {
@@ -561,21 +549,6 @@ const createBooking = async (req, res) => {
     const paymentRef = db.collection("payments").doc();
     const paymentID  = paymentRef.id;
 
-    // Upload proof of payment to Firebase Storage and save the URL
-    let proofUrl = "";
-    if (proofBase64) {
-      const rawBase64  = proofBase64.includes(",") ? proofBase64.split(",")[1] : proofBase64;
-      const mimeType   = getMimeType(rawBase64);
-      const extension  = mimeType.split("/")[1] || "jpg";
-      const filePath   = `proofs/${paymentID}.${extension}`;
-      const file       = bucket.file(filePath);
-      const buffer     = Buffer.from(rawBase64, "base64");
-
-      await file.save(buffer, { contentType: mimeType });
-      await file.makePublic();
-      proofUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
-    }
-
     await paymentRef.set({
       paymentID,
       bookingID,
@@ -594,8 +567,6 @@ const createBooking = async (req, res) => {
       securityDeposit,
       methodOfPayment: computedMethod,
       paymentMethod:   paymentMethod  || "",
-      referenceNumber: referenceNumber || null,
-      proofUrl,
       status:          "pending",
       // Two-phase payment (see utils/bookings/bookingStatus.util.js):
       // "Partial" pays payNow (50%) now, then the remaining balance
@@ -823,8 +794,8 @@ const getUserBookings = async (req, res) => {
           rentalFee:       p.rentalFee        || 0,
           methodOfPayment: p.methodOfPayment  || p.paymentMethod || "",
           paymentMethod:   p.paymentMethod    || p.methodOfPayment || "",
-          referenceNumber: p.referenceNumber  || "",
-          proofUrl:        p.proofUrl         || "",
+          // The pay_... reference lives on the payment's paymentEntries row; hydration fills these ids from it.
+          referenceNumber: p.depositPaymongoPaymentID || p.paymongoPaymentID || "",
           status:          p.status           || "",
           // Two-phase payment fields — see utils/bookings/bookingStatus.util.js.
           // MyBookings.jsx needs these to know whether a "to pay" booking
