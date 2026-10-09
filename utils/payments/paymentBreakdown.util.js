@@ -243,8 +243,8 @@ const computeRefundPlan = (payment, opts = {}) => {
 //   hours < 0 (after pickup)    → "no_show"  the deposit is forfeited
 //
 // The ONE variable the policy depends on is the deposit amount:
-//   payment.deposit.amount  (the held security deposit, once the first payment cleared)
-//   → payment.securityDeposit (snapshotted on the payment at booking time)
+//   payment.securityDeposit (snapshotted on the payment at booking time)
+//   → payment.deposit.amount  (old nested deposit object, until it is migrated away)
 //   → payment.depositFee      (legacy flat deposit on older payments)
 // It is capped at what the customer actually paid, so a refund is never negative.
 //
@@ -289,7 +289,7 @@ const resolvePickupAt = (booking) => {
 
 const getDepositAmount = (payment) => {
   const p = payment || {};
-  return num(p.deposit && p.deposit.amount) || num(p.securityDeposit) || num(p.depositFee);
+  return num(p.securityDeposit) || num(p.deposit && p.deposit.amount) || num(p.depositFee);
 };
 
 const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false } = {}) => {

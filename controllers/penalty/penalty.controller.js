@@ -1,5 +1,6 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { hydratePenalties } = require("../../utils/payments/paymentEntries.util");
+const { getDepositView } = require("../../utils/payments/depositView.util");
 
 // Firestore Timestamp | Date | string -> ISO string (or null), so the
 // frontend never has to deal with {_seconds,_nanoseconds}.
@@ -83,9 +84,17 @@ const getMyBookingPenalties = async (req, res) => {
     const penaltyTotal = confirmed.reduce((s, p) => s + p.amount, 0);                       // everything charged
     const unpaidTotal  = confirmed.reduce((s, p) => s + Math.max(0, p.amount - p.paidAmount), 0); // still unpaid right now
 
-    const deposit = paymentDoc?.exists ? paymentDoc.data().deposit : null;
-    const depositAmount = deposit ? (deposit.amount ?? null) : null; // null = not yet collected, don't show a number
-    const settlement = deposit?.settlement?.status ? deposit.settlement : null;
+    // The deposit is read through getDepositView(): flat fields on the payment (depositStatus, depositSettled,
+    // depositReturned ...) or the old nested object until it is migrated. null = no deposit recorded yet.
+    // unpaidTotal is the live shortfall, so "owed" clears when the customer pays it.
+    const payment = paymentDoc?.exists ? paymentDoc.data() : null;
+    const deposit = getDepositView(payment, { unpaid: unpaidTotal });
+    const depositAmount = deposit ? deposit.amount : null; // null = not yet collected, don't show a number
+    // Same object the endpoint always returned. In the flat shape confirmedPenaltyTotal is everything charged,
+    // not just the part the deposit covered.
+    const settlement = deposit && deposit.settlement
+      ? { ...deposit.settlement, confirmedPenaltyTotal: deposit.shape === "flat" ? penaltyTotal : deposit.settlement.confirmedPenaltyTotal }
+      : null;
 
     let deductedFromDeposit = null;   // how much of the deposit went to penalties
     let refundAmount        = null;   // what the customer receives back (>= 0)
@@ -96,12 +105,25 @@ const getMyBookingPenalties = async (req, res) => {
     if (depositAmount !== null) {
       if (settlement) {
         // Already settled — report what actually happened, not a recomputation.
-        const net = settlement.net || 0;
-        deductedFromDeposit = depositAmount - Math.max(0, net);
-        refundAmount = Math.max(0, net);
+        deductedFromDeposit = deposit.deducted;
+        refundAmount = deposit.returnedAmount;
         stillOwed = unpaidTotal; // includes anything raised after settling, minus anything paid since
-        refundMethod = deposit.returned?.method || null;
-        refundedAt = toISO(deposit.returned?.at || settlement.settledAt);
+        if (deposit.shape === "nested") {
+          refundMethod = payment.deposit.returned?.method || null;
+          refundedAt = toISO(payment.deposit.returned?.at || settlement.settledAt);
+        } else {
+          // How it was handed back is the "<paymentID>_depositreturn" row (only exists when something was returned).
+          refundedAt = toISO(deposit.settledAt);
+          try {
+            const row = await db.collection("paymentEntries").doc(`${payment.paymentID || paymentDoc.id}_depositreturn`).get();
+            if (row.exists) {
+              refundMethod = row.data().method || null;
+              refundedAt = toISO(row.data().processedAt || row.data().settledAt) || refundedAt;
+            }
+          } catch (rowErr) {
+            console.warn("getMyBookingPenalties: could not read the deposit return row:", rowErr.message);
+          }
+        }
       } else {
         // Not settled yet — live preview of what settlement will do.
         deductedFromDeposit = Math.min(depositAmount, unpaidTotal);
@@ -115,7 +137,7 @@ const getMyBookingPenalties = async (req, res) => {
     return res.status(200).json({
       data: {
         depositAmount,
-        depositStatus: deposit?.status || "NotCollected",
+        depositStatus: deposit ? deposit.status : "NotCollected",
         depositSettled: !!settlement,
         penalties,
         penaltyTotal,

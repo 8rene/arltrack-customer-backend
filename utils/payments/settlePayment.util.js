@@ -195,17 +195,11 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
       fields[idField] = paymongoPaymentID;
     }
     // The refundable security deposit was part of this first payment, so it is
-    // now HELD — same shape admin's penalty.service recordDepositReceived()
-    // writes, so settleBooking()/the Penalties page work unchanged.
-    if (phase !== "balance" && num(p.securityDeposit) > 0 && !p.deposit) {
-      payload.deposit = {
-        amount: num(p.securityDeposit),
-        status: "Held",
-        waivedReason: "",
-        received: { method: "Online", referenceNumber: paymongoPaymentID || "", by: p.userID || "customer", at: now },
-        returned: { method: null, referenceNumber: "", by: null, at: null, amount: 0 },
-        settlement: { confirmedPenaltyTotal: 0, net: 0, status: "", settledBy: null, settledAt: null },
-      };
+    // now HELD. Only the status is written: the amount is securityDeposit (already on the payment) and how it was
+    // paid (method, pay_... reference) is this payment's own paymentEntries row. The admin app's settleBooking()
+    // reads it through getDepositView() and moves it on to Settled / Waived / Forfeited / Refunded.
+    if (phase !== "balance" && num(p.securityDeposit) > 0 && !p.depositStatus && !p.deposit) {
+      payload.depositStatus = "Held";
     }
     t.update(paymentRef, payload);
     return { state: "settled", payment: { ...view, ...payload, ...fields }, fields };

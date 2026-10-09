@@ -217,7 +217,11 @@ const buildLegacyPenaltyEntry = (pen, docID, payment, opts = {}) => {
   const methodKey = low(pen.paymentMethod).replace(/[\s_-]/g, "");
   if (methodKey === "deposit") return { review: "deposit_offset" };
   if (methodKey === "depositpartial") return { review: "deposit_involved" };
-  const settled = payment && payment.deposit && payment.deposit.settlement && payment.deposit.settlement.status;
+  // The deposit was settled (or waived): new flat fields, or the old nested settlement. Inline, not an import,
+  // because this file is copied to the customer backend unchanged.
+  const settled = payment && (
+    ["Settled", "Waived"].includes(payment.depositStatus) ||
+    (payment.deposit && payment.deposit.settlement && payment.deposit.settlement.status));
   if (settled) return { review: "deposit_involved" };
 
   const penaltyID = pen.penaltyID || docID;

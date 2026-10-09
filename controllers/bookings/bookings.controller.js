@@ -526,7 +526,7 @@ const createBooking = async (req, res) => {
       serviceFeeRate:  serviceRate,   // % of rental only
       gatewayFeeRate:  gatewayRate,   // % of gatewayFeeBase
       gatewayFeeBase:  gatewayBase,   // rental + extra + driver's + service fee + security deposit
-      // Refundable; already inside `amount`. Becomes payments.deposit (Held)
+      // Refundable; already inside `amount`. payments.depositStatus becomes "Held"
       // when the first payment settles — see settlePayment.util.js.
       securityDeposit,
       methodOfPayment: computedMethod,
