@@ -127,6 +127,7 @@ const settlePenaltyCheckout = async ({ checkoutRef, paymongoPaymentID = null, ch
 
   await recordTransactionLog({
     bookingID: co.bookingID, paymentID: first.paymentID || null, userID: co.userID,
+    penaltyID: result.appliedTo.length === 1 ? result.appliedTo[0].penaltyID : null,   // one payment can cover several
     type: "Payment", amount: result.applied, status: "Success",
     paymentMethod: label, referenceNumber: paymongoPaymentID || co.sessionID || "",
     description: "Outstanding penalty balance paid online.",
