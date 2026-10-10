@@ -88,7 +88,6 @@ const openRefundForLatePayment = async ({ payment, phase, charged }) => {
       toRefundAmount: plan.total,
       bookingPaid: plan.grossPaid,
       status: "Pending",
-      autoCreated: true,
       createdAt: now,
       updatedAt: now,
     });

@@ -66,14 +66,19 @@ const getCancellationReasons = async (bookingKeys) => {
   return out;
 };
 
-// Refund docs no longer carry userID / reason / notes / the decision: they live on the booking's cancellation row.
-// Fills those gaps (a field the refund doc still has wins, same as the admin backend). The decision is only taken
-// from the row once the request is no longer Pending.
+// Refund docs no longer carry userID / the customer's reason / notes: they live on the booking's cancellation row.
+// Same reading rules as the admin backend (withCancellationInfo): on a refund doc the field `reason` is the STAFF's
+// reason for the decision (why it was rejected, or the note given on approve); the customer's own words are the cancellation
+// row's `reason`, returned here as customerReason. An OLD document that still carries userID / notes / rejectReason keeps
+// the customer's words in `reason` and the staff's reject reason in `rejectReason`. `rejectReason` is also returned (as
+// the old name) for a Rejected request, because the customer app still reads it. The decision (processedBy / processedAt)
+// is only taken from the row once the request is no longer Pending.
+const isLegacyRefundDoc = (r) => !!(r && (r.userID || r.notes || r.rejectReason));
+
 const attachRefundRowInfo = async (requests) => {
   const list = requests || [];
-  const need = list.filter((r) => !r.userID || !r.reason || (r.status === "Rejected" && !r.rejectReason));
-  if (!need.length) return list;
-  const keys = [...new Set(need.map((r) => r.bookingID).filter(Boolean))];
+  if (!list.length) return list;
+  const keys = [...new Set(list.map((r) => r.bookingID).filter(Boolean))];
   const rows = [];
   for (let i = 0; i < keys.length; i += 30) {
     const snap = await db.collection(COL).where("bookingID", "in", keys.slice(i, i + 30)).get();
@@ -81,19 +86,25 @@ const attachRefundRowInfo = async (requests) => {
   }
   return list.map((req) => {
     const row = rows.find((r) => r.refundRequestID && r.refundRequestID === req.refundRequestID)
-      || rows.find((r) => r.bookingID === req.bookingID && r.cancelledBy);
-    if (!row) return req;
-    const decided = req.status && req.status !== "Pending";
+      || rows.find((r) => r.bookingID === req.bookingID && r.cancelledBy)
+      || null;
+    const decided = !!(req.status && req.status !== "Pending");
+    const legacy = isLegacyRefundDoc(req);
+    const customerReason = (legacy ? req.reason : "") || (row && row.reason) || "";
+    const decisionReason = (legacy ? req.rejectReason : req.reason) || (decided && row ? row.rejectReason : "") || "";
     return {
       ...req,
-      userID: req.userID || row.userID || null,
-      reason: req.reason || row.reason || "",
-      notes:  req.notes  || row.notes  || "",
-      ...(decided ? {
-        processedBy:  req.processedBy  || row.processedBy  || null,
-        processedAt:  req.processedAt  || row.processedAt  || null,
-        rejectReason: req.rejectReason || row.rejectReason || null,
+      ...(row ? {
+        userID: req.userID || row.userID || null,
+        notes:  req.notes  || row.notes  || "",
+        ...(decided ? {
+          processedBy: req.processedBy || row.processedBy || null,
+          processedAt: req.processedAt || row.processedAt || null,
+        } : {}),
       } : {}),
+      customerReason,
+      reason: decisionReason,
+      rejectReason: req.status === "Rejected" ? (decisionReason || null) : (req.rejectReason ?? null),
     };
   });
 };

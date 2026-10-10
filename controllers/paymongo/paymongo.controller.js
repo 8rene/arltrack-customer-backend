@@ -333,7 +333,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
     // single paymongoRefundID as one part covering the whole amount.
     const parts = Array.isArray(r.parts) && r.parts.length
       ? r.parts.map((x) => ({ ...x }))
-      : [{ kind: "deposit", paymongoRefundID: r.paymongoRefundID, amount: Number(r.amount) || 0, status: "pending" }];
+      : [{ kind: "deposit", paymongoRefundID: r.paymongoRefundID, amount: Number(r.amount ?? r.toRefundAmount) || 0, status: "pending" }];
 
     const idx = parts.findIndex((x) => x.paymongoRefundID === refundID);
     if (idx < 0) return { skip: true };
@@ -379,7 +379,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
   if (outcome.finalized) {
     if (r.paymentID) {
       const paymentSnap = await db.collection("payments").where("paymentID", "==", r.paymentID).limit(1).get();
-      if (!paymentSnap.empty) await paymentSnap.docs[0].ref.update({ status: "Refunded", refundedAt: now, updatedAt: now });
+      if (!paymentSnap.empty) await paymentSnap.docs[0].ref.update({ status: "Refunded", updatedAt: now }); // when it completed is NOT stored on the payment: it is the latest settledAt of the request's "out" rows (admin derives it)
     }
     // Approval already cancels the booking; this only matters for requests
     // approved before that rule existed. No-op if already cancelled/started.
@@ -387,7 +387,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
 
     recordAudit({
       action: "update",
-      description: `Refund ${r.refundRequestID} completed — ₱${Number(r.amount || 0).toLocaleString()} returned for payment ${r.paymentID}.`,
+      description: `Refund ${r.refundRequestID} completed — ₱${Number(r.toRefundAmount ?? r.amount ?? 0).toLocaleString()} returned for payment ${r.paymentID}.`,
       userID: r.userID || null,
       bookingID: r.bookingID || null,
       paymentID: r.paymentID,
@@ -399,7 +399,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
         userID: r.userID,
         refID: r.bookingID || null,
         title: "Refund Completed",
-        message: `Your refund of ₱${Number(r.amount || 0).toLocaleString()} has been returned.`,
+        message: `Your refund of ₱${Number(r.toRefundAmount ?? r.amount ?? 0).toLocaleString()} has been returned.`,
       }).catch((e) => console.error("[PayMongo Webhook] failed to write refund_completed notification:", e.message));
     }
   } else if (partStatus === "failed") {
@@ -417,7 +417,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
         userID: r.userID,
         refID: r.bookingID || null,
         title: "Refund Failed",
-        message: `Your approved refund of ₱${Number(r.amount || 0).toLocaleString()} could not be completed by PayMongo. Please contact support.`,
+        message: `Your approved refund of ₱${Number(r.toRefundAmount ?? r.amount ?? 0).toLocaleString()} could not be completed by PayMongo. Please contact support.`,
       }).catch((e) => console.error("[PayMongo Webhook] failed to write refund_failed notification:", e.message));
     }
   }

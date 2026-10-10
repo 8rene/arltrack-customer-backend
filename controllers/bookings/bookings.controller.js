@@ -573,7 +573,7 @@ const createBooking = async (req, res) => {
       // separately later, via its own PayMongo checkout, before the
       // booking is promoted to "upcoming". "Full" has no balance phase —
       // balanceStatus stays "not_applicable" and is never touched.
-      payNow,
+      // payNow is NOT stored: it is derived from amount / methodOfPayment / securityDeposit (computePaymentSplit)
       balanceAmount: Math.max(0, totalAmount - payNow),
       balanceStatus: computedMethod === "Full" ? "not_applicable" : "not_due",
       currentPhase:  "deposit",
@@ -801,7 +801,7 @@ const getUserBookings = async (req, res) => {
           // MyBookings.jsx needs these to know whether a "to pay" booking
           // already has its deposit paid (Partial, awaiting balance) so it
           // can show "Pay Balance" instead of "Pay Now" / hide "Cancel".
-          payNow:          p.payNow           || 0,
+          payNow:          computePaymentSplit(p.amount, p.methodOfPayment, p.securityDeposit).payNow,
           // Bookings created before two-phase payments have no balance fields:
           // for a Partial one, infer them so Pay Balance / the balance math work.
           balanceAmount:   p.balanceAmount    || (String(p.methodOfPayment).toLowerCase() === "partial"

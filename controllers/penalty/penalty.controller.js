@@ -112,13 +112,18 @@ const getMyBookingPenalties = async (req, res) => {
           refundMethod = payment.deposit.returned?.method || null;
           refundedAt = toISO(payment.deposit.returned?.at || settlement.settledAt);
         } else {
-          // How it was handed back is the "<paymentID>_depositreturn" row (only exists when something was returned).
+          // How it was handed back is the paymentEntries row with phase "deposit_return" (auto ID, written by the admin's
+          // settleBooking() in the same transaction as payments.depositReturned; only exists when something was returned).
           refundedAt = toISO(deposit.settledAt);
           try {
-            const row = await db.collection("paymentEntries").doc(`${payment.paymentID || paymentDoc.id}_depositreturn`).get();
-            if (row.exists) {
-              refundMethod = row.data().method || null;
-              refundedAt = toISO(row.data().processedAt || row.data().settledAt) || refundedAt;
+            const rowsSnap = await db.collection("paymentEntries").where("paymentID", "==", payment.paymentID || paymentDoc.id).get();
+            const returnRows = rowsSnap.docs.map((d) => d.data())
+              .filter((r) => r.direction === "out" && r.phase === "deposit_return" && r.status === "success");
+            returnRows.sort((a, b) => (toISO(b.settledAt || b.processedAt) || "").localeCompare(toISO(a.settledAt || a.processedAt) || ""));
+            const row = returnRows[0];
+            if (row) {
+              refundMethod = row.method || null;
+              refundedAt = toISO(row.processedAt || row.settledAt) || refundedAt;
             }
           } catch (rowErr) {
             console.warn("getMyBookingPenalties: could not read the deposit return row:", rowErr.message);
