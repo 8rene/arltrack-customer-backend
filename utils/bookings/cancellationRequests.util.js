@@ -1,8 +1,11 @@
-// Customer-side access to the cancellationRequests collection for DIRECT
-// cancellations (type "direct"): a booking cancelled outright, as opposed to a
-// customer request to end an ongoing trip (type "request", created by
-// requestCancellation in bookings.controller.js). The reason a booking was
-// cancelled lives here, not on the booking document.
+// Customer-side access to the cancellationRequests collection. Three kinds of row:
+//  - a DIRECT cancellation (a booking cancelled outright): has cancelledBy. It carries no status / processedBy /
+//    processedAt / rejectReason -- it is always a finished cancellation. The reason a booking was cancelled lives here.
+//  - a customer REQUEST to end an ongoing trip (requestCancellation in bookings.controller.js): no cancelledBy,
+//    status pending | approved | rejected.
+//  - a REFUND row: has refundRequestID. Created pending together with the refund request and holding who / why
+//    (userID, reason, notes); staff decide it through the refund, so it is not a trip-cancellation request.
+// Older rows may still carry type / requestedAt; readers accept both.
 //
 // Imports only db, so any util/controller can require it without a cycle.
 const { db } = require("../../config/firebaseConnection/firebase");
@@ -17,16 +20,28 @@ const recordDirectCancellation = (bookingKey, { userID = null, reason = "", canc
   const now  = admin.firestore.FieldValue.serverTimestamp();
   const data = {
     cancellationRequestID: ref.id,
-    type: "direct",
     bookingID: bookingKey,
     userID,
     reason: reason || "",
-    status: "approved",
     cancelledBy,
-    requestedAt: now,
-    processedBy: null,
-    processedAt: now,
-    rejectReason: null,
+    createdAt: now,
+  };
+  if (batch) { batch.set(ref, data); return null; }
+  return ref.set(data);
+};
+
+// The pending row that goes with a new refund request: who asked and why live here, not on the refund doc.
+const createPendingRefundRow = (refundRequestID, { bookingID = null, userID = null, reason = "", notes = "", createdAt = new Date() } = {}, batch = null) => {
+  const ref  = db.collection(COL).doc();
+  const data = {
+    cancellationRequestID: ref.id,
+    refundRequestID,
+    bookingID,
+    userID,
+    reason: reason || "",
+    notes: notes || "",
+    status: "pending",
+    createdAt,
   };
   if (batch) { batch.set(ref, data); return null; }
   return ref.set(data);
@@ -41,11 +56,46 @@ const getCancellationReasons = async (bookingKeys) => {
     const snap = await db.collection(COL).where("bookingID", "in", keys.slice(i, i + 30)).get();
     snap.forEach((d) => {
       const r = d.data();
-      if (r.status !== "approved" || !r.reason) return;
-      if (r.type === "direct" || !out[r.bookingID]) out[r.bookingID] = r.reason;
+      if (!r.reason) return;
+      const direct = !!r.cancelledBy;
+      const approvedRequest = !r.cancelledBy && !r.refundRequestID && r.status === "approved";
+      if (!direct && !approvedRequest) return;
+      if (direct || !out[r.bookingID]) out[r.bookingID] = r.reason;
     });
   }
   return out;
 };
 
-module.exports = { recordDirectCancellation, getCancellationReasons };
+// Refund docs no longer carry userID / reason / notes / the decision: they live on the booking's cancellation row.
+// Fills those gaps (a field the refund doc still has wins, same as the admin backend). The decision is only taken
+// from the row once the request is no longer Pending.
+const attachRefundRowInfo = async (requests) => {
+  const list = requests || [];
+  const need = list.filter((r) => !r.userID || !r.reason || (r.status === "Rejected" && !r.rejectReason));
+  if (!need.length) return list;
+  const keys = [...new Set(need.map((r) => r.bookingID).filter(Boolean))];
+  const rows = [];
+  for (let i = 0; i < keys.length; i += 30) {
+    const snap = await db.collection(COL).where("bookingID", "in", keys.slice(i, i + 30)).get();
+    snap.forEach((d) => rows.push(d.data()));
+  }
+  return list.map((req) => {
+    const row = rows.find((r) => r.refundRequestID && r.refundRequestID === req.refundRequestID)
+      || rows.find((r) => r.bookingID === req.bookingID && r.cancelledBy);
+    if (!row) return req;
+    const decided = req.status && req.status !== "Pending";
+    return {
+      ...req,
+      userID: req.userID || row.userID || null,
+      reason: req.reason || row.reason || "",
+      notes:  req.notes  || row.notes  || "",
+      ...(decided ? {
+        processedBy:  req.processedBy  || row.processedBy  || null,
+        processedAt:  req.processedAt  || row.processedAt  || null,
+        rejectReason: req.rejectReason || row.rejectReason || null,
+      } : {}),
+    };
+  });
+};
+
+module.exports = { recordDirectCancellation, createPendingRefundRow, getCancellationReasons, attachRefundRowInfo };

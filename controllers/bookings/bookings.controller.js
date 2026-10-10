@@ -1008,9 +1008,9 @@ const requestCancellation = async (req, res) => {
     const pendingSnap = await db.collection("cancellationRequests")
       .where("bookingID", "==", bookingKey)
       .where("status", "==", "pending")
-      .limit(1)
       .get();
-    if (!pendingSnap.empty) {
+    // A pending row that belongs to a refund request (refundRequestID) is decided through the refund, not here.
+    if (pendingSnap.docs.some((d) => !d.data().refundRequestID)) {
       return res.status(400).json({ message: "A cancellation request for this booking is already pending admin review." });
     }
 
@@ -1022,7 +1022,7 @@ const requestCancellation = async (req, res) => {
       userID,
       reason:       reason.trim(),
       status:       "pending",
-      requestedAt:  now,
+      createdAt:    now,
       processedBy:  null,
       processedAt:  null,
       rejectReason: null,

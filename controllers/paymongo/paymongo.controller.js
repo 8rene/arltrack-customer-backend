@@ -9,8 +9,8 @@ const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = req
 const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
 const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
 const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefundRequests } = require("../../utils/payments/paymentEntries.util");
-const { getCheckoutSessionID, findPaymentDocsBySession } = require("../../utils/payments/paymentSession.util");
-const admin = require("firebase-admin");
+const { createPendingRefundRow, attachRefundRowInfo } = require("../../utils/bookings/cancellationRequests.util");
+const { sessionIDForPayment, findPaymentSnapBySessionID } = require("../../utils/payments/paymentSession.util");
 
 const { handlePenaltyWebhookPaid } = require("./penaltyPayment.controller");
 
@@ -165,11 +165,8 @@ const createPaymentLink = async (req, res) => {
     //   • still open                             → reuse the same link
     //   • expired                                → fall through and create a fresh session
     const phaseStatus = phase === "balance" ? payment.balanceStatus : payment.status;
-    // The session id lives on the paymentEntries row now (the payment document only keeps it on older payments).
-    const openSessionID = (payment.currentPhase === phase && phaseStatus === "pending")
-      ? await getCheckoutSessionID(paymentDoc.data(), paymentDoc.id, phase)
-      : null;
-    if (openSessionID) {
+    const existingSessionID = payment.currentPhase === phase && phaseStatus === "pending" ? await sessionIDForPayment(paymentDoc, phase) : null;
+    if (existingSessionID) {
       const v = await verifyAndSettlePayment(paymentDoc, { source: "pay-now" });
       if (v.settled || v.alreadyPaid) {
         return res.status(200).json({
@@ -188,7 +185,7 @@ const createPaymentLink = async (req, res) => {
         return res.status(200).json({
           message:     "Payment link already exists.",
           checkoutUrl: payment.checkoutUrl,
-          linkID:      openSessionID,
+          linkID:      existingSessionID,
         });
       }
       // expired → create a new session below
@@ -232,10 +229,8 @@ const createPaymentLink = async (req, res) => {
     const sessionID    = sessionData.id;
     const checkoutUrl  = sessionData.attributes.checkout_url;
 
-    // 4. Save checkoutUrl + the phase to Firestore. The session id goes onto the paymentEntries row below; any old
-    //    paymongoSessionID on the document is deleted so it can never point at a previous checkout.
+    // 4. Save checkoutUrl to Firestore (the sessionID goes on the paymentEntries row below)
     await paymentDoc.ref.update({
-      paymongoSessionID: admin.firestore.FieldValue.delete(),
       checkoutUrl,
       currentPhase:      phase,
       ...(phase === "balance" ? { balanceStatus: "pending" } : {}),
@@ -245,10 +240,9 @@ const createPaymentLink = async (req, res) => {
     // Record this attempt as a paymentEntries row (pending until PayMongo confirms it). The channel and the amount
     // this checkout really charges (a staff discount can make it lower than the stored balanceAmount) go to the
     // row only -- they are handed to the sync and never written on the payment document. Never throws.
-    const entrySync = await syncPaymentEntries(paymentDoc.id, {
+    await syncPaymentEntries(paymentDoc.id, {
       fields: {
         paymongoChannel: paymentMethodTypes[0],
-        paymongoSessionID: sessionID,   // handed to the sync, so it lands on the row; the document no longer stores it
         paymongoTransactions: [{
           phase,
           amount:  amountToCharge,
@@ -259,12 +253,6 @@ const createPaymentLink = async (req, res) => {
         }],
       },
     });
-    // The sync never throws. If it could not write the row, the session id would exist nowhere: keep it on the
-    // document so the status poll and the webhook can still find this checkout.
-    if (entrySync.error || !entrySync.written) {
-      console.warn("[paymongo] session row not written, keeping paymongoSessionID on the payment document:", entrySync.error || "nothing written");
-      await paymentDoc.ref.update({ paymongoSessionID: sessionID });
-    }
 
     return res.status(200).json({
       message: "Payment link created.",
@@ -290,7 +278,14 @@ const createPaymentLink = async (req, res) => {
 // reporting at the same moment can't overwrite each other. Idempotent.
 // ─────────────────────────────────────────────────────────────────────────────
 const applyRefundPartResult = async ({ refundID, refundStatus }) => {
-  let snap = await db.collection("refundRequests").where("paymongoRefundIDs", "array-contains", refundID).limit(1).get();
+  // The re_... id is the referenceNumber of the refund's "out" row in paymentEntries; that row points at the request.
+  let snap = { empty: true };
+  const entrySnap = await db.collection("paymentEntries").where("referenceNumber", "==", refundID).where("direction", "==", "out").limit(1).get();
+  const entryReqID = entrySnap.empty ? null : entrySnap.docs[0].data().refundReqID;
+  if (entryReqID) {
+    const byEntry = await db.collection("refundRequests").doc(entryReqID).get();
+    if (byEntry.exists) snap = { empty: false, docs: [byEntry] };
+  }
   if (snap.empty) snap = await db.collection("refundRequests").where("paymongoRefundID", "==", refundID).limit(1).get(); // legacy single-refund requests
   if (snap.empty) {
     console.warn("[PayMongo Webhook] payment.refund.updated — no matching refundRequest for refundID:", refundID);
@@ -521,7 +516,7 @@ const handleWebhook = async (req, res) => {
       if (paymentID) {
         paymentSnap = await db.collection("payments").where("paymentID", "==", paymentID).limit(1).get();
       } else if (sessionID) {
-        paymentSnap = await findPaymentDocsBySession(sessionID);
+        paymentSnap = await findPaymentSnapBySessionID(sessionID);
       }
 
       if (!paymentSnap || paymentSnap.empty) {
@@ -556,7 +551,7 @@ const handleWebhook = async (req, res) => {
       if (paymentID) {
         paymentSnap = await db.collection("payments").where("paymentID", "==", paymentID).limit(1).get();
       } else if (sessionID) {
-        paymentSnap = await findPaymentDocsBySession(sessionID);
+        paymentSnap = await findPaymentSnapBySessionID(sessionID);
       }
       if (paymentSnap && !paymentSnap.empty) {
         const failedDoc     = paymentSnap.docs[0];
@@ -679,8 +674,7 @@ const getPaymentStatus = async (req, res) => {
     // forever once the deposit clears). verifyAndSettlePayment asks PayMongo and,
     // if the customer did pay, settles it through the same transactional path the
     // webhook uses — so whichever of the two wins the race, the other is a no-op.
-    const pollSessionID = phaseStatus === "pending" ? await getCheckoutSessionID(p, doc.id, phase) : null;
-    if (pollSessionID) {
+    if (phaseStatus === "pending" && await sessionIDForPayment(doc, phase)) {
       const v = await verifyAndSettlePayment(doc, { source: "status-poll" });
       if (v.settled || v.alreadyPaid) {
         return res.status(200).json({ status: "paid", bookingID: p.bookingID, phase });
@@ -878,42 +872,26 @@ const requestRefund = async (req, res) => {
     if (plan.total <= 0) {
       return res.status(400).json({ message: nothingToRefundMessage(policy, plan) });
     }
-    const onlineAmount = plan.total - plan.manualAmount;
-
     const refundRef = db.collection("refundRequests").doc();
+    // Who asked and why (userID / reason / notes) live on the pending cancellation row, not on the refund doc.
+    // parts[] / manualRefund / unrefundable[] are written as "out" rows in paymentEntries on staff approval, and
+    // onlineAmount / manualAmount are derived from them.
     const refundRequest = {
       refundRequestID: refundRef.id,
       bookingID: payment.bookingID || null,
       paymentID,
-      userID,
-      reason,
-      notes: notes || "",
-      amount: plan.total,          // what the customer gets back: everything paid, minus the deposit if it's under 48 hours
-      onlineAmount,                // returned through PayMongo
-      manualAmount: plan.manualAmount, // handed back by staff (balance collected in person, cash, etc.)
-
-      // ── 48-hour policy snapshot, locked at the moment of the request ──
-      // Its presence (policyTier) also marks the request as created under the
-      // policy; requests without it (older / auto-opened) are refunded in full.
-      policyTier: policy.tier,                   // "full" | "late" | "no_show"
-      hoursBeforePickup: policy.hoursBeforePickup,
-      grossPaid: plan.grossPaid,                 // everything the customer had paid
-      depositAmount: policy.depositAmount,
-      depositForfeited: policy.forfeit,          // kept from the refund (0 for "full")
-      pickupAt: pickupAt || null,
-      requestedAt: now,
-
+      toRefundAmount: plan.total,                // what the customer gets back: everything paid, minus the deposit if it's under 48 hours
+      bookingPaid: plan.grossPaid,               // everything the customer had paid
+      returnDeposit: !(policy.forfeit > 0),      // the 48-hour verdict, locked at the moment of the request: false = the deposit is kept
+      depositForfeited: policy.forfeit,          // kept from the refund (0 when the deposit goes back)
       status: "Pending",
-      // parts[] / manualRefund / unrefundable[] are NOT stored on the request any more: staff approval writes
-      // them as "out" rows in paymentEntries (see admin refundRequest.service). Only the webhook lookup key stays.
-      paymongoRefundIDs: [],       // every PayMongo refund id (set on approval)
-      processedBy: null,
-      processedAt: null,
-      rejectReason: null,
-      createdAt: now,
+      createdAt: now,                            // the moment the customer asked (server time) -- the 48-hour window is measured from it
       updatedAt: now,
     };
-    await refundRef.set(refundRequest);
+    const createBatch = db.batch();
+    createBatch.set(refundRef, refundRequest);
+    createPendingRefundRow(refundRef.id, { bookingID: payment.bookingID || null, userID, reason, notes: notes || "", createdAt: now }, createBatch);
+    await createBatch.commit();
 
     const tierNote = policy.forfeit > 0
       ? ` (${policy.tier === "no_show" ? "after pickup time" : `under ${policy.windowHours}h before pickup`}; ${peso(policy.forfeit)} deposit withheld)`
@@ -944,7 +922,8 @@ const requestRefund = async (req, res) => {
         ? `Refund request sent. Because it was made ${policy.tier === "no_show" ? "after your pickup time" : `less than ${policy.windowHours} hours before pickup`}, your ${peso(policy.forfeit)} deposit is non-refundable. ${peso(plan.total)} will be returned once it's reviewed.`
         : "Refund request sent. We'll notify you once it's reviewed.",
       ...(plan.unrefundableAmount > 0 ? { warning: `${peso(plan.unrefundableAmount)} of this payment has no payment reference on record and can't be refunded automatically — our staff will review it.` } : {}),
-      refundRequest,
+      // The stored doc is slimmer now; the response still carries what the customer app showed before.
+      refundRequest: { ...refundRequest, userID, reason, notes: notes || "", amount: plan.total, grossPaid: plan.grossPaid },
     });
   } catch (error) {
     console.error("requestRefund error:", error.message);
@@ -956,16 +935,29 @@ const requestRefund = async (req, res) => {
 // GET /api/paymongo/refunds/mine
 // Lists the logged-in customer's own refund requests (newest first).
 // ─────────────────────────────────────────────────────────────────────────────
+// userID is no longer on every refund doc (staff-created and newer requests keep it on the cancellation row), so a
+// customer's refunds are found through their payments too. Old docs that still carry userID match either way.
+const loadMyRefunds = async (userID) => {
+  const docs = new Map();
+  const byUser = await db.collection("refundRequests").where("userID", "==", userID).get();
+  byUser.forEach((d) => docs.set(d.id, d));
+  const paySnap = await db.collection("payments").where("userID", "==", userID).get();
+  const paymentIDs = [...new Set(paySnap.docs.map((d) => d.data().paymentID || d.id))];
+  for (let i = 0; i < paymentIDs.length; i += 30) {
+    const s = await db.collection("refundRequests").where("paymentID", "in", paymentIDs.slice(i, i + 30)).get();
+    s.forEach((d) => docs.set(d.id, d));
+  }
+  // parts[] / manualRefund / unrefundable[] are rebuilt from the refund's paymentEntries rows; who / why / the decision
+  // come from the cancellation row. amount / grossPaid are the old names of toRefundAmount / bookingPaid.
+  const hydrated = await hydrateRefundRequests([...docs.values()].map((d) => d.data()));
+  return (await attachRefundRowInfo(hydrated)).map((r) => ({ ...r, amount: r.amount ?? r.toRefundAmount, grossPaid: r.grossPaid ?? r.bookingPaid }));
+};
+
 const getMyRefundRequests = async (req, res) => {
   const userID = req.user.userID;
 
   try {
-    const snap = await db.collection("refundRequests")
-      .where("userID", "==", userID)
-      .get();
-
-    // parts[] / manualRefund / unrefundable[] are rebuilt from the refund's paymentEntries rows.
-    const requests = (await hydrateRefundRequests(snap.docs.map(d => d.data())))
+    const requests = (await loadMyRefunds(userID))
       .sort((a, b) => {
         const aT = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
         const bT = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);

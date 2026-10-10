@@ -31,7 +31,8 @@ const { computeRefundPlan } = require("./paymentBreakdown.util");
 const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util");
 const { buildFeePatch } = require("./paymongoFee.util");
 const { syncPaymentEntries, hydratePaymentData, getEntriesForPaymentIDs } = require("./paymentEntries.util");
-const { getCheckoutSessionID } = require("./paymentSession.util");
+const { createPendingRefundRow } = require("../bookings/cancellationRequests.util");
+const { sessionIDForPayment } = require("./paymentSession.util");
 
 const num   = (v) => Number(v) || 0;
 const lower = (v) => String(v || "").toLowerCase();
@@ -77,25 +78,28 @@ const openRefundForLatePayment = async ({ payment, phase, charged }) => {
     const plan = computeRefundPlan(payment);
     const ref  = db.collection("refundRequests").doc();
     const now  = new Date();
-    await ref.set({
+    // Who / why (userID, reason, notes) go on the pending cancellation row; parts / manualRefund become
+    // paymentEntries rows on approval. No returnDeposit: an auto-opened request is refunded in full.
+    const batch = db.batch();
+    batch.set(ref, {
       refundRequestID: ref.id,
       bookingID: payment.bookingID || null,
       paymentID: payment.paymentID,
-      userID: payment.userID || null,
-      reason: "Other",
-      notes: `Auto-created: the ${phase} payment of ₱${charged.toLocaleString()} arrived after booking ${payment.bookingID} was already cancelled.`,
-      amount: plan.total,
-      onlineAmount: plan.total - plan.manualAmount,
-      manualAmount: plan.manualAmount,
+      toRefundAmount: plan.total,
+      bookingPaid: plan.grossPaid,
       status: "Pending",
       autoCreated: true,
-      paymongoRefundIDs: [],   // webhook lookup key; parts / manualRefund become paymentEntries rows on approval
-      processedBy: null,
-      processedAt: null,
-      rejectReason: null,
       createdAt: now,
       updatedAt: now,
     });
+    createPendingRefundRow(ref.id, {
+      bookingID: payment.bookingID || null,
+      userID: payment.userID || null,
+      reason: "Other",
+      notes: `Auto-created: the ${phase} payment of ₱${charged.toLocaleString()} arrived after booking ${payment.bookingID} was already cancelled.`,
+      createdAt: now,
+    }, batch);
+    await batch.commit();
 
     recordAudit({
       action: "create",
@@ -337,9 +341,8 @@ const verifyAndSettlePayment = async (paymentDoc, { source = "verify" } = {}) =>
 
   const phaseStatus = phase === "balance" ? p.balanceStatus : p.status;
   if (lower(phaseStatus) !== "pending") return base; // nothing to verify
-  // The session id is on the paymentEntries row; older payments may still carry it on the document.
-  const sessionID = await getCheckoutSessionID(p, paymentDoc.id, phase);
-  if (!sessionID) return base; // nothing to verify
+  const sessionID = await sessionIDForPayment(paymentDoc, phase);
+  if (!sessionID) return base;                        // no checkout was started: nothing to verify
 
   const r = await retrieveCheckoutSession(sessionID);
   if (!r.ok) return { ...base, checked: false };
