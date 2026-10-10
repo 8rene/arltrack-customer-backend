@@ -125,14 +125,18 @@ const settlePenaltyCheckout = async ({ checkoutRef, paymongoPaymentID = null, ch
   const first = result.appliedTo[0] || {};
   const label = channelLabel(co.channel);
 
-  await recordTransactionLog({
-    bookingID: co.bookingID, paymentID: first.paymentID || null, userID: co.userID,
-    penaltyID: result.appliedTo.length === 1 ? result.appliedTo[0].penaltyID : null,   // one payment can cover several
-    type: "Payment", amount: result.applied, status: "Success",
-    paymentMethod: label, referenceNumber: paymongoPaymentID || co.sessionID || "",
-    description: "Outstanding penalty balance paid online.",
-    logID: `penalty-${co.checkoutID}`,           // deterministic → no duplicate if webhook + poll both land
-  });
+  // One log per penalty the checkout covered (own penaltyID / paymentID, the amount put toward THAT penalty).
+  // They share the checkout's PayMongo reference -- it was one real payment; its paymentEntries rows share a groupID.
+  for (const a of result.appliedTo) {
+    await recordTransactionLog({
+      bookingID: co.bookingID, paymentID: a.paymentID || null, userID: co.userID,
+      penaltyID: a.penaltyID,
+      type: "Payment", amount: a.amount, status: "Success",
+      paymentMethod: label, referenceNumber: paymongoPaymentID || co.sessionID || "",
+      description: "Outstanding penalty balance paid online.",
+      logID: `penalty-${co.checkoutID}-${a.penaltyID}`,   // deterministic → no duplicate if webhook + poll both land
+    });
+  }
 
   recordAudit({
     action: "update", userID: co.userID, bookingID: co.bookingID, paymentID: first.paymentID || null,

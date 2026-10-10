@@ -357,7 +357,7 @@ module.exports = {
   phaseOf,
   isPhasePaid,
   chargedAmountFor,
-  settlePhasePayment,
+  settlePhasePayment, 
   verifyAndSettlePayment,
   openRefundForLatePayment,
 };
