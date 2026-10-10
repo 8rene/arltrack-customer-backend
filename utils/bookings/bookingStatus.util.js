@@ -19,8 +19,8 @@
 //                    the balance is settled at pickup, so a deposit-paid booking is
 //                    already confirmed. Staff collect whatever is left at pickup
 //                    (admin: collectRemainingBalance → balanceCollected: true).
-//   currentPhase   → "deposit" | "balance" — which phase the shared
-//                    paymongoSessionID/checkoutUrl currently belong to.
+//   currentPhase   → "deposit" | "balance" — which phase the checkout session
+//                    (paymentEntries.sessionID) and payments.checkoutUrl belong to.
 //
 // A "to pay" booking (nothing paid) stops being valid when EITHER is true:
 //   1. Its own startDateTime has already passed.
@@ -41,6 +41,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { recordAudit } = require("../auditLogs/auditLogs.util");
 const { createNotification } = require("../../services/notification/notification.service");
 const { syncPaymentEntries } = require("../payments/paymentEntries.util");
+const { getCheckoutSessionID } = require("../payments/paymentSession.util");
 const { isPaidStatus, isPendingStatus } = require("../payments/paymentStatus.util");
 const { recordDirectCancellation } = require("./cancellationRequests.util");
 
@@ -219,7 +220,7 @@ const enforceToPayValidity = async (bookingID, booking) => {
   // from being auto-cancelled.
   const canVerify = !paymentSnap.empty
     && String(payment.status || "").toLowerCase() === "pending"
-    && !!payment.paymongoSessionID;
+    && !!(await getCheckoutSessionID(payment, paymentSnap.docs[0].id, "deposit"));
 
   if (!reason && !canVerify) return booking.status;
 

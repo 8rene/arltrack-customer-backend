@@ -9,6 +9,8 @@ const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = req
 const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
 const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
 const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefundRequests } = require("../../utils/payments/paymentEntries.util");
+const { getCheckoutSessionID, findPaymentDocsBySession } = require("../../utils/payments/paymentSession.util");
+const admin = require("firebase-admin");
 
 const { handlePenaltyWebhookPaid } = require("./penaltyPayment.controller");
 
@@ -163,7 +165,11 @@ const createPaymentLink = async (req, res) => {
     //   • still open                             → reuse the same link
     //   • expired                                → fall through and create a fresh session
     const phaseStatus = phase === "balance" ? payment.balanceStatus : payment.status;
-    if (payment.paymongoSessionID && payment.currentPhase === phase && phaseStatus === "pending") {
+    // The session id lives on the paymentEntries row now (the payment document only keeps it on older payments).
+    const openSessionID = (payment.currentPhase === phase && phaseStatus === "pending")
+      ? await getCheckoutSessionID(paymentDoc.data(), paymentDoc.id, phase)
+      : null;
+    if (openSessionID) {
       const v = await verifyAndSettlePayment(paymentDoc, { source: "pay-now" });
       if (v.settled || v.alreadyPaid) {
         return res.status(200).json({
@@ -182,7 +188,7 @@ const createPaymentLink = async (req, res) => {
         return res.status(200).json({
           message:     "Payment link already exists.",
           checkoutUrl: payment.checkoutUrl,
-          linkID:      payment.paymongoSessionID,
+          linkID:      openSessionID,
         });
       }
       // expired → create a new session below
@@ -226,9 +232,10 @@ const createPaymentLink = async (req, res) => {
     const sessionID    = sessionData.id;
     const checkoutUrl  = sessionData.attributes.checkout_url;
 
-    // 4. Save sessionID + checkoutUrl to Firestore
+    // 4. Save checkoutUrl + the phase to Firestore. The session id goes onto the paymentEntries row below; any old
+    //    paymongoSessionID on the document is deleted so it can never point at a previous checkout.
     await paymentDoc.ref.update({
-      paymongoSessionID: sessionID,
+      paymongoSessionID: admin.firestore.FieldValue.delete(),
       checkoutUrl,
       currentPhase:      phase,
       ...(phase === "balance" ? { balanceStatus: "pending" } : {}),
@@ -238,9 +245,10 @@ const createPaymentLink = async (req, res) => {
     // Record this attempt as a paymentEntries row (pending until PayMongo confirms it). The channel and the amount
     // this checkout really charges (a staff discount can make it lower than the stored balanceAmount) go to the
     // row only -- they are handed to the sync and never written on the payment document. Never throws.
-    await syncPaymentEntries(paymentDoc.id, {
+    const entrySync = await syncPaymentEntries(paymentDoc.id, {
       fields: {
         paymongoChannel: paymentMethodTypes[0],
+        paymongoSessionID: sessionID,   // handed to the sync, so it lands on the row; the document no longer stores it
         paymongoTransactions: [{
           phase,
           amount:  amountToCharge,
@@ -251,6 +259,12 @@ const createPaymentLink = async (req, res) => {
         }],
       },
     });
+    // The sync never throws. If it could not write the row, the session id would exist nowhere: keep it on the
+    // document so the status poll and the webhook can still find this checkout.
+    if (entrySync.error || !entrySync.written) {
+      console.warn("[paymongo] session row not written, keeping paymongoSessionID on the payment document:", entrySync.error || "nothing written");
+      await paymentDoc.ref.update({ paymongoSessionID: sessionID });
+    }
 
     return res.status(200).json({
       message: "Payment link created.",
@@ -507,7 +521,7 @@ const handleWebhook = async (req, res) => {
       if (paymentID) {
         paymentSnap = await db.collection("payments").where("paymentID", "==", paymentID).limit(1).get();
       } else if (sessionID) {
-        paymentSnap = await db.collection("payments").where("paymongoSessionID", "==", sessionID).limit(1).get();
+        paymentSnap = await findPaymentDocsBySession(sessionID);
       }
 
       if (!paymentSnap || paymentSnap.empty) {
@@ -542,7 +556,7 @@ const handleWebhook = async (req, res) => {
       if (paymentID) {
         paymentSnap = await db.collection("payments").where("paymentID", "==", paymentID).limit(1).get();
       } else if (sessionID) {
-        paymentSnap = await db.collection("payments").where("paymongoSessionID", "==", sessionID).limit(1).get();
+        paymentSnap = await findPaymentDocsBySession(sessionID);
       }
       if (paymentSnap && !paymentSnap.empty) {
         const failedDoc     = paymentSnap.docs[0];
@@ -665,7 +679,8 @@ const getPaymentStatus = async (req, res) => {
     // forever once the deposit clears). verifyAndSettlePayment asks PayMongo and,
     // if the customer did pay, settles it through the same transactional path the
     // webhook uses — so whichever of the two wins the race, the other is a no-op.
-    if (phaseStatus === "pending" && p.paymongoSessionID) {
+    const pollSessionID = phaseStatus === "pending" ? await getCheckoutSessionID(p, doc.id, phase) : null;
+    if (pollSessionID) {
       const v = await verifyAndSettlePayment(doc, { source: "status-poll" });
       if (v.settled || v.alreadyPaid) {
         return res.status(200).json({ status: "paid", bookingID: p.bookingID, phase });

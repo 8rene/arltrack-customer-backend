@@ -12,6 +12,11 @@ export const Payment = {
   driversFee: 0,        // chauffeur fee (0 when self-drive)
   gatewayFee: 0,        // payment-gateway fee charged to the customer (peso amount)
   securityDeposit: 0,   // refundable deposit, already inside `amount`
+  // Written by the first payment settling (settlePayment.util.js): depositStatus = "Held". Everything after that is
+  // the admin app's (settleBooking / waive / refund): depositSettled (used for penalties), depositReturned,
+  // depositSettledAt. Read it all through getDepositView() (utils/payments/depositView.util.js, generated from the
+  // admin repo); how the deposit was returned is the "<paymentID>_depositreturn" row in paymentEntries.
+  depositStatus: "",    // "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"
 
   // Percentage fees, snapshotted at booking time so a later Settings change
   // never alters an existing booking. 0 on bookings made before percent fees.
@@ -23,7 +28,8 @@ export const Payment = {
   // paymentEntries (referenceNumber = pay_..., transactionFee, method) and hydratePayment() gives
   // depositPaymongoPaymentID / balancePaymongoPaymentID / depositPaymongoFee / balancePaymongoFee /
   // paymongoFeeTotal / paymongoChannel / paymongoTransactions back to readers.
-  // Only paymongoSessionID and checkoutUrl stay here: the webhook finds the payment by the session id.
+  // Only checkoutUrl stays here. The PayMongo checkout session id lives on the paymentEntries row
+  // (sessionID); the webhook finds the payment through it. See utils/payments/paymentSession.util.js.
   status: "",         // "Paid" | "Pending" | "Refunded"
   discountAmount: 0,
   discountReason: "",

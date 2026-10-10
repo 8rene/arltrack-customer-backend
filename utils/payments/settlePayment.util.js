@@ -31,6 +31,7 @@ const { computeRefundPlan } = require("./paymentBreakdown.util");
 const { channelLabel, retrieveCheckoutSession } = require("./paymongoClient.util");
 const { buildFeePatch } = require("./paymongoFee.util");
 const { syncPaymentEntries, hydratePaymentData, getEntriesForPaymentIDs } = require("./paymentEntries.util");
+const { getCheckoutSessionID } = require("./paymentSession.util");
 
 const num   = (v) => Number(v) || 0;
 const lower = (v) => String(v || "").toLowerCase();
@@ -335,9 +336,12 @@ const verifyAndSettlePayment = async (paymentDoc, { source = "verify" } = {}) =>
   if (isPhasePaid(p, phase)) return { ...base, alreadyPaid: true };
 
   const phaseStatus = phase === "balance" ? p.balanceStatus : p.status;
-  if (lower(phaseStatus) !== "pending" || !p.paymongoSessionID) return base; // nothing to verify
+  if (lower(phaseStatus) !== "pending") return base; // nothing to verify
+  // The session id is on the paymentEntries row; older payments may still carry it on the document.
+  const sessionID = await getCheckoutSessionID(p, paymentDoc.id, phase);
+  if (!sessionID) return base; // nothing to verify
 
-  const r = await retrieveCheckoutSession(p.paymongoSessionID);
+  const r = await retrieveCheckoutSession(sessionID);
   if (!r.ok) return { ...base, checked: false };
 
   if (r.paid) {
