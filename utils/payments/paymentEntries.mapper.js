@@ -93,7 +93,9 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
 
   // The PayMongo checkout session belongs to whichever phase was started last.
   const sessionPhase = low(p.currentPhase) === "balance" ? "balance" : "deposit";
-  const sessionOf = (phase) => (sessionPhase === phase ? nullIfSentinel(p.paymongoSessionID) : null);
+  const sessionOf = (phase) => (sessionPhase === phase
+    ? (nullIfSentinel(p.paymongoSessionID) || nullIfSentinel((arrOf(phase) || {}).sessionID))   // createPaymentLink hands the id over in paymongoTransactions[]
+    : null);
 
   const common = (phase) => ({
     paymentEntryID: entryIDFor(paymentID, phase),
