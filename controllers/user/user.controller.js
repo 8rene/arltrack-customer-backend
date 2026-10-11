@@ -2,19 +2,6 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const admin  = require("firebase-admin");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { generateUniqueReferralCode } = require("../../utils/referrals/referral.util");
-const { toSignedUrl, canonicalStorageUrl } = require("../../utils/storage/signedUrl.util");
-
-// ID images live in PRIVATE storage; the Firestore doc keeps a stable reference
-// that isn't viewable by itself. Anything sent to the browser gets a short-lived
-// signed URL instead (see utils/storage/signedUrl.util.js).
-const DOC_URL_FIELDS = ["documentImageUrl", "driverLicenseUrl", "selfieWithIdUrl"];
-const withSignedDocumentUrls = async (doc) => {
-  const out = { ...doc };
-  await Promise.all(DOC_URL_FIELDS.map(async (f) => {
-    if (out[f]) out[f] = await toSignedUrl(out[f]);
-  }));
-  return out;
-};
 
 // Same role IDs as editRequest.controller.js/signup.controller.js's
 // STAFF_NOTIFY_ROLE_IDS — kept as a local literal here too since each
@@ -171,12 +158,10 @@ const getFullProfile = async (req, res) => {
     }));
 
     // Map all documents
-    const documents = await Promise.all(documentSnap.docs.map(doc =>
-      withSignedDocumentUrls({
-        userDocumentID: doc.id,
-        ...doc.data(),
-      })
-    ));
+    const documents = documentSnap.docs.map(doc => ({
+      userDocumentID: doc.id,
+      ...doc.data(),
+    }));
 
     // Outstanding penalty balance — used to read a cached field mirrored
     // onto the user doc by admin-backend's penalty.service.js. That field
@@ -414,11 +399,9 @@ async function submitIdResubmitRequest(req, res) {
 
   try {
     const urlFields = documentKind === "license"
-      // currentUrl comes back from the profile as a SIGNED url that expires —
-      // store the stable reference instead so staff can still open it later.
-      ? { currentLicenseUrl: canonicalStorageUrl(currentUrl || ""), newLicenseUrl: newUrl }
+      ? { currentLicenseUrl: currentUrl || "", newLicenseUrl: newUrl }
       : {
-          currentDocumentUrl: canonicalStorageUrl(currentUrl || ""),
+          currentDocumentUrl: currentUrl || "",
           newDocumentUrl: newUrl,
           documentType: documentType.trim(),
           documentNumber: documentNumber.trim(),
