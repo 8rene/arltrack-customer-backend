@@ -100,8 +100,10 @@ const getBookingQuote = async (req, res) => {
   try {
     const pricePerDay = await getPricePerDay(carID, duration);
 
-    const startDateTime = startDate && startTime ? new Date(`${startDate}T${startTime}:00`) : null;
-    const endDateTime    = endDate && endTime     ? new Date(`${endDate}T${endTime}:00`)     : null;
+    // startDate/startTime are Manila wall-clock; always pin +08:00 so the instant is
+    // the same whatever timezone the server runs in (Vercel is UTC).
+    const startDateTime = startDate && startTime ? new Date(`${startDate}T${startTime}:00+08:00`) : null;
+    const endDateTime    = endDate && endTime     ? new Date(`${endDate}T${endTime}:00+08:00`)     : null;
 
     const fees = await computeBookingFees({
       pricePerDay,
@@ -204,21 +206,18 @@ const createBooking = async (req, res) => {
   // reach this endpoint directly (stale localStorage draft, bypassed
   // UI, manual API call, etc). Reject anything dated before "today"
   // at the booking-day granularity so legit same-day bookings still work.
+  // "Today" and the requested dates are compared as Manila calendar days
+  // ("YYYY-MM-DD" strings compare correctly) — the server's own timezone (UTC on
+  // Vercel) must not decide what "today" is.
+  const todayManila = toManila(new Date()).day;
+  const isValidDay  = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(new Date(`${d}T00:00:00+08:00`).getTime());
   if (startDate) {
-    const todayDateOnly = new Date();
-    todayDateOnly.setHours(0, 0, 0, 0);
-    const requestedStartDateOnly = new Date(`${startDate}T00:00:00`);
-
-    if (isNaN(requestedStartDateOnly.getTime()) || requestedStartDateOnly < todayDateOnly) {
+    if (!isValidDay(startDate) || startDate < todayManila) {
       return res.status(400).json({ message: "startDate cannot be in the past." });
     }
   }
   if (endDate) {
-    const todayDateOnly = new Date();
-    todayDateOnly.setHours(0, 0, 0, 0);
-    const requestedEndDateOnly = new Date(`${endDate}T00:00:00`);
-
-    if (isNaN(requestedEndDateOnly.getTime()) || requestedEndDateOnly < todayDateOnly) {
+    if (!isValidDay(endDate) || endDate < todayManila) {
       return res.status(400).json({ message: "endDate cannot be in the past." });
     }
   }
@@ -227,11 +226,14 @@ const createBooking = async (req, res) => {
     const now = new Date();
 
     // Build startDateTime and endDateTime
+    // startDate/startTime are Manila wall-clock — pin +08:00 so the stored instant is
+    // correct on any server timezone (this also makes the number-coding check below,
+    // which reads the Manila weekday/time, agree with /bookings/check-coding).
     const startDateTime = startDate && startTime
-      ? new Date(`${startDate}T${startTime}:00`)
+      ? new Date(`${startDate}T${startTime}:00+08:00`)
       : now;
     const endDateTime = endDate && endTime
-      ? new Date(`${endDate}T${endTime}:00`)
+      ? new Date(`${endDate}T${endTime}:00+08:00`)
       : startDateTime;
 
     // ── Authoritative fee calculation — never trust client-sent totals ──
@@ -429,71 +431,12 @@ const createBooking = async (req, res) => {
     // maintenance records are created manually by staff in the admin app's
     // Maintenance page (cleaning/inspection checklist) and are not what
     // blocks the buffer day.
-    {
-      const asDate = (v) => (v && v.toDate ? v.toDate() : new Date(v));
-      const BUFFER_MS = 24 * 60 * 60 * 1000;
+    // >>> The overlap + maintenance checks described above now run INSIDE the booking
+    // transaction below (see "Atomic availability check + write"). They used to run
+    // here, separately from the write, so two customers booking the same car at the
+    // same moment could both pass them.
 
-      const [otherSnap, maintSnap] = await Promise.all([
-        db.collection("bookings").where("carID", "==", carID).get(),
-        db.collection("maintenance")
-          .where("carID", "==", carID)
-          .where("status", "==", "Scheduled")
-          .get(),
-      ]);
-
-      const otherOverlap = otherSnap.docs
-        .map((d) => d.data())
-        .find((b) => {
-          if (b.userID === userID) return false;
-          const bStart = asDate(b.startDateTime);
-          const bEnd   = asDate(b.endDateTime);
-          if (!bStart || !bEnd) return false;
-
-          if ([BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING].includes(b.status)) {
-            // Still pending/active — block its own window PLUS a 1-day
-            // buffer on both sides, matching getDateStatuses()'s
-            // "preparation" days exactly.
-            const bufferedStart = new Date(bStart.getTime() - BUFFER_MS);
-            const bufferedEnd   = new Date(bEnd.getTime()   + BUFFER_MS);
-            return bufferedStart < endDateTime && bufferedEnd > startDateTime;
-          }
-
-          if (b.status === BOOKING_STATUS.COMPLETED) {
-            // Already returned — the rental window itself is over and
-            // can't conflict with anything new; only the day-after
-            // cleaning/inspection buffer still matters.
-            const bufferedEnd = new Date(bEnd.getTime() + BUFFER_MS);
-            return bEnd < endDateTime && bufferedEnd > startDateTime;
-          }
-
-          return false;
-        });
-      if (otherOverlap) {
-        return res.status(409).json({
-          message: "This car needs a short turnaround before/after another booking on these dates. Please choose another date or vehicle.",
-        });
-      }
-
-      // Maintenance records only store a single day (maintenanceDate), with
-      // no separate end date — same as GET /api/services/car-bookings/:carID.
-      // This still catches any OTHER (manually staff-scheduled) maintenance
-      // window — the post-rental buffer above doesn't depend on it.
-      const maintOverlap = maintSnap.docs
-        .map((d) => d.data().maintenanceDate)
-        .filter(Boolean)
-        .some((md) => {
-          const day = asDate(md); day.setHours(0, 0, 0, 0);
-          const dayEnd = new Date(day); dayEnd.setHours(23, 59, 59, 999);
-          return day < endDateTime && dayEnd > startDateTime;
-        });
-      if (maintOverlap) {
-        return res.status(409).json({
-          message: "This car is scheduled for maintenance on the selected dates. Please choose another date or vehicle.",
-        });
-      }
-    }
-
-    // ── 1. Save to bookings collection (auto Firestore ID) ──
+    // ── 1. Build the bookings doc (written inside the transaction below) ──
     const bookingRef = db.collection("bookings").doc();
     const bookingID  = bookingRef.id;
 
@@ -512,7 +455,7 @@ const createBooking = async (req, res) => {
     }
 
     // ── bookings collection: booking details ONLY — no fee/payment fields ──
-    await bookingRef.set({
+    const bookingData = {
       bookingID,
       carID:         carID       || "",
       userID:        userID      || "",
@@ -524,10 +467,10 @@ const createBooking = async (req, res) => {
       serviceTypeID: serviceTypeID || null,
       startDateTime,
       endDateTime,
-      // The exact pickup INSTANT (Manila, UTC+8). startDateTime above is parsed
-      // with no timezone, so on a UTC server it is shifted by 8 hours; the
-      // refund policy's 48-hour window needs the real instant.
-      pickupAt:      startDate && startTime ? new Date(`${startDate}T${startTime}:00+08:00`) : startDateTime,
+      // The exact pickup INSTANT (Manila, UTC+8) — startDateTime is already pinned
+      // to +08:00 above, so it is the real instant on any server timezone. The
+      // refund policy's 48-hour window is measured from this.
+      pickupAt:      startDateTime,
       totalDays:     fees.days || 1,
       location:      destination || "",
       modeOfDriving: driveType === "chauffeur" ? "With Chauffeur" : "Self Drive",
@@ -543,13 +486,13 @@ const createBooking = async (req, res) => {
       hasDevice,
       createdAt:     now,
       updatedAt:     now,
-    });
+    };
 
-    // ── 2. Save to payments collection (auto Firestore ID) ──
+    // ── 2. Build the payments doc (written inside the transaction below) ──
     const paymentRef = db.collection("payments").doc();
     const paymentID  = paymentRef.id;
 
-    await paymentRef.set({
+    const paymentData = {
       paymentID,
       bookingID,
       userID:          userID         || "",
@@ -581,9 +524,9 @@ const createBooking = async (req, res) => {
       // written by syncPaymentEntries() as each one happens.
       createdAt:       now,
       updatedAt:       now,
-    });
+    };
 
-    // ── 3. Save to bookingSessions collection (own doc ID; bookingID is FK only) ──
+    // ── 3. Build the bookingSessions doc (own doc ID; bookingID is FK only; written inside the transaction below) ──
     // This is the piece that was missing entirely: pickupLocation,
     // geofenceZones and the codingCheck audit
     // were always saving as null because nothing ever wrote this doc.
@@ -601,7 +544,7 @@ const createBooking = async (req, res) => {
     const bookingSessionRef = db.collection("bookingSessions").doc(); // own auto-generated PK
     const bookingSessionID  = bookingSessionRef.id;
 
-    await bookingSessionRef.set(
+    const bookingSessionData =
       createBookingSession(bookingSessionID, bookingID, {
         pickupLocation: pickupLat != null && pickupLng != null
           ? { address: pickupLocation || "", lat: pickupLat, lng: pickupLng }
@@ -614,11 +557,120 @@ const createBooking = async (req, res) => {
           blocked:   false, // we only ever reach here when NOT blocked — the 400 above returns early otherwise
           reason:    null,
           city:      destinationCity || null,
-          dayOfWeek: startDateTime.getDay(),
+          dayOfWeek: toManila(startDateTime).dow,
           checkedAt: now,
         },
-      })
-    );
+      });
+
+    // ── Atomic availability check + write ──
+    // The overlap/maintenance checks and the bookings / payments / bookingSessions
+    // writes now happen in ONE Firestore transaction that also reads + writes a
+    // per-car lock doc (carLocks/{carID}). Every booking for the same car touches
+    // that doc, so concurrent bookings for the SAME car are serialised: the second
+    // one retries, sees the first booking, and gets the 409. Different cars use
+    // different lock docs and never wait on each other. The three docs are also
+    // written together, so a failure can't leave a booking without its payment.
+    //
+    // NOTE: Firestore may run this callback more than once (retry on contention), so
+    // it must not send responses or have side effects. Conflicts are thrown as
+    // BookingConflict and turned into the 409 below.
+    class BookingConflict extends Error {
+      constructor(body) { super(body.message); this.body = body; }
+    }
+
+    try {
+      await db.runTransaction(async (tx) => {
+        const lockRef = db.collection("carLocks").doc(String(carID));
+
+        // ---- all reads first ----
+        const [, carBookingsSnap, maintSnap] = await Promise.all([
+          tx.get(lockRef),
+          tx.get(db.collection("bookings").where("carID", "==", carID)),
+          tx.get(
+            db.collection("maintenance")
+              .where("carID", "==", carID)
+              .where("status", "==", "Scheduled")
+          ),
+        ]);
+
+        const BUFFER_MS = 24 * 60 * 60 * 1000;
+        const ACTIVE = [BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING];
+        const carBookings = carBookingsSnap.docs.map((d) => d.data());
+
+        // Same customer + same car + overlapping dates: last-line guard against a
+        // double-click / two tabs. (The friendlier stale-booking handling already
+        // ran above, before the transaction.)
+        const mine = carBookings.find((b) =>
+          b.userID === userID &&
+          ACTIVE.includes(b.status) &&
+          asDate(b.startDateTime) < endDateTime &&
+          asDate(b.endDateTime)   > startDateTime
+        );
+        if (mine) {
+          throw new BookingConflict({
+            message: mine.status === BOOKING_STATUS.TO_PAY
+              ? "You already have an unpaid booking for this car on these dates. Finish paying for it in My Bookings › To Pay, or cancel it there first."
+              : "You already have a booking for this car on these dates.",
+            existingBookingID: mine.bookingID,
+            existingStatus: mine.status,
+            existingStartDateTime: mine.startDateTime || null,
+            existingEndDateTime: mine.endDateTime || null,
+          });
+        }
+
+        // Another customer's booking, with the 1-day turnaround buffer.
+        const otherOverlap = carBookings.find((b) => {
+          if (b.userID === userID) return false;
+          const bStart = asDate(b.startDateTime);
+          const bEnd   = asDate(b.endDateTime);
+          if (!bStart || !bEnd) return false;
+
+          if (ACTIVE.includes(b.status)) {
+            // Still pending/active — block its own window PLUS a 1-day buffer on
+            // both sides, matching getDateStatuses()'s "preparation" days exactly.
+            const bufferedStart = new Date(bStart.getTime() - BUFFER_MS);
+            const bufferedEnd   = new Date(bEnd.getTime()   + BUFFER_MS);
+            return bufferedStart < endDateTime && bufferedEnd > startDateTime;
+          }
+
+          if (b.status === BOOKING_STATUS.COMPLETED) {
+            // Already returned — only the day-after cleaning/inspection buffer matters.
+            const bufferedEnd = new Date(bEnd.getTime() + BUFFER_MS);
+            return bEnd < endDateTime && bufferedEnd > startDateTime;
+          }
+
+          return false;
+        });
+        if (otherOverlap) {
+          throw new BookingConflict({
+            message: "This car needs a short turnaround before/after another booking on these dates. Please choose another date or vehicle.",
+          });
+        }
+
+        // Staff-scheduled maintenance (single-day records, Manila calendar days).
+        const maintOverlap = maintSnap.docs
+          .map((d) => d.data().maintenanceDate)
+          .filter(Boolean)
+          .some((md) => {
+            const { start: day, end: dayEnd } = manilaDayRange(toManila(asDate(md)).day);
+            return day < endDateTime && dayEnd > startDateTime;
+          });
+        if (maintOverlap) {
+          throw new BookingConflict({
+            message: "This car is scheduled for maintenance on the selected dates. Please choose another date or vehicle.",
+          });
+        }
+
+        // ---- then all writes ----
+        tx.set(lockRef, { carID, lastBookingID: bookingID, updatedAt: now }, { merge: true });
+        tx.set(bookingRef, bookingData);
+        tx.set(paymentRef, paymentData);
+        tx.set(bookingSessionRef, bookingSessionData);
+      });
+    } catch (txErr) {
+      if (txErr instanceof BookingConflict) return res.status(409).json(txErr.body);
+      throw txErr; // anything else -> the outer catch (500)
+    }
 
     // ── 4. Save firstName/lastName to userDetails if empty ──
     if (userID && (firstName || lastName)) {

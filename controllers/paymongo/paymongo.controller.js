@@ -47,7 +47,10 @@ const createPaymentLink = async (req, res) => {
   // It is intentionally no longer read from the request body: the charge
   // amount is now always derived below from the payment doc's own stored
   // grandTotal + methodOfPayment.
-  const { bookingID, paymentID, description, paymentMethod } = req.body;
+  // `description` is intentionally NOT read from the body any more — the checkout
+  // line-item name is built on the server (below), so a client can't put arbitrary
+  // text in front of the payer on PayMongo's hosted page.
+  const { bookingID, paymentID, paymentMethod } = req.body;
 
   if (!bookingID || !paymentID) {
     return res.status(400).json({ message: "bookingID and paymentID are required." });
@@ -205,7 +208,7 @@ const createPaymentLink = async (req, res) => {
         attributes: {
           line_items: [
             {
-              name:     description || `ARLTrack Booking #${bookingID}${phase === "balance" ? " (Balance)" : ""}`,
+              name:     `ARLTrack Booking #${payment.bookingID || bookingID}${phase === "balance" ? " (Balance)" : ""}`,
               amount:   amountInCentavos,
               currency: "PHP",
               quantity: 1,
@@ -434,6 +437,16 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const handleWebhook = async (req, res) => {
   const webhookSecret = process.env.PAYMONGO_WEBHOOK_SECRET;
+
+  // The secret is REQUIRED. Without it there is nothing to verify the request
+  // against, and this endpoint has no auth middleware (PayMongo calls it
+  // directly) — so a forged POST could mark any pending payment "paid" for free.
+  // Refuse instead of silently skipping verification. (PayMongo retries on a
+  // non-2xx, so a real event isn't lost once the secret is set.)
+  if (!webhookSecret) {
+    console.error("PayMongo webhook: PAYMONGO_WEBHOOK_SECRET is not set — rejecting request.");
+    return res.status(503).json({ message: "Webhook not configured." });
+  }
 
   const sigHeader = req.headers["paymongo-signature"];
 

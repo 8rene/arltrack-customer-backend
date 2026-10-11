@@ -7,7 +7,7 @@ const OTP_COOLDOWN_MS = 60 * 1000;     // 1 minute cooldown between requests
 const MAX_ATTEMPTS   = 5;              // max wrong guesses before lockout
 
 // POST /api/auth/send-otp
-// body: { email, name, template_id, purpose }
+// body: { email, name, purpose }   (a client-sent template_id is ignored — see below)
 //
 // `purpose` distinguishes the two flows that share this endpoint:
 //   - "signup" (default/omitted) — the email is EXPECTED not to exist yet.
@@ -19,11 +19,13 @@ const MAX_ATTEMPTS   = 5;              // max wrong guesses before lockout
 //     using the customer-side forgot-password flow to reset their password —
 //     same accounts that are blocked from customer login (login.controller.js).
 //
-// Message is intentionally generic either way ("No account found with
-// this email") so a reset attempt against a real staff email doesn't
-// reveal that the email belongs to an admin-side account.
+// The response is IDENTICAL whether or not the account exists (or is an
+// admin-side account): { emailSent: true }, no OTP stored, no email sent.
+// Previously an unknown email got a 404 "No account found", which let anyone
+// test which emails are registered. (The reset-password step can't be used to
+// probe either: it needs a valid OTP, and unknown emails never get one.)
 const sendOTP = async (req, res) => {
-  const { email, name, template_id, purpose } = req.body;
+  const { email, name, purpose } = req.body;
   if (!email) return res.status(400).json({ message: "Email is required." });
 
   try {
@@ -33,7 +35,7 @@ const sendOTP = async (req, res) => {
         firebaseUser = await auth.getUserByEmail(email);
       } catch (err) {
         if (err.code === "auth/user-not-found") {
-          return res.status(404).json({ message: "No account found with this email." });
+          return res.status(200).json({ emailSent: true }); // looks the same as a real send
         }
         throw err;
       }
@@ -42,7 +44,7 @@ const sendOTP = async (req, res) => {
       const roleID  = userDoc.exists ? userDoc.data().roleID : null;
 
       if (roleID && await isBlockedAdminRole(roleID, db)) {
-        return res.status(404).json({ message: "No account found with this email." });
+        return res.status(200).json({ emailSent: true }); // same — don't reveal admin-side accounts
       }
     }
 
@@ -78,7 +80,10 @@ const sendOTP = async (req, res) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         service_id:  process.env.EMAILJS_SERVICE_ID,
-        template_id: template_id || "template_pcp4m9n",
+        // Always the server's OTP template. This used to accept a client-sent
+        // template_id, which let anyone send any of the account's EmailJS
+        // templates to any address through this endpoint.
+        template_id: process.env.EMAILJS_OTP_TEMPLATE_ID || "template_pcp4m9n",
         user_id:     process.env.EMAILJS_PUBLIC_KEY,
         accessToken: process.env.EMAILJS_PRIVATE_KEY,
         template_params: {
@@ -93,8 +98,10 @@ const sendOTP = async (req, res) => {
 
     if (!response.ok) {
       const errText = await response.text();
+      // Log the provider's error server-side only — it can contain account /
+      // template details that shouldn't be sent to the browser.
       console.error("EmailJS error:", errText);
-      return res.status(200).json({ emailSent: false, emailError: errText });
+      return res.status(200).json({ emailSent: false });
     }
 
     return res.status(200).json({ emailSent: true });

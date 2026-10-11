@@ -20,6 +20,44 @@ const STAFF_NOTIFY_ROLE_IDS = [
 ];
 
 // ─────────────────────────────────────────────────────────────
+// Uploaded ID images: allowed types + size cap.
+// The signup form always sends a compressed JPEG (SignUpModal.jsx compressImage),
+// so anything else — or anything over the cap — is not a real submission. The
+// client-supplied MIME type used to be trusted as-is and the only limit was the
+// 20 MB request-body cap. We also check the file's magic bytes so a non-image
+// can't be uploaded under an image MIME type.
+// ─────────────────────────────────────────────────────────────
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // decoded size per image (3 images ≈ 16 MB < 20 MB body limit)
+const IMAGE_SIGNATURES = {
+  "image/jpeg": (b) => b.length > 3  && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  "image/png":  (b) => b.length > 8  && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47,
+  "image/webp": (b) => b.length > 12 && b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP",
+};
+
+// Returns { mimeType, buffer } for a valid image data-URL, or { error } (user-facing).
+// An empty value is allowed here (callers decide whether an image is required).
+const parseImageDataUrl = (dataUrl, label) => {
+  if (!dataUrl) return { empty: true };
+  const m = typeof dataUrl === "string"
+    ? dataUrl.match(/^data:([A-Za-z-+/]+);base64,(.+)$/)
+    : null;
+  const mimeType = m && m[1].toLowerCase();
+  if (!m || !IMAGE_SIGNATURES[mimeType]) {
+    return { error: `${label} must be a JPEG, PNG, or WebP image.` };
+  }
+  // Check the size from the base64 length BEFORE decoding.
+  const approxBytes = Math.floor((m[2].length * 3) / 4);
+  if (approxBytes > MAX_IMAGE_BYTES) {
+    return { error: `${label} is too large. Maximum size is ${MAX_IMAGE_BYTES / (1024 * 1024)} MB.` };
+  }
+  const buffer = Buffer.from(m[2], "base64");
+  if (!IMAGE_SIGNATURES[mimeType](buffer)) {
+    return { error: `${label} is not a valid ${mimeType.replace("image/", "").toUpperCase()} image.` };
+  }
+  return { mimeType, buffer };
+};
+
+// ─────────────────────────────────────────────────────────────
 // Helper: upload a base64 data-URL to Firebase Storage (Admin SDK)
 // Returns the public download URL, or "" on failure.
 // Admin SDK bypasses Storage Security Rules entirely.
@@ -27,13 +65,14 @@ const STAFF_NOTIFY_ROLE_IDS = [
 const uploadBase64Image = async (base64DataUrl, destPath) => {
   if (!base64DataUrl) return "";
   try {
-    const matches = base64DataUrl.match(/^data:([A-Za-z-+/]+);base64,(.+)$/);
-    if (!matches || matches.length !== 3) {
-      console.error(`uploadBase64Image: invalid data URL format for ${destPath}`);
+    // Validated again here (defence in depth — signup() also rejects bad images
+    // up front, before the account is created).
+    const parsed = parseImageDataUrl(base64DataUrl, destPath);
+    if (parsed.error) {
+      console.error(`uploadBase64Image: rejected ${destPath}: ${parsed.error}`);
       return "";
     }
-    const mimeType = matches[1];
-    const buffer   = Buffer.from(matches[2], "base64");
+    const { mimeType, buffer } = parsed;
 
     const file = bucket.file(destPath);
     await file.save(buffer, {
@@ -87,6 +126,17 @@ const signup = async (req, res) => {
   } = req.body;
 
   try {
+    // 0. Reject bad ID images BEFORE creating anything (otherwise the account would
+    // be created and the image silently dropped).
+    for (const [value, label] of [
+      [documentImageBase64, "Government ID photo"],
+      [driverLicenseBase64, "Driver's license photo"],
+      [selfieWithIdBase64,  "Selfie with ID"],
+    ]) {
+      const check = parseImageDataUrl(value, label);
+      if (check.error) return res.status(400).json({ message: check.error });
+    }
+
     // 1. Create user in Firebase Auth
     const firebaseUser = await auth.createUser({
       email,
