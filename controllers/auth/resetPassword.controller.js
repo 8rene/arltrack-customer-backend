@@ -1,7 +1,6 @@
 const { db, auth } = require("../../config/firebaseConnection/firebase");
 const { isBlockedAdminRole } = require("../../utils/roles/role.util");
-
-const MAX_ATTEMPTS = 5;
+const { verifyAndConsumeOTP } = require("./otp.controller");
 
 // Same strength rule enforced client-side at signup (SignUpModal.jsx) —
 // checked again here since this is a new, separate entry point.
@@ -14,7 +13,7 @@ const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()\-_=+[\]{
 const resetPassword = async (req, res) => {
   const { email, otp, newPassword } = req.body;
 
-  if (!email || !otp || !newPassword) {
+  if (!email || !otp || !newPassword || typeof email !== "string") {
     return res.status(400).json({ message: "Email, OTP, and new password are required." });
   }
   if (!PASSWORD_REGEX.test(newPassword)) {
@@ -26,35 +25,25 @@ const resetPassword = async (req, res) => {
   try {
     // 1. Validate the OTP — same checks as verifyOTP in otp.controller.js
     const otpRef = db.collection("otpCodes").doc(email);
-    const otpDoc = await otpRef.get();
-
-    if (!otpDoc.exists) {
-      return res.status(404).json({ message: "OTP not found. Please request a new one." });
-    }
-
-    const otpData = otpDoc.data();
 
     // Only a code requested with purpose "reset" can reset a password — a
-    // signup/login code for the same email must not.
-    if (otpData.purpose !== "reset") {
+    // signup/login code for the same email must not. The check and the
+    // wrong-guess count are one atomic step (verifyAndConsumeOTP in otp.controller.js); the code
+    // is kept (consume: false) until the password has actually been changed.
+    const result = await verifyAndConsumeOTP({ email, otp: String(otp), purpose: "reset", consume: false });
+
+    if (result.status === "not_found") {
       return res.status(404).json({ message: "OTP not found. Please request a new one." });
     }
-
-    if (new Date() > otpData.expiresAt.toDate()) {
-      await otpRef.delete();
+    if (result.status === "expired") {
       return res.status(400).json({ message: "OTP has expired. Please request a new one." });
     }
-
-    if (otpData.attempts >= MAX_ATTEMPTS) {
-      await otpRef.delete();
+    if (result.status === "locked") {
       return res.status(429).json({ message: "Too many failed attempts. Please request a new OTP." });
     }
-
-    if (otpData.otp !== otp) {
-      await otpRef.update({ attempts: otpData.attempts + 1 });
-      const remaining = MAX_ATTEMPTS - (otpData.attempts + 1);
+    if (result.status === "invalid") {
       return res.status(400).json({
-        message: `Invalid OTP. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`,
+        message: `Invalid OTP. ${result.remaining} attempt${result.remaining === 1 ? "" : "s"} remaining.`,
       });
     }
 

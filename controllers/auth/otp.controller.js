@@ -1,10 +1,81 @@
+const crypto = require("crypto");
 const { db, auth } = require("../../config/firebaseConnection/firebase");
 const generateOTP = require("../../utils/generateOTP");
 const { isBlockedAdminRole } = require("../../utils/roles/role.util");
 
 const OTP_EXPIRY_MS  = 5 * 60 * 1000;  // 5 minutes
 const OTP_COOLDOWN_MS = 60 * 1000;     // 1 minute cooldown between requests
-const MAX_ATTEMPTS   = 5;              // max wrong guesses before lockout
+const MAX_ATTEMPTS = 5;                // max wrong guesses before lockout
+
+// ── OTP storage / verification helpers ───────────────────────────────────────
+// Also used by resetPassword.controller.js.
+//  - The code is never stored in plain text: Firestore keeps an HMAC of it
+//    (keyed with a server secret), so a leaked database can't be used to read
+//    live codes or brute-force the 1,000,000 possibilities offline.
+//  - Checking a code and counting a wrong guess happen inside ONE Firestore
+//    transaction, so parallel requests can't each "see" the same attempts count
+//    and sneak extra guesses past MAX_ATTEMPTS, and a correct code can only be
+//    consumed once.
+const hmacKey = () => {
+  const key = process.env.OTP_HMAC_SECRET || process.env.JWT_SECRET;
+  if (!key) throw new Error("OTP_HMAC_SECRET (or JWT_SECRET) must be set.");
+  return key;
+};
+
+// Bound to the email so the same digits for two emails never hash the same.
+const hashOTP = (email, otp) =>
+  crypto.createHmac("sha256", hmacKey()).update(`${String(email)}:${String(otp)}`).digest("hex");
+
+const safeEqual = (a, b) => {
+  const bufA = Buffer.from(String(a || ""), "utf8");
+  const bufB = Buffer.from(String(b || ""), "utf8");
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+};
+
+const otpMatches = (data, email, otp) => {
+  if (data.otpHash) return safeEqual(data.otpHash, hashOTP(email, otp));
+  // Codes issued before this change (still valid for up to 5 minutes) were
+  // stored in plain text — keep accepting them during the rollout.
+  return typeof data.otp === "string" && safeEqual(data.otp, String(otp));
+};
+
+/**
+ * Validates `otp` for `email` atomically.
+ * purpose: "signup" | "reset" — a code issued for one flow can't be spent in the other.
+ * consume: delete the code on success (the reset flow passes false and deletes it
+ *          itself once the password has actually been changed).
+ * Returns { status: "ok" | "not_found" | "expired" | "locked" | "invalid", remaining? }
+ */
+const verifyAndConsumeOTP = async ({ email, otp, purpose, consume = true }) => {
+  const ref = db.collection("otpCodes").doc(email);
+
+  return db.runTransaction(async (tx) => {
+    const doc = await tx.get(ref);
+    if (!doc.exists) return { status: "not_found" };
+
+    const data = doc.data();
+    if (data.purpose !== purpose) return { status: "not_found" };
+
+    if (new Date() > data.expiresAt.toDate()) {
+      tx.delete(ref);
+      return { status: "expired" };
+    }
+
+    const attempts = Number(data.attempts) || 0;
+    if (attempts >= MAX_ATTEMPTS) {
+      tx.delete(ref);
+      return { status: "locked" };
+    }
+
+    if (!otpMatches(data, email, otp)) {
+      tx.update(ref, { attempts: attempts + 1 });
+      return { status: "invalid", remaining: MAX_ATTEMPTS - (attempts + 1) };
+    }
+
+    if (consume) tx.delete(ref);
+    return { status: "ok" };
+  });
+};
 
 // POST /api/auth/send-otp
 // body: { email, name, purpose }   (a client-sent template_id is ignored — see below)
@@ -66,7 +137,7 @@ const sendOTP = async (req, res) => {
 
     // Store OTP in Firestore with expiry, cooldown timestamp, and attempt counter
     await db.collection("otpCodes").doc(email).set({
-      otp,
+      otpHash:    hashOTP(email, otp), // never store the code itself
       purpose:    purpose === "reset" ? "reset" : "signup",
       createdAt:  new Date(),
       expiresAt:  new Date(Date.now() + OTP_EXPIRY_MS),
@@ -115,54 +186,33 @@ const sendOTP = async (req, res) => {
 // POST /api/auth/verify-otp
 const verifyOTP = async (req, res) => {
   const { email, otp } = req.body;
-  if (!email || !otp) {
+  if (!email || !otp || typeof email !== "string") {
     return res.status(400).json({ message: "Email and OTP are required." });
   }
 
   try {
-    const doc = await db.collection("otpCodes").doc(email).get();
+    // Checks the code and counts a wrong guess in one atomic step (see
+    // verifyAndConsumeOTP above). Only codes issued for signup / login verification
+    // (purpose "signup") can be verified here — a "reset" code is spent through
+    // /auth/reset-password instead.
+    const result = await verifyAndConsumeOTP({ email, otp: String(otp), purpose: "signup" });
 
-    if (!doc.exists) {
+    if (result.status === "not_found") {
       return res.status(404).json({ message: "OTP not found. Please request a new one." });
     }
-
-    const data = doc.data();
-
-    // Only codes issued for signup / login verification (purpose "signup",
-    // the default) can be verified here. A "reset" code is spent through
-    // /auth/reset-password instead, never this endpoint.
-    if (data.purpose !== "signup") {
-      return res.status(404).json({ message: "OTP not found. Please request a new one." });
-    }
-
-    // Check expiry
-    if (new Date() > data.expiresAt.toDate()) {
-      await db.collection("otpCodes").doc(email).delete();
+    if (result.status === "expired") {
       return res.status(400).json({ message: "OTP has expired. Please request a new one." });
     }
-
-    // Bug 5 fix: check attempt count before validating
-    if (data.attempts >= MAX_ATTEMPTS) {
-      await db.collection("otpCodes").doc(email).delete();
-      return res.status(429).json({
-        message: "Too many failed attempts. Please request a new OTP.",
-      });
+    if (result.status === "locked") {
+      return res.status(429).json({ message: "Too many failed attempts. Please request a new OTP." });
     }
-
-    // Check OTP match
-    if (data.otp !== otp) {
-      // Increment attempt counter
-      await db.collection("otpCodes").doc(email).update({
-        attempts: data.attempts + 1,
-      });
-      const remaining = MAX_ATTEMPTS - (data.attempts + 1);
+    if (result.status === "invalid") {
       return res.status(400).json({
-        message: `Invalid OTP. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`,
+        message: `Invalid OTP. ${result.remaining} attempt${result.remaining === 1 ? "" : "s"} remaining.`,
       });
     }
 
-    // OTP is valid — delete it so it can't be reused
-    await db.collection("otpCodes").doc(email).delete();
+    // status "ok" — the code was deleted in the same transaction, so it can't be reused.
     return res.status(200).json({ message: "OTP verified successfully." });
 
   } catch (err) {
@@ -171,4 +221,4 @@ const verifyOTP = async (req, res) => {
   }
 };
 
-module.exports = { sendOTP, verifyOTP };
+module.exports = { sendOTP, verifyOTP, verifyAndConsumeOTP };

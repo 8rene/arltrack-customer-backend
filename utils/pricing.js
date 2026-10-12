@@ -84,17 +84,36 @@ const getSystemSettings = async () => {
 // what let false positives like "New Manila" (a Quezon City district, not
 // the City of Manila) slip through before; it's kept only as a fallback
 // now, not the primary check.
+// Both sides of the comparison are normalised first. A map pin returns the
+// OpenStreetMap name ("City of Manila", "Quezon City") while the admin's keyword is
+// just "manila", and the admin may have typed it with capitals ("Bulacan") — an
+// exact compare on the raw strings silently treated those as OUTSIDE the base area
+// and charged the extra / driver's outside-area fee. Normalising (lowercase, drop
+// "City of" / "Province of" / the word "city") and then still requiring an EXACT
+// match keeps "New Manila" (a Quezon City district) from matching "manila".
+const normalizePlace = (v) =>
+  String(v || "")
+    .toLowerCase()
+    .replace(/\b(city|province|municipality) of\b/g, " ")
+    .replace(/\bcity\b/g, " ")
+    .replace(/[^a-z0-9ñ ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
 const isBaseArea = (destination, { destinationCity, destinationProvince } = {}, baseAreaKeywords = SETTINGS_DEFAULTS.baseAreaKeywords) => {
-  const city     = String(destinationCity || "").trim().toLowerCase();
-  const province = String(destinationProvince || "").trim().toLowerCase();
+  const keywords = (Array.isArray(baseAreaKeywords) ? baseAreaKeywords : [])
+    .map(normalizePlace)
+    .filter(Boolean);
+  const city     = normalizePlace(destinationCity);
+  const province = normalizePlace(destinationProvince);
 
   if (city || province) {
-    return baseAreaKeywords.some((k) => city === k || province === k);
+    return keywords.some((k) => city === k || province === k);
   }
 
   if (!destination) return true; // no destination given at all = treat as base area
   const d = String(destination).toLowerCase();
-  return baseAreaKeywords.some((k) => d.includes(k));
+  return keywords.some((k) => d.includes(k));
 };
 
 // ── Day count with the 22h/25h billing-block rule ──────────────────────────
