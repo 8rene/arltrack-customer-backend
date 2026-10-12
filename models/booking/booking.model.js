@@ -27,7 +27,7 @@ const Booking = {
   notesAdmin: "",
   createdAt: null,
   updatedAt: null,    // stamped on every admin change (edit, cancel, reject, driver assign / unassign, payment approval, refund cancel)
-  returnedAt: null,   // stamped once when an ongoing booking is Returned (completed); the late-fee calculation reads it
+  completedAt: null,  // stamped once when an ongoing booking is marked complete; the late-fee calculation reads it (older docs may still carry completedAt until migrated)
   restoredAt: null,   // only on a booking that was restored from bookingArchives
 
   // Who is driving is NOT stored on the booking. A chauffeur booking's current
