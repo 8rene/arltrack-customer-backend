@@ -126,6 +126,121 @@ const getBookingQuote = async (req, res) => {
 };
 
 // POST /api/bookings/create
+// ─────────────────────────────────────────────────────────────────────────────
+// Number-coding helpers — shared by createBooking (server-side enforcement) and
+// checkCodingRule (the live check on the Trip step) so both always agree.
+// A booking can have SEVERAL locations (the primary destination + any
+// "additional destination" stops); coding is evaluated for every one of them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// "7:00 AM" → minutes from midnight (null if it can't be parsed)
+const parseCodingTime = (t) => {
+  if (!t) return null;
+  const m = String(t).trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const mn = parseInt(m[2], 10);
+  const ap = m[3].toUpperCase();
+  if (ap === "PM" && h !== 12) h += 12;
+  if (ap === "AM" && h === 12) h = 0;
+  return h * 60 + mn;
+};
+
+// bannedDigits may be an array of strings/numbers or a single value
+const parseBannedDigits = (v) => {
+  if (Array.isArray(v)) return v.map(Number).filter((n) => !isNaN(n));
+  if (v !== undefined && v !== null) {
+    const single = Number(v);
+    if (!isNaN(single)) return [single];
+  }
+  return [];
+};
+
+// minutes from midnight → "7:00 AM"
+const fmtCodingMins = (mins) => {
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return `${(h % 12) || 12}:${String(m).padStart(2, "0")} ${h >= 12 ? "PM" : "AM"}`;
+};
+
+// The first coding rule that restricts `lastDigit` at ONE location during the
+// booking window, or null. (dow: 0=Sun … 6=Sat, Manila time.)
+const findCodingViolation = ({ rules, dow, startMins, endMins, lastDigit, destination, destinationCity }) => {
+  for (const rule of rules) {
+    const ruleDay = Number(rule.dayOfWeek);
+    if (isNaN(ruleDay) || ruleDay !== dow) continue;
+
+    // City — tolerant match against the pin's city and the typed address. A rule
+    // with no city applies everywhere.
+    if (rule.city && rule.city.trim() !== "") {
+      if (!cityMatchesRule(rule.city, destinationCity, destination)) continue;
+    }
+
+    const rStart = parseCodingTime(rule.startTime);
+    const rEnd   = parseCodingTime(rule.endTime);
+    if (rStart === null || rEnd === null) continue;
+    if (!(startMins < rEnd && endMins > rStart)) continue; // trip doesn't touch the coded hours
+
+    if (parseBannedDigits(rule.bannedDigits).includes(lastDigit)) return rule;
+  }
+  return null;
+};
+
+// Every location to check: the primary destination (always) plus each extra stop
+// that has an address or a city. The extra stops come from the client as
+// `codingStops: [{ id, address, city }]` — sanitised and capped here.
+const buildCodingLocations = ({ destination, destinationCity, codingStops }) => {
+  const locations = [{ id: "primary", label: destination || destinationCity || "Destination", destination, destinationCity }];
+  (Array.isArray(codingStops) ? codingStops.slice(0, 10) : []).forEach((s, i) => {
+    const address = String((s && s.address) || "").trim().slice(0, 300);
+    const city    = String((s && s.city)    || "").trim().slice(0, 100);
+    if (!address && !city) return;
+    locations.push({
+      id: String((s && s.id) || `stop_${i}`).slice(0, 60),
+      label: address || city,
+      destination: address,
+      destinationCity: city,
+    });
+  });
+  return locations;
+};
+
+// Runs the rules against EVERY location → [{ id, location, city, dayName, startTime, endTime, bannedDigits, digit }]
+const findCodingViolations = ({ rules, dow, startMins, endMins, lastDigit, locations }) => {
+  const out = [];
+  for (const loc of locations) {
+    const rule = findCodingViolation({
+      rules, dow, startMins, endMins, lastDigit,
+      destination: loc.destination, destinationCity: loc.destinationCity,
+    });
+    if (!rule) continue;
+    out.push({
+      id: loc.id,
+      location: loc.label,
+      city: rule.city || "",
+      dayName: rule.dayName || "",
+      startTime: rule.startTime,
+      endTime: rule.endTime,
+      bannedDigits: parseBannedDigits(rule.bannedDigits),
+      digit: lastDigit,
+    });
+  }
+  return out;
+};
+
+// One user-facing sentence. A single restriction on the primary destination keeps
+// the original wording; anything else names the affected location(s).
+const codingMessage = ({ lastDigit, violations, windowText }) => {
+  const windowPart = windowText ? ` Your booking window (${windowText}) overlaps with ${violations.length > 1 ? "these restrictions" : "this restriction"}.` : " Your booking overlaps with this restriction.";
+  if (violations.length === 1 && violations[0].id === "primary") {
+    const v = violations[0];
+    return `This vehicle (plate ending in ${lastDigit}) is not allowed under the Number Coding Scheme in ${v.city || "this area"} on ${v.dayName || "this day"} from ${v.startTime} to ${v.endTime}.${windowPart} Please choose a different date, time, or another vehicle.`;
+  }
+  const list = violations
+    .map((v) => `${v.location} (${v.city || "this area"}, ${v.dayName || "this day"} ${v.startTime} – ${v.endTime})`)
+    .join("; ");
+  return `This vehicle (plate ending in ${lastDigit}) is restricted by the Number Coding Scheme at ${violations.length > 1 ? "these locations" : "this location"}: ${list}.${windowPart} Please remove ${violations.length > 1 ? "those stops" : "that stop"}, or choose a different date, time, or another vehicle.`;
+};
+
 const createBooking = async (req, res) => {
   const userID = req.user.userID; // from verified JWT — never trust body
 
@@ -195,6 +310,7 @@ const createBooking = async (req, res) => {
     destinationCity,
     destinationProvince,
     extraDestinations,
+    codingStops, // [{ id, address, city }] — every additional stop, for the coding check
   } = req.body;
 
   if (!carID) {
@@ -314,50 +430,26 @@ const createBooking = async (req, res) => {
           bookingEndMins = _endPH.mins;
         }
 
-        const parseTime = (t) => {
-          if (!t) return null;
-          const m = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-          if (!m) return null;
-          let h = parseInt(m[1], 10);
-          const mn = parseInt(m[2], 10);
-          if (m[3].toUpperCase() === "PM" && h !== 12) h += 12;
-          if (m[3].toUpperCase() === "AM" && h === 12) h = 0;
-          return h * 60 + mn;
-        };
-
-        // Use shared cache — same rules array as checkCodingRule endpoint
+        // Use shared cache — same rules array as checkCodingRule endpoint.
+        // Checked for EVERY location the customer picked (primary destination + extra stops).
         const _codingRules = await getCodingRules();
-        for (const rule of _codingRules) {
-
-          // Day-of-week match (JS: 0=Sun,1=Mon,...6=Sat)
-          const ruleDayOfWeek = Number(rule.dayOfWeek);
-          if (isNaN(ruleDayOfWeek) || ruleDayOfWeek !== dayOfWeek) continue;
-
-          // City match — same tolerant matcher as the check-coding endpoint.
-          if (rule.city && rule.city.trim() !== "") {
-            if (!cityMatchesRule(rule.city, destinationCity, destination)) continue;
-          }
-
-          // Overlap check
-          const rStart = parseTime(rule.startTime);
-          const rEnd   = parseTime(rule.endTime);
-          if (rStart === null || rEnd === null) continue;
-
-          const overlaps = bookingStartMins < rEnd && bookingEndMins > rStart;
-          if (!overlaps) continue;
-
-          // bannedDigits — handle array of strings or numbers, or single value
-          let banned = [];
-          if (Array.isArray(rule.bannedDigits)) {
-            banned = rule.bannedDigits.map(Number).filter(n => !isNaN(n));
-          } else if (rule.bannedDigits !== undefined && rule.bannedDigits !== null) {
-            const single = Number(rule.bannedDigits);
-            if (!isNaN(single)) banned = [single];
-          }
-
-          if (banned.includes(lastDigit)) {
-            return `This vehicle (plate ending in ${lastDigit}) is not allowed under the Number Coding Scheme in ${rule.city || "this area"} on ${rule.dayName || "this day"} from ${rule.startTime} to ${rule.endTime}. Your booking overlaps with this restriction. Please choose a different date, time, or another vehicle.`;
-          }
+        const _violations = findCodingViolations({
+          rules: _codingRules,
+          dow: dayOfWeek,
+          startMins: bookingStartMins,
+          endMins: bookingEndMins,
+          lastDigit,
+          locations: buildCodingLocations({ destination, destinationCity, codingStops }),
+        });
+        if (_violations.length) {
+          return {
+            message: codingMessage({
+              lastDigit,
+              violations: _violations,
+              windowText: `${fmtCodingMins(_startPH.mins)} – ${fmtCodingMins(_endPH.mins)}`,
+            }),
+            violations: _violations,
+          };
         }
         return null;
       } catch (e) {
@@ -367,7 +459,11 @@ const createBooking = async (req, res) => {
     })();
 
     if (codingViolation) {
-      return res.status(400).json({ message: codingViolation, codingViolation: true });
+      return res.status(400).json({
+        message: codingViolation.message,
+        codingViolation: true,
+        violations: codingViolation.violations,
+      });
     }
 
     // "allMine" is read once here and reused by the duplicate guard right
@@ -1123,7 +1219,7 @@ const requestCancellation = async (req, res) => {
 //      d. The plate's last digit must be in rule.bannedDigits
 // ─────────────────────────────────────────────────────────────────────────────
 const checkCodingRule = async (req, res) => {
-  const { carID, startDateTime, endDateTime, destination, destinationCity } = req.body;
+  const { carID, startDateTime, endDateTime, destination, destinationCity, codingStops } = req.body;
 
   if (!carID || !startDateTime) {
     return res.status(400).json({ message: "carID and startDateTime are required." });
@@ -1199,95 +1295,37 @@ const checkCodingRule = async (req, res) => {
     const codingRules = await getCodingRules();
     if (!codingRules.length) return res.status(200).json({ blocked: false });
 
-    // Helper: parse "7:00 AM" → minutes from midnight
-    const parseTime = (timeStr) => {
-      if (!timeStr) return null;
-      const match = timeStr.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-      if (!match) return null;
-      let hours      = parseInt(match[1], 10);
-      const mins     = parseInt(match[2], 10);
-      const ampm     = match[3].toUpperCase();
-      if (ampm === "PM" && hours !== 12) hours += 12;
-      if (ampm === "AM" && hours === 12) hours  = 0;
-      return hours * 60 + mins;
-    };
+    // 4. Check EVERY location the customer picked — the primary destination plus each
+    //    additional stop — against the rules.
+    const locations  = buildCodingLocations({ destination, destinationCity, codingStops });
+    const violations = findCodingViolations({
+      rules: codingRules,
+      dow: dayOfWeek,
+      startMins: bookingStartMins,
+      endMins: bookingEndMins,
+      lastDigit,
+      locations,
+    });
 
-    // DEBUG — log what we're checking so we can see the data in server logs
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[checkCodingRule] plateNumber:", plateNumber, "lastDigit:", lastDigit);
-      console.log("[checkCodingRule] dayOfWeek (JS 0=Sun):", dayOfWeek, "bookingStartMins:", bookingStartMins, "bookingEndMins:", bookingEndMins);
-      console.log("[checkCodingRule] destination:", destination);
-      console.log("[checkCodingRule] total rules to check:", codingRules.length);
-    }
-
-    // 4. Check each rule
-    for (const rule of codingRules) {
-      const ruleDoc = { id: rule.id };
-
-      if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] rule:", JSON.stringify({
-        id: rule.id,
-        dayOfWeek: rule.dayOfWeek,
-        city: rule.city,
-        startTime: rule.startTime,
-        endTime: rule.endTime,
-        bannedDigits: rule.bannedDigits,
-        dayName: rule.dayName,
-      }));
-
-      // a. Day-of-week match — support both string and number stored in Firestore
-      // JS: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
-      const ruleDayOfWeek = Number(rule.dayOfWeek);
-      if (isNaN(ruleDayOfWeek) || ruleDayOfWeek !== dayOfWeek) {
-        if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] → SKIP: dayOfWeek mismatch (rule:", ruleDayOfWeek, "booking:", dayOfWeek, ")");
-        continue;
-      }
-
-      // b. City check — tolerant match (see cityMatchesRule): the pin's city name
-      // ("City of Manila") and the free-text address are both considered.
-      if (rule.city && rule.city.trim() !== "") {
-        if (!cityMatchesRule(rule.city, destinationCity, destination)) {
-          if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] → SKIP: city mismatch (rule city:", rule.city, "dest:", destinationCity || destination, ")");
-          continue;
-        }
-      }
-
-      // c. Time overlap check
-      const ruleStart = parseTime(rule.startTime);
-      const ruleEnd   = parseTime(rule.endTime);
-      if (ruleStart === null || ruleEnd === null) {
-        if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] → SKIP: could not parse rule times:", rule.startTime, rule.endTime);
-        continue;
-      }
-
-      const overlaps = bookingStartMins < ruleEnd && bookingEndMins > ruleStart;
-      if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] ruleStart:", ruleStart, "ruleEnd:", ruleEnd, "overlaps:", overlaps);
-      if (!overlaps) continue;
-
-      // d. Banned digit check — handle array of strings OR numbers from Firestore
-      let bannedDigits = [];
-      if (Array.isArray(rule.bannedDigits)) {
-        bannedDigits = rule.bannedDigits.map(Number).filter(n => !isNaN(n));
-      } else if (rule.bannedDigits !== undefined && rule.bannedDigits !== null) {
-        // Stored as a single value — wrap it
-        const single = Number(rule.bannedDigits);
-        if (!isNaN(single)) bannedDigits = [single];
-      }
-
-      if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] bannedDigits (parsed):", bannedDigits, "lastDigit:", lastDigit, "isBlocked:", bannedDigits.includes(lastDigit));
-
-      if (bannedDigits.includes(lastDigit)) {
-        return res.status(200).json({
-          blocked: true,
-          reason: `This vehicle (plate ending in ${lastDigit}) is not allowed under the Number Coding Scheme in ${rule.city || "this area"} on ${rule.dayName || "this day"} from ${rule.startTime} to ${rule.endTime}. Your booking window (${new Date(startDateTime).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})}${endDateTime ? " – "+new Date(endDateTime).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"}) : ""}) overlaps with this restriction. Please choose a different date, time, or another vehicle.`,
-          rule: {
-            city:         rule.city,
-            dayName:      rule.dayName,
-            startTime:    rule.startTime,
-            endTime:      rule.endTime,
-            bannedDigits: bannedDigits,
-          },
-        });
-      }
+    if (violations.length) {
+      // Window text in MANILA time (this used to call toLocaleTimeString on the
+      // server, i.e. UTC on Vercel, so the message showed times 8 hours off).
+      const windowText = `${fmtCodingMins(startPH.mins)}${endDateTime ? " – " + fmtCodingMins(toManila(new Date(endDateTime)).mins) : ""}`;
+      const first = violations[0];
+      return res.status(200).json({
+        blocked: true,
+        reason: codingMessage({ lastDigit, violations, windowText }),
+        // One entry per restricted location — the page marks each one.
+        violations,
+        // Kept for older callers: the first restriction found.
+        rule: {
+          city:         first.city,
+          dayName:      first.dayName,
+          startTime:    first.startTime,
+          endTime:      first.endTime,
+          bannedDigits: first.bannedDigits,
+        },
+      });
     }
 
     if (process.env.NODE_ENV !== "production") console.log("[checkCodingRule] → No rule blocked this booking.");
@@ -1299,4 +1337,63 @@ const checkCodingRule = async (req, res) => {
   }
 };
 
-module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getBookingQuote };
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/bookings/coding-notice   (no auth — same as check-coding)
+// body: { carID, destination, destinationCity, codingStops: [{ id, address, city }] }
+//
+// A date-INDEPENDENT heads-up for the "Pick Destination" step, which comes BEFORE
+// the customer has chosen a date/time (so /check-coding has nothing to check yet).
+// For every location picked (primary destination + each extra stop) it lists the
+// days/hours on which THIS vehicle's plate is under number coding there. It never
+// blocks anything — the real, date-specific check is still /check-coding (UI) and
+// createBooking (server). Holidays aren't considered here, since no date is known.
+// Response: { plateDigit, notices: [{ id, location, city, schedule: [{ dayOfWeek, dayName, startTime, endTime }] }] }
+// ─────────────────────────────────────────────────────────────────────────────
+const getCodingNotice = async (req, res) => {
+  const { carID, destination, destinationCity, codingStops } = req.body;
+  if (!carID) return res.status(400).json({ message: "carID is required." });
+
+  try {
+    const _cachedCar = codingCache.cars[carID];
+    let plateNumber = _cachedCar && Date.now() - _cachedCar.at < CODING_CACHE_TTL_MS ? _cachedCar.plate : null;
+    if (!plateNumber) {
+      const carDoc = await db.collection("cars").doc(carID).get();
+      if (!carDoc.exists) return res.status(404).json({ message: "Car not found." });
+      plateNumber = (carDoc.data().plateNumber || "").trim().toUpperCase();
+      if (plateNumber) codingCache.cars[carID] = { plate: plateNumber, at: Date.now() };
+    }
+    const lastDigit = parseInt((plateNumber || "").slice(-1), 10);
+    if (!plateNumber || isNaN(lastDigit)) return res.status(200).json({ notices: [] });
+
+    const rules     = await getCodingRules();
+    const locations = buildCodingLocations({ destination, destinationCity, codingStops });
+    const notices   = [];
+
+    for (const loc of locations) {
+      // Same matching as the real check, minus the day/time test.
+      const seen = new Set();
+      const schedule = [];
+      for (const rule of rules) {
+        if (!parseBannedDigits(rule.bannedDigits).includes(lastDigit)) continue;
+        if (rule.city && rule.city.trim() !== "" && !cityMatchesRule(rule.city, loc.destinationCity, loc.destination)) continue;
+        const dow = Number(rule.dayOfWeek);
+        if (isNaN(dow) || parseCodingTime(rule.startTime) === null || parseCodingTime(rule.endTime) === null) continue;
+        const k = `${dow}|${rule.startTime}|${rule.endTime}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        schedule.push({ dayOfWeek: dow, dayName: rule.dayName || "", startTime: rule.startTime, endTime: rule.endTime });
+      }
+      if (!schedule.length) continue;
+      schedule.sort((a, b) => a.dayOfWeek - b.dayOfWeek || parseCodingTime(a.startTime) - parseCodingTime(b.startTime));
+      const cityOfRule = rules.find((r) => r.city && cityMatchesRule(r.city, loc.destinationCity, loc.destination));
+      notices.push({ id: loc.id, location: loc.label, city: (cityOfRule && cityOfRule.city) || loc.destinationCity || "", schedule });
+    }
+
+    return res.status(200).json({ plateDigit: lastDigit, notices });
+  } catch (error) {
+    console.error("getCodingNotice error:", error);
+    return res.status(500).json({ message: "Failed to load coding notice." });
+  }
+};
+
+module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getBookingQuote };

@@ -1,7 +1,7 @@
 const express = require("express");
 const router  = express.Router();
 
-const { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getBookingQuote } = require("../controllers/bookings/bookings.controller");
+const { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getBookingQuote } = require("../controllers/bookings/bookings.controller");
 const { getBookingDetails } = require("../controllers/bookings/bookingSessions.controller");
 const { resendReceipt } = require("../controllers/bookings/receipt.controller");
 const verifyToken = require("../middlewares/auth.middleware");
@@ -11,6 +11,7 @@ router.get("/user/:userID",                   verifyToken, getUserBookings);
 router.patch("/:bookingID/cancel",            verifyToken, cancelBooking);
 router.patch("/:bookingID/request-cancellation", verifyToken, requestCancellation); // ongoing bookings only — needs admin approval
 router.post("/check-coding",        checkCodingRule);   // no auth needed — called before login check
+router.post("/coding-notice",       getCodingNotice);   // no auth needed — date-independent heads-up for the Destination step; never blocks
 router.post("/quote",               getBookingQuote);   // no auth needed — pricing preview only, writes nothing
 router.get("/:bookingID/details",   verifyToken, getBookingDetails);
 router.post("/:bookingID/resend-receipt", verifyToken, resendReceipt);
