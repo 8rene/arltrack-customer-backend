@@ -258,4 +258,131 @@ const getStoreLocation = async (req, res) => {
   }
 };
 
-module.exports = { getRegions, getProvinces, getMunicipalities, getBarangays, getPostalCode, getStoreLocation };
+
+// ── Service area (pickup restriction) ─────────────────────────────────────
+// Pickup is limited to the regions saved in the `regions` collection. Nominatim
+// (used by the map picker) names regions/provinces inconsistently, so matching
+// is done on normalised names against the region AND its provinces from the DB.
+let serviceAreaCache = null;
+let serviceAreaCacheAt = 0;
+const SERVICE_AREA_CACHE_TTL_MS = 5 * 60 * 1000;
+
+const normName = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/\bcity of\b/g, "")
+    .replace(/\b(province|region|city)\b/g, "")
+    .replace(/[^a-z0-9ñ ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+// "Region III (Central Luzon)" -> ["region iii", "central luzon"] (+ the full name)
+const regionAliases = (regionName) => {
+  const out = new Set();
+  const full = String(regionName || "");
+  out.add(normName(full));
+  out.add(full.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim());
+  const paren = full.match(/\(([^)]+)\)/);
+  const outside = full.replace(/\([^)]*\)/, "").trim();
+  if (outside) { out.add(normName(outside)); out.add(outside.toLowerCase().trim()); }
+  if (paren) { out.add(normName(paren[1])); out.add(paren[1].toLowerCase().trim()); }
+  out.delete("");
+  return [...out];
+};
+
+const loadServiceArea = async () => {
+  const now = Date.now();
+  if (serviceAreaCache && now - serviceAreaCacheAt < SERVICE_AREA_CACHE_TTL_MS) return serviceAreaCache;
+
+  const [regionSnap, provinceSnap, municipalitySnap] = await Promise.all([
+    db.collection("regions").get(),
+    db.collection("provinces").get(),
+    db.collection("municipalities").get(),
+  ]);
+
+  const regions = regionSnap.docs
+    .map((d) => ({ regionID: d.data().regionID, regionName: d.data().regionName }))
+    .filter((r) => r.regionID && r.regionName)
+    .sort((a, b) => a.regionName.localeCompare(b.regionName));
+
+  const allowedRegionIDs = new Set(regions.map((r) => r.regionID));
+  const provinces = provinceSnap.docs
+    .map((d) => ({
+      provinceID: d.data().provinceID,
+      provinceName: d.data().provinceName,
+      regionID: d.data().regionID,
+    }))
+    .filter((p) => p.provinceName && allowedRegionIDs.has(p.regionID));
+
+  const allowedProvinceIDs = new Set(provinces.map((p) => p.provinceID));
+  const municipalities = municipalitySnap.docs
+    .map((d) => ({
+      municipalityName: d.data().municipalityName,
+      provinceID: d.data().provinceID,
+    }))
+    .filter((m) => m.municipalityName && allowedProvinceIDs.has(m.provinceID));
+
+  serviceAreaCache = { regions, provinces, municipalities };
+  serviceAreaCacheAt = now;
+  return serviceAreaCache;
+};
+
+/**
+ * Pure check used by both the endpoint below and the booking controller.
+ * `candidates` = any region/province/state strings we have for the pickup point.
+ */
+const isWithinServiceArea = async (candidates = []) => {
+  const { regions, provinces, municipalities } = await loadServiceArea();
+  const wanted = candidates.map((c) => String(c || "").toLowerCase().trim()).filter(Boolean);
+  const wantedNorm = wanted.map(normName).filter(Boolean);
+  if (!wanted.length) return false;
+
+  for (const r of regions) {
+    for (const alias of regionAliases(r.regionName)) {
+      if (wanted.includes(alias) || wantedNorm.includes(normName(alias))) return true;
+    }
+  }
+  for (const p of provinces) {
+    const pn = normName(p.provinceName);
+    if (pn && wantedNorm.includes(pn)) return true;
+  }
+  // Last resort for areas the geocoder names differently (e.g. NCR cities):
+  // match the city/municipality against the ones saved under allowed provinces.
+  for (const m of municipalities) {
+    const mn = normName(m.municipalityName);
+    if (mn && wantedNorm.includes(mn)) return true;
+  }
+  return false;
+};
+
+/**
+ * GET /api/location/service-area
+ * Regions (and their provinces) where pickup is allowed — straight from Firestore.
+ */
+const getServiceArea = async (req, res) => {
+  try {
+    const { regions } = await loadServiceArea();
+    res.json({ regions });
+  } catch (error) {
+    console.error("getServiceArea error:", error);
+    res.status(500).json({ error: "Failed to fetch service area" });
+  }
+};
+
+/**
+ * GET /api/location/service-area/check?region=&province=&city=
+ * Same rule the booking controller enforces — lets the map picker ask the
+ * server so the matching logic lives in one place.
+ */
+const checkServiceArea = async (req, res) => {
+  try {
+    const { region, province, city } = req.query;
+    const allowed = await isWithinServiceArea([region, province, city]);
+    res.json({ allowed });
+  } catch (error) {
+    console.error("checkServiceArea error:", error);
+    res.status(500).json({ error: "Failed to check service area" });
+  }
+};
+
+module.exports = { checkServiceArea, getServiceArea, isWithinServiceArea, getRegions, getProvinces, getMunicipalities, getBarangays, getPostalCode, getStoreLocation };

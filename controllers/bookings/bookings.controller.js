@@ -1,4 +1,5 @@
 const { db } = require("../../config/firebaseConnection/firebase");
+const { isWithinServiceArea } = require("../location/location.controller");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus } = require("../../utils/pricing");
@@ -311,10 +312,44 @@ const createBooking = async (req, res) => {
     destinationProvince,
     extraDestinations,
     codingStops, // [{ id, address, city }] — every additional stop, for the coding check
+    pickupProvince,
+    pickupRegion,
+    pickupCity,
   } = req.body;
 
   if (!carID) {
     return res.status(400).json({ message: "carID is required." });
+  }
+
+  // ── Server-side guard: pickup must be inside a region saved in our database ──
+  // The frontend map picker already blocks other areas, but the request can be
+  // sent directly, so the same rule is enforced here. The admin-configured
+  // in-store pickup point is always allowed (matched by its saved coordinates).
+  try {
+    if (typeof pickupLat !== "number" || typeof pickupLng !== "number") {
+      return res.status(400).json({ message: "Please choose your pickup location on the map." });
+    }
+
+    let isStorePickup = false;
+    const settingsSnap = await db.collection("systemSettings").orderBy("createdAt", "desc").limit(1).get();
+    if (!settingsSnap.empty) {
+      const st = settingsSnap.docs[0].data();
+      isStorePickup =
+        typeof st.storeLat === "number" && typeof st.storeLng === "number" &&
+        Math.abs(st.storeLat - pickupLat) < 1e-6 && Math.abs(st.storeLng - pickupLng) < 1e-6;
+    }
+
+    if (!isStorePickup) {
+      const ok = await isWithinServiceArea([pickupRegion, pickupProvince, pickupCity]);
+      if (!ok) {
+        return res.status(400).json({
+          message: "Pickup is only available within our service regions. Please choose a different pickup location.",
+        });
+      }
+    }
+  } catch (err) {
+    console.error("createBooking pickup service-area check failed:", err);
+    return res.status(500).json({ message: "Could not verify the pickup location. Please try again." });
   }
 
   // ── Server-side guard: never trust the client's date fields ─────
