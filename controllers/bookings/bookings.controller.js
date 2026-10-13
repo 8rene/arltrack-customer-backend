@@ -510,7 +510,14 @@ const createBooking = async (req, res) => {
     // buffer in the availability guard further down in this function, which
     // only blocks the specific car that was just returned.)
     const asDate = (v) => (v && v.toDate ? v.toDate() : new Date(v));
-    const mineSnap = await db.collection("bookings").where("userID", "==", userID).get();
+    // Only the statuses the duplicate guard below can match — a customer's
+    // completed/cancelled history grows forever and was being read in full on
+    // every booking. Equality + "in" is served by Firestore's built-in indexes
+    // (no composite index needed).
+    const mineSnap = await db.collection("bookings")
+      .where("userID", "==", userID)
+      .where("status", "in", [BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING])
+      .get();
     const allMine = mineSnap.docs.map((d) => d.data());
 
     // ── Duplicate guard: same customer + same car + overlapping dates ──
@@ -714,9 +721,33 @@ const createBooking = async (req, res) => {
         const lockRef = db.collection("carLocks").doc(String(carID));
 
         // ---- all reads first ----
+        // Only bookings that can possibly clash are read: every check below
+        // needs  booking.end + 1-day buffer > requested start, so anything that
+        // ended before (start - 1 day) can never matter. Needs a composite index
+        // (carID + endDateTime). Until it exists Firestore rejects the query
+        // (FAILED_PRECONDITION) — we log its create-index link once and fall
+        // back to reading the car's full list, so booking never breaks.
+        const BUFFER_READ_MS = 24 * 60 * 60 * 1000;
+        const carBookingsQuery = db.collection("bookings")
+          .where("carID", "==", carID)
+          .where("endDateTime", ">", new Date(startDateTime.getTime() - BUFFER_READ_MS));
+        const readCarBookings = async () => {
+          try {
+            return await tx.get(carBookingsQuery);
+          } catch (e) {
+            if (e && (e.code === 9 || /FAILED_PRECONDITION|requires an index/i.test(String(e.message)))) {
+              if (!global.__carBookingsIndexWarned) {
+                global.__carBookingsIndexWarned = true;
+                console.warn("[createBooking] Create this Firestore index to speed up booking (bookings: carID asc, endDateTime asc):", e.message);
+              }
+              return tx.get(db.collection("bookings").where("carID", "==", carID));
+            }
+            throw e;
+          }
+        };
         const [, carBookingsSnap, maintSnap] = await Promise.all([
           tx.get(lockRef),
-          tx.get(db.collection("bookings").where("carID", "==", carID)),
+          readCarBookings(),
           tx.get(
             db.collection("maintenance")
               .where("carID", "==", carID)
