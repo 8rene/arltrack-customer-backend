@@ -131,9 +131,19 @@ const getBookingQuote = async (req, res) => {
   }
 };
 
+// Does this coding rule apply to this plate at this location? (plate's last digit is banned,
+// the rule's city matches the location, and the rule has a usable day + time window.) The
+// day/time of the booking is NOT tested here. Shared by findCodingNotices and buildCodingWarnings.
+const ruleAppliesToLocation = (rule, lastDigit, loc) => {
+  if (!parseBannedDigits(rule.bannedDigits).includes(lastDigit)) return false;
+  if (rule.city && rule.city.trim() !== "" && !cityMatchesRule(rule.city, loc.destinationCity, loc.destination)) return false;
+  const dow = Number(rule.dayOfWeek);
+  if (isNaN(dow) || parseCodingTime(rule.startTime) === null || parseCodingTime(rule.endTime) === null) return false;
+  return true;
+};
+
 // For every location: the days/hours on which THIS plate is under number coding there
-// (no date needed). Used by the Destination-step heads-up (getCodingNotice) and saved
-// on the booking as the warnings the customer was shown.
+// (no date needed). Used by the Destination-step heads-up (getCodingNotice).
 const findCodingNotices = ({ rules, lastDigit, locations }) => {
   const notices = [];
   for (const loc of locations) {
@@ -141,10 +151,8 @@ const findCodingNotices = ({ rules, lastDigit, locations }) => {
     const seen = new Set();
     const schedule = [];
     for (const rule of rules) {
-      if (!parseBannedDigits(rule.bannedDigits).includes(lastDigit)) continue;
-      if (rule.city && rule.city.trim() !== "" && !cityMatchesRule(rule.city, loc.destinationCity, loc.destination)) continue;
+      if (!ruleAppliesToLocation(rule, lastDigit, loc)) continue;
       const dow = Number(rule.dayOfWeek);
-      if (isNaN(dow) || parseCodingTime(rule.startTime) === null || parseCodingTime(rule.endTime) === null) continue;
       const k = `${dow}|${rule.startTime}|${rule.endTime}`;
       if (seen.has(k)) continue;
       seen.add(k);
@@ -158,35 +166,46 @@ const findCodingNotices = ({ rules, lastDigit, locations }) => {
   return notices;
 };
 
-// The coding audit saved on the booking session: which locations were checked, the plate,
-// and the warnings (coded days/hours) that applied — built on the SERVER, so it is a record
-// of what the system found, not of what the browser claims. Never throws.
-const buildCodingSnapshot = async ({ carID, destination, destinationCity, codingStops, pickup, pickupCity, startDateTime, now }) => {
-  const base = {
-    blocked:   false, // we only ever reach here when NOT blocked — the 400 returns early otherwise
-    reason:    null,
-    city:      destinationCity || null,
-    dayOfWeek: toManila(startDateTime).dow,
-    checkedAt: now,
-  };
+// The Number Coding warnings saved on the booking session (session.codingWarnings): a FLAT
+// array, one entry per matched coding rule, no nested arrays —
+//   { city, plateLastDigit, ruleID, dayOfWeek, startTime, endTime }
+// Same matching as the pre-booking notice (ruleAppliesToLocation: plate digit + city, no date
+// test) over pickup, destination and every extra stop. A rule that matches several stops
+// appears once (deduped by ruleID). It is a snapshot copied from the rule, so it stays
+// readable if the rule is edited or deleted later. Built on the SERVER, never from the
+// browser. Never throws: on any failure it returns [].
+const buildCodingWarnings = async ({ carID, destination, destinationCity, codingStops, pickup, pickupCity }) => {
   try {
     const carDoc = await db.collection("cars").doc(carID).get();
     const plate = carDoc.exists ? (carDoc.data().plateNumber || "").trim().toUpperCase() : "";
     const lastDigit = parseInt(plate.slice(-1), 10);
-    if (isNaN(lastDigit)) return base;
+    if (isNaN(lastDigit)) return [];
     const rules = await getCodingRules();
     const locations = buildCodingLocations({ destination, destinationCity, codingStops, pickup, pickupCity });
-    const warnings = findCodingNotices({ rules, lastDigit, locations });
-    return {
-      ...base,
-      plateLastDigit: lastDigit,
-      locations: locations.map((l) => ({ id: l.id, label: l.label, city: l.destinationCity || "" })),
-      warnings,                    // [{ id, location, city, schedule: [{ dayOfWeek, dayName, startTime, endTime }] }]
-      warned: warnings.length > 0, // true = at least one location is coded for this plate on some day/hour
-    };
+    const byRule = new Map();
+    for (const loc of locations) {
+      for (const rule of rules) {
+        if (!ruleAppliesToLocation(rule, lastDigit, loc)) continue;
+        const ruleID = rule.ruleID || rule.id || null;
+        const key = ruleID || `${rule.city}|${rule.dayOfWeek}|${rule.startTime}|${rule.endTime}`;
+        if (byRule.has(key)) continue;
+        byRule.set(key, {
+          city:           ((rule.city && rule.city.trim()) || loc.destinationCity || "").trim(),
+          plateLastDigit: lastDigit,
+          ruleID,
+          dayOfWeek:      Number(rule.dayOfWeek),
+          startTime:      rule.startTime,
+          endTime:        rule.endTime,
+        });
+      }
+    }
+    return [...byRule.values()].sort((x, y) =>
+      x.city.localeCompare(y.city) ||
+      x.dayOfWeek - y.dayOfWeek ||
+      parseCodingTime(x.startTime) - parseCodingTime(y.startTime));
   } catch (e) {
-    console.warn("buildCodingSnapshot failed:", e.message);
-    return base;
+    console.warn("buildCodingWarnings failed:", e.message);
+    return [];
   }
 };
 
@@ -638,7 +657,7 @@ const createBooking = async (req, res) => {
 
     // ── 3. Build the bookingSessions doc (own doc ID; bookingID is FK only; written inside the transaction below) ──
     // This is the piece that was missing entirely: pickupLocation,
-    // geofenceZones and the codingCheck audit
+    // geofenceZones and the codingWarnings
     // were always saving as null because nothing ever wrote this doc.
     const pickupZone      = makeZone("Pickup", { lat: pickupLat, lng: pickupLng });
     const destinationZone = makeZone(destination || "Destination", { lat: destinationLat, lng: destinationLng });
@@ -654,7 +673,7 @@ const createBooking = async (req, res) => {
     const bookingSessionRef = db.collection("bookingSessions").doc(); // own auto-generated PK
     const bookingSessionID  = bookingSessionRef.id;
 
-    const codingSnapshot = await buildCodingSnapshot({ carID, destination, destinationCity, codingStops, pickup: pickupLocation, pickupCity, startDateTime, now });
+    const codingWarnings = await buildCodingWarnings({ carID, destination, destinationCity, codingStops, pickup: pickupLocation, pickupCity });
     const bookingSessionData =
       createBookingSession(bookingSessionID, bookingID, {
         pickupLocation: pickupLat != null && pickupLng != null
@@ -664,10 +683,9 @@ const createBooking = async (req, res) => {
           ? { address: dropoffLocation || "", lat: dropoffLat, lng: dropoffLng }
           : null,
         geofenceZones,
-        // `warnings` (inside the snapshot) is the date-independent schedule list shown to the customer.
-        // datedWarnings = how many of the booking's own dates fell on a coded day; acknowledged = the
-        // customer confirmed them (required by the server for bookings longer than CODING_BLOCK_MAX_HOURS).
-        codingCheck: { ...codingSnapshot, datedWarnings: codingWarned, acknowledged: codingWarned > 0 },
+        // Flat list of the coding rules that applied to this plate (the warnings the customer was
+        // shown) — copied in as a snapshot. [] if none matched or the check failed.
+        codingWarnings,
       });
 
     // ── Atomic availability check + write ──

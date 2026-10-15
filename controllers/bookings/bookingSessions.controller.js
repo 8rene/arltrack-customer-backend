@@ -168,9 +168,7 @@ const getBookingDetails = async (req, res) => {
         version:    booking.termsVersion || null,
         hash:       booking.termsHash,
       } : null,
-      codingCheck: session?.codingCheck
-        ? { ...session.codingCheck, checkedAt: toISO(session.codingCheck.checkedAt) }
-        : null,
+      codingWarnings: session?.codingWarnings || [],
       payment,
     });
   } catch (error) {
