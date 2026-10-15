@@ -48,7 +48,7 @@ const getRegions = async (req, res) => {
  * Returns all provinces for a given region.
  */
 const getProvinces = async (req, res) => {
-  const { regionID } = req.query;
+  const regionID = req.body?.regionID ?? req.query?.regionID;
   if (!regionID) return res.status(400).json({ error: "regionID is required" });
 
   try {
@@ -79,7 +79,7 @@ const getProvinces = async (req, res) => {
  * Returns all municipalities for a given province.
  */
 const getMunicipalities = async (req, res) => {
-  const { provinceID } = req.query;
+  const provinceID = req.body?.provinceID ?? req.query?.provinceID;
   if (!provinceID) return res.status(400).json({ error: "provinceID is required" });
 
   try {
@@ -110,7 +110,7 @@ const getMunicipalities = async (req, res) => {
  * Returns all barangays for a given municipality.
  */
 const getBarangays = async (req, res) => {
-  const { municipalityID } = req.query;
+  const municipalityID = req.body?.municipalityID ?? req.query?.municipalityID;
   if (!municipalityID) return res.status(400).json({ error: "municipalityID is required" });
 
   try {
@@ -196,7 +196,8 @@ const lookupBarangayCode = (municipalityName, barangayName) => {
 };
 
 const getPostalCode = async (req, res) => {
-  const { municipality, barangay } = req.query;
+  const municipality = req.body?.municipality ?? req.query?.municipality;
+  const barangay = req.body?.barangay ?? req.query?.barangay;
   if (!municipality) return res.status(400).json({ error: "municipality is required" });
 
   try {
@@ -376,7 +377,9 @@ const getServiceArea = async (req, res) => {
  */
 const checkServiceArea = async (req, res) => {
   try {
-    const { region, province, city } = req.query;
+    const region = req.body?.region ?? req.query?.region;
+    const province = req.body?.province ?? req.query?.province;
+    const city = req.body?.city ?? req.query?.city;
     const allowed = await isWithinServiceArea([region, province, city]);
     res.json({ allowed });
   } catch (error) {

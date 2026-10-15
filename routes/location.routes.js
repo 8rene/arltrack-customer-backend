@@ -12,13 +12,13 @@ const {
   checkServiceArea,
 } = require("../controllers/location/location.controller");
 
-router.get("/regions",        getRegions);
-router.get("/provinces",      getProvinces);
-router.get("/municipalities", getMunicipalities);
-router.get("/barangays",      getBarangays);
-router.get("/postal-code",    getPostalCode);
-router.get("/store",          getStoreLocation);
-router.get("/service-area",   getServiceArea);
-router.get("/service-area/check", checkServiceArea);
+router.post("/regions",        getRegions);
+router.post("/provinces",      getProvinces);
+router.post("/municipalities", getMunicipalities);
+router.post("/barangays",      getBarangays);
+router.post("/postal-code",    getPostalCode);
+router.post("/store",          getStoreLocation);
+router.post("/service-area",   getServiceArea);
+router.post("/service-area/check", checkServiceArea);
 
 module.exports = router;
