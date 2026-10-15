@@ -2,6 +2,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { derivePaymentStatus, computePaymentSplit } = require("../../utils/pricing");
 const { hydratePaymentData } = require("../../utils/payments/paymentEntries.util");
 const { getTermsVersionByID } = require("../../utils/terms/terms.service");
+const { plateForBooking } = require("../../utils/bookings/plateVisibility.util");
 
 // Shared ownership check — same pattern as cancelBooking in bookings.controller.js.
 // Returns the booking data if the requester owns it, or null and writes the
@@ -48,6 +49,7 @@ const getBookingDetails = async (req, res) => {
     // which never existed, hence "Unknown Vehicle" / no image every time.
     let carName  = "Unknown Vehicle";
     let carImage = "";
+    let carPlate = "";
     if (booking.carID) {
       const carDoc = await db.collection("cars").doc(booking.carID).get();
       if (carDoc.exists) {
@@ -59,6 +61,7 @@ const getBookingDetails = async (req, res) => {
         const brand = brandDoc?.exists ? (brandDoc.data().brandName || "") : "";
         const model = modelDoc?.exists ? (modelDoc.data().modelName || "") : "";
         carName = `${brand} ${model}`.trim() || "Unknown Vehicle";
+        carPlate = car.plateNumber || "";
       }
       const imgSnap = await db.collection("carImages")
         .where("carID", "==", booking.carID)
@@ -169,6 +172,8 @@ const getBookingDetails = async (req, res) => {
         carID:          booking.carID          || null,
         carName,
         carImage,
+        // Plate number is only included once paid and within 24h of pickup (kept for history).
+        ...plateForBooking(booking, carPlate),
         serviceType:    booking.serviceType    || "",
         status:         booking.status         || "pending",
         modeOfDriving:  booking.modeOfDriving  || "",

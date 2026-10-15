@@ -9,6 +9,7 @@ const {
   buildCodingLocations, evaluateCodingRange, codingBlockMessage, codingWarningMessage,
 } = require("../../utils/bookings/codingRange.util");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
+const { plateForBooking } = require("../../utils/bookings/plateVisibility.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
 const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
@@ -942,6 +943,8 @@ const getUserBookings = async (req, res) => {
         carName:       `${brand} ${model}`.trim() || "Unknown Vehicle",
         carImage:      imageMap[b.carID]           || "",
         carBodyType:   car.bodyType                || "",
+        // Plate number: only once the booking is paid and within 24h of pickup (then kept in history).
+        ...plateForBooking(b, car.plateNumber),
         serviceType:   b.serviceType               || "",
         duration:      b.duration                  || "",
         startDateTime: b.startDateTime             || null,

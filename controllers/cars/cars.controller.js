@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const { db } = require("../../config/firebaseConnection/firebase");
 
 // Helper: resolve car details (brand, model, primary image, all pricing)
@@ -45,7 +46,7 @@ const resolveCarDetails = async (carID, carData, brandMap, modelMap) => {
     seatingCapacity:  carData.seatingCapacity  || 0,
     shortDescription: carData.shortDescription || "",
     longDescription:  carData.longDescription  || "",
-    plateNumber:      carData.plateNumber      || "",
+    // plateNumber is deliberately NOT returned here — this endpoint is public (no login).
     year:             carData.year             || "",
     status:           carData.status           || "",
     imageURL,
@@ -198,7 +199,7 @@ const getFeaturedCars = async (req, res) => {
   }
 };
 
-// GET /api/cars/:carID/details — returns car info + all bookings + all reviews
+// GET /api/cars/:carID/details — public: car info + booking COUNT + reviews (no booking list, no userIDs)
 const getCarDetails = async (req, res) => {
   const { carID } = req.params;
   if (!carID) return res.status(400).json({ message: "carID is required." });
@@ -222,37 +223,23 @@ const getCarDetails = async (req, res) => {
 
     const carResolved = await resolveCarDetails(carID, carData, brandMap, modelMap);
 
-    // 3. Fetch all bookings for this car
+    // 3. How many bookings this car has had. This endpoint is PUBLIC (no login), so it returns
+    //    only the COUNT — it used to list every booking with its bookingID, userID, dates and
+    //    status, which let anyone see who rented the car and when. (The booking calendar uses the
+    //    separate, login-protected /api/services/car-bookings/:carID.)
     const bookingsSnap = await db.collection("bookings").where("carID", "==", carID).get();
-    const bookings = bookingsSnap.docs.map((doc) => {
-      const b = doc.data();
-      return {
-        bookingID:     b.bookingID     || doc.id,
-        userID:        b.userID        || "",
-        serviceType:   b.serviceType   || "",
-        startDateTime: b.startDateTime || null,
-        endDateTime:   b.endDateTime   || null,
-        totalDays:     b.totalDays     || 1,
-        modeOfDriving: b.modeOfDriving || "",
-        status:        b.status        || "pending",
-        createdAt:     b.createdAt     || null,
-      };
-    });
-
-    // Sort bookings by createdAt descending (latest first)
-    bookings.sort((a, b) => {
-      const ta = a.createdAt?._seconds ? a.createdAt._seconds : (a.createdAt?.toDate ? a.createdAt.toDate().getTime() / 1000 : 0);
-      const tb = b.createdAt?._seconds ? b.createdAt._seconds : (b.createdAt?.toDate ? b.createdAt.toDate().getTime() / 1000 : 0);
-      return tb - ta;
-    });
+    const bookingCount = bookingsSnap.size;
 
     // 4. Fetch all reviews for this car
     const reviewsSnap = await db.collection("reviews").where("carID", "==", carID).get();
     const reviews = reviewsSnap.docs.map((doc) => {
       const r = doc.data();
+      // Public endpoint: never send the reviewer's real userID. A short one-way hash gives the
+      // same reviewer the same label ("Customer 3fa9c1") without revealing who they are.
+      const reviewer = r.userID ? crypto.createHash("sha256").update(String(r.userID)).digest("hex").slice(0, 6) : "";
       return {
         reviewID:  doc.id,
-        userID:    r.userID    || "",
+        userName:  reviewer ? `Customer ${reviewer}` : "Customer",
         rating:    r.rating    || 0,
         comment:   r.comment   || "",
         createdAt: r.createdAt || null,
@@ -268,8 +255,7 @@ const getCarDetails = async (req, res) => {
 
     return res.status(200).json({
       car:           carResolved,
-      bookings,
-      bookingCount:  bookings.length,
+      bookingCount,
       reviews,
       reviewCount:   reviews.length,
     });

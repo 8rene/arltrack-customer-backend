@@ -60,7 +60,10 @@ const runBookingReminders = async () => {
         userID: b.userID,
         refID: bID,
         title: "Booking Reminder",
-        message: `Reminder: your booking starts at ${fmtDateTime(start)}.`,
+        // Also tells the customer the plate number is now visible (server-side rule:
+        // utils/bookings/plateVisibility.util.js reveals it from 2h before start). The plate
+        // itself is NOT put in the text — the booking details page is the single place it is shown.
+        message: `Your booking starts at ${fmtDateTime(start)}. The plate number of the car you're renting is now available — open your booking details to see it.`,
       });
       if (id) reminderCount++;
 
