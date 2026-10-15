@@ -6,10 +6,11 @@ const createUser = (userID, data) => ({
   // This user's own shareable code, generated at signup. Who referred
   // them / who they referred lives in the "referrals" collection, not here.
   referralCode:    data.referralCode    || null,
-  // Terms & Conditions accepted at signup (the full record + exact text: termsAcceptances / termsSnapshots).
+  // Terms & Conditions accepted at signup: termsVersionID points at the exact text in the
+  // admin's termsVersions collection. (Accounts created before this change carry
+  // termsVersion + termsHash instead.)
+  termsVersionID:  data.termsVersionID  || null,
   termsAcceptedAt: data.termsAcceptedAt || null,
-  termsVersion:    data.termsVersion    || null,
-  termsHash:       data.termsHash       || null,
   status:       "locked",          // always locked on signup — admin unlocks after review
   isVerified:   false,             // always false on signup — admin verifies manually
   isFlagged:    false,

@@ -170,8 +170,7 @@ const signHandover = async (req, res) => {
       method:       "typed name + checkbox",
       statementsVersion: HANDOVER_STATEMENTS_VERSION,
       statements:   handoverStatements(selfDrive),    // the exact words that were signed
-      bookingTermsVersion: booking.termsVersion || null,
-      bookingTermsHash:    booking.termsHash || null,
+      bookingTermsVersionID: booking.termsVersionID || null, // (older handovers carry bookingTermsVersion + bookingTermsHash)
       // Filled in by staff in the admin app at the counter:
       verifiedAt: null, verifiedByUserID: null, licenseChecked: null, conditionNotes: null,
       createdAt: now,

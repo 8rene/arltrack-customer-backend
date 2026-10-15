@@ -24,6 +24,10 @@ const Booking = {
   isReviewed: false,
   userRating: null,
   notesUser: "",
+  // Terms & Conditions the customer agreed to for THIS booking (written once at creation, never edited).
+  // termsVersionID points to the exact immutable doc in the admin's termsVersions collection.
+  termsVersionID: "",
+  termsAcceptedAt: null,   // server timestamp of the checkbox agreement
   notesAdmin: "",
   createdAt: null,
   updatedAt: null,    // stamped on every admin change (edit, cancel, reject, driver assign / unassign, payment approval, refund cancel)

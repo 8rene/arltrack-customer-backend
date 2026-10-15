@@ -1,6 +1,7 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { derivePaymentStatus, computePaymentSplit } = require("../../utils/pricing");
 const { hydratePaymentData } = require("../../utils/payments/paymentEntries.util");
+const { getTermsVersionByID } = require("../../utils/terms/terms.service");
 
 // Shared ownership check — same pattern as cancelBooking in bookings.controller.js.
 // Returns the booking data if the requester owns it, or null and writes the
@@ -139,6 +140,29 @@ const getBookingDetails = async (req, res) => {
       };
     }
 
+    // The Terms & Conditions accepted for this booking. New bookings carry termsVersionID (the
+    // version number is read from that termsVersions doc); bookings made before that change carry
+    // termsVersion + termsHash instead. viewID is what /terms?v=<viewID> opens either way.
+    let terms = null;
+    if (booking.termsVersionID || booking.termsHash) {
+      let version = booking.termsVersion || null;
+      if (booking.termsVersionID) {
+        try {
+          const tv = await getTermsVersionByID(booking.termsVersionID);
+          version = tv ? tv.version : null;
+        } catch (e) {
+          console.warn("getBookingDetails terms lookup failed:", e.message);
+          version = null;
+        }
+      }
+      terms = {
+        acceptedAt:     toISO(booking.termsAcceptedAt),
+        termsVersionID: booking.termsVersionID || null,
+        version,
+        viewID:         booking.termsVersionID || booking.termsHash,
+      };
+    }
+
     return res.status(200).json({
       booking: {
         bookingID,
@@ -163,11 +187,7 @@ const getBookingDetails = async (req, res) => {
       geofenceZones:      session?.geofenceZones  || [],
       // What the customer accepted for this booking, and the coding warnings the system found
       // for the locations they picked (both written when the booking was created).
-      terms: booking.termsHash ? {
-        acceptedAt: toISO(booking.termsAcceptedAt),
-        version:    booking.termsVersion || null,
-        hash:       booking.termsHash,
-      } : null,
+      terms,
       codingWarnings: session?.codingWarnings || [],
       payment,
     });

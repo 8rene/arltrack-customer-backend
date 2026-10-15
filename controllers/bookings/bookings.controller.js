@@ -1,7 +1,7 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { isWithinServiceArea } = require("../location/location.controller");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
-const { checkTermsAcceptance, ensureTermsSnapshot, termsRequired } = require("../../utils/terms/terms.service");
+const { checkTermsAcceptance, termsRequired } = require("../../utils/terms/terms.service");
 const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus, getBaseAreaConfig } = require("../../utils/pricing");
 const {
@@ -283,7 +283,7 @@ const createBooking = async (req, res) => {
     extraDestinations,
     codingStops, // [{ id, address, city }] — every additional stop, for the coding check
     codingAcknowledged, // true once the customer confirmed a multi-day Number Coding warning
-    termsHash,   // hash of the Terms & Conditions text the customer was shown when they ticked the box
+    termsVersionID, // termsVersions doc ID of the Terms & Conditions text the customer was shown when they ticked the box
     pickupProvince,
     pickupRegion,
     pickupCity,
@@ -296,15 +296,14 @@ const createBooking = async (req, res) => {
   }
 
   // ── Terms & Conditions acceptance ──
-  // The browser sends the hash of the text it displayed. It must equal the CURRENT text
-  // (wording + the policy numbers quoted in it), otherwise the customer is asked to re-read
-  // it. Whether a missing hash is rejected is controlled by REQUIRE_TERMS_ACCEPTANCE
-  // (see utils/terms/terms.service.js). The acceptance record itself is written inside the
-  // booking transaction below, so a booking can't exist without it.
+  // The browser sends the termsVersionID of the text it displayed. It must be the CURRENT
+  // version published in the admin (termsVersions), otherwise the customer is asked to re-read
+  // it. Whether a missing ID is rejected is controlled by REQUIRE_TERMS_ACCEPTANCE
+  // (see utils/terms/terms.service.js). The acceptance is saved on the booking itself
+  // (termsVersionID + termsAcceptedAt), which is written inside the transaction below.
   let termsCheck;
   try {
-    termsCheck = await checkTermsAcceptance(termsHash);
-    if (termsCheck.ok && termsCheck.accepted) await ensureTermsSnapshot(termsCheck.terms);
+    termsCheck = await checkTermsAcceptance(termsVersionID);
   } catch (termsErr) {
     console.error("Terms check failed:", termsErr.message);
     if (termsRequired()) {
@@ -607,12 +606,11 @@ const createBooking = async (req, res) => {
       // utils/bookings/bookingStatus.util.js).
       status:        BOOKING_STATUS.TO_PAY,
       hasDevice,
-      // The Terms & Conditions accepted for THIS booking (full record: termsAcceptances/{bookingID};
-      // the exact text: termsSnapshots/{termsHash}). Null if the browser didn't send an acceptance
-      // and REQUIRE_TERMS_ACCEPTANCE is still off.
+      // The Terms & Conditions accepted for THIS booking (same fields as the admin's booking model):
+      // termsVersionID points at the exact text in termsVersions. Both are null if the browser
+      // didn't send an acceptance and REQUIRE_TERMS_ACCEPTANCE is still off.
+      termsVersionID:  termsCheck.accepted ? termsCheck.terms.termsVersionID : null,
       termsAcceptedAt: termsCheck.accepted ? now : null,
-      termsVersion:    termsCheck.accepted ? termsCheck.terms.version : null,
-      termsHash:       termsCheck.accepted ? termsCheck.terms.hash : null,
       createdAt:     now,
       updatedAt:     now,
     };
@@ -816,19 +814,6 @@ const createBooking = async (req, res) => {
         tx.set(bookingRef, bookingData);
         tx.set(paymentRef, paymentData);
         tx.set(bookingSessionRef, bookingSessionData);
-        if (termsCheck.accepted) {
-          // Append-only evidence of the acceptance, written with the booking (doc id = bookingID).
-          tx.set(db.collection("termsAcceptances").doc(bookingID), {
-            acceptanceID: bookingID,
-            context:      "booking",
-            bookingID,
-            userID,
-            termsVersion: termsCheck.terms.version,
-            termsHash:    termsCheck.terms.hash,
-            method:       "checkbox",
-            acceptedAt:   now,
-          });
-        }
       });
     } catch (txErr) {
       if (txErr instanceof BookingConflict) return res.status(409).json(txErr.body);

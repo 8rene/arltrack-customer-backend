@@ -12,8 +12,8 @@ const { REFUND_FULL_WINDOW_HOURS } = require("../../utils/payments/paymentBreakd
 
 const num = (v, fallback) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : fallback);
 
-// The numbers themselves — also used by the Terms & Conditions builder
-// (utils/terms/terms.service.js) so the text and this endpoint never disagree.
+// The numbers themselves. (The Terms & Conditions text no longer quotes them: it is written
+// by the admin in termsVersions, so keep the text in step with these numbers when they change.)
 const getPolicyValues = async () => {
   const s = await getSystemSettings(); // cached for ~60s
   return {

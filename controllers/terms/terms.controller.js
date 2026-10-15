@@ -1,15 +1,13 @@
-// GET /api/terms/active            (public) the current Terms & Conditions, rendered, with its hash
-// GET /api/terms/version/:hash     (public) the exact text behind an earlier acceptance
-const { getActiveTerms, ensureTermsSnapshot, getTermsSnapshot } = require("../../utils/terms/terms.service");
+// GET /api/terms/active       (public) the current Terms & Conditions (the admin's newest version)
+// GET /api/terms/version/:id  (public) the exact text behind an earlier acceptance — :id is a
+//                             termsVersionID, or (old acceptances only) a 64-character hash
+const { getActiveTerms, getTermsVersionByID, getLegacyTermsByHash } = require("../../utils/terms/terms.service");
 
 const getActive = async (req, res) => {
   try {
     const terms = await getActiveTerms();
-    // Save the text the moment it is first shown, so any hash a browser holds can be
-    // looked up later. Best-effort: a failure here must not stop the page from loading
-    // (createBooking / signup save it again before recording an acceptance).
-    ensureTermsSnapshot(terms).catch((e) => console.error("ensureTermsSnapshot:", e.message));
-    return res.json({ version: terms.version, hash: terms.hash, sections: terms.sections });
+    if (!terms) return res.status(404).json({ message: "The Terms & Conditions have not been published yet." });
+    return res.json(terms);
   } catch (error) {
     console.error("getActive terms error:", error.message);
     return res.status(500).json({ message: "Could not load the Terms & Conditions." });
@@ -18,11 +16,13 @@ const getActive = async (req, res) => {
 
 const getVersion = async (req, res) => {
   try {
-    const hash = String(req.params.hash || "");
-    if (!/^[a-f0-9]{64}$/.test(hash)) return res.status(400).json({ message: "Invalid version." });
-    const snap = await getTermsSnapshot(hash);
-    if (!snap) return res.status(404).json({ message: "That version of the Terms & Conditions was not found." });
-    return res.json({ version: snap.version, hash: snap.hash, sections: snap.sections });
+    const id = String(req.params.id || "");
+    let terms;
+    if (/^[a-f0-9]{64}$/.test(id)) terms = await getLegacyTermsByHash(id);
+    else if (/^[A-Za-z0-9_-]{1,128}$/.test(id)) terms = await getTermsVersionByID(id);
+    else return res.status(400).json({ message: "Invalid version." });
+    if (!terms) return res.status(404).json({ message: "That version of the Terms & Conditions was not found." });
+    return res.json(terms);
   } catch (error) {
     console.error("getVersion terms error:", error.message);
     return res.status(500).json({ message: "Could not load that version." });
