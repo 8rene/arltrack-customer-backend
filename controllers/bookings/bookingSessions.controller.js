@@ -27,6 +27,13 @@ const loadOwnedBooking = async (req, res, bookingID) => {
 // endpoint before this — only the list-all-for-user one — so this is new,
 // not a rename. Deliberately excludes currentPosition — customers never see
 // live position, on principle, not just hidden in the UI.
+// Firestore Timestamp / Date / ISO string -> ISO string (null if empty)
+const toISO = (v) => {
+  if (!v) return null;
+  const d = v.toDate ? v.toDate() : new Date(v);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+};
+
 const getBookingDetails = async (req, res) => {
   const { bookingID } = req.params;
   try {
@@ -154,6 +161,16 @@ const getBookingDetails = async (req, res) => {
       pickupLocation:     session?.pickupLocation  || null,
       dropoffLocation:    session?.dropoffLocation || null, // always == pickupLocation now, but session was written before that rule in older bookings
       geofenceZones:      session?.geofenceZones  || [],
+      // What the customer accepted for this booking, and the coding warnings the system found
+      // for the locations they picked (both written when the booking was created).
+      terms: booking.termsHash ? {
+        acceptedAt: toISO(booking.termsAcceptedAt),
+        version:    booking.termsVersion || null,
+        hash:       booking.termsHash,
+      } : null,
+      codingCheck: session?.codingCheck
+        ? { ...session.codingCheck, checkedAt: toISO(session.codingCheck.checkedAt) }
+        : null,
       payment,
     });
   } catch (error) {

@@ -100,20 +100,68 @@ const normalizePlace = (v) =>
     .replace(/\s+/g, " ")
     .trim();
 
-const isBaseArea = (destination, { destinationCity, destinationProvince } = {}, baseAreaKeywords = SETTINGS_DEFAULTS.baseAreaKeywords) => {
+// `destinationCounty` is the geocoder's "county" field — for many PH addresses that is the
+// PROVINCE (e.g. "Bulacan") while "state" is only the region ("Central Luzon"), so it
+// is accepted as one more name to match against the keywords.
+const isBaseArea = (destination, { destinationCity, destinationProvince, destinationCounty } = {}, baseAreaKeywords = SETTINGS_DEFAULTS.baseAreaKeywords) => {
   const keywords = (Array.isArray(baseAreaKeywords) ? baseAreaKeywords : [])
     .map(normalizePlace)
     .filter(Boolean);
   const city     = normalizePlace(destinationCity);
   const province = normalizePlace(destinationProvince);
+  const county   = normalizePlace(destinationCounty);
 
-  if (city || province) {
-    return keywords.some((k) => city === k || province === k);
+  if (city || province || county) {
+    return keywords.some((k) => city === k || province === k || county === k);
   }
 
   if (!destination) return true; // no destination given at all = treat as base area
   const d = String(destination).toLowerCase();
   return keywords.some((k) => d.includes(k));
+};
+
+// Which location(s) decide the "outside the base area" charge (extra fee + the
+// higher chauffeur fee):
+//   "either"      — outside if the PICKUP or the DESTINATION is outside   (default)
+//   "pickup"      — only the pickup counts
+//   "destination" — only the destination counts (the old behaviour)
+const BASE_AREA_BASIS = "either";
+
+// True only when the pin gave us a city/province AND neither matches a base-area
+// keyword. A pin with no structured place (e.g. the in-store pickup, which is the
+// shop itself) can't be judged, so it is never charged — the same "can't tell →
+// don't charge" rule the destination fallback uses.
+const isOutsideByPin = ({ city, province, county } = {}, baseAreaKeywords = SETTINGS_DEFAULTS.baseAreaKeywords) => {
+  const keywords = (Array.isArray(baseAreaKeywords) ? baseAreaKeywords : []).map(normalizePlace).filter(Boolean);
+  const c = normalizePlace(city);
+  const p = normalizePlace(province);
+  const n = normalizePlace(county);
+  if (!c && !p && !n) return false;
+  return !keywords.some((k) => c === k || p === k || n === k);
+};
+
+// Pickup / destination / overall outside-area flags for one booking.
+const computeAreaFlags = ({ destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty }, baseAreaKeywords) => {
+  const destinationOutside = !isBaseArea(destination, { destinationCity, destinationProvince, destinationCounty }, baseAreaKeywords);
+  const pickupOutside      = isOutsideByPin({ city: pickupCity, province: pickupProvince, county: pickupCounty }, baseAreaKeywords);
+  const outsideArea =
+    BASE_AREA_BASIS === "pickup"      ? pickupOutside :
+    BASE_AREA_BASIS === "destination" ? destinationOutside :
+    (pickupOutside || destinationOutside);
+  return { pickupOutside, destinationOutside, outsideArea };
+};
+
+// What the booking page needs to explain the base area up front: the keywords to
+// shade on the map, which location(s) count, and the three amounts that depend on it.
+const getBaseAreaConfig = async () => {
+  const settings = await getSystemSettings();
+  return {
+    baseAreaKeywords: (Array.isArray(settings.baseAreaKeywords) ? settings.baseAreaKeywords : []).map((k) => String(k).trim()).filter(Boolean),
+    basis: BASE_AREA_BASIS,
+    extraFeeOutsideArea:   Number(settings.extraFeeOutsideArea)   || 0,
+    driversFeeBaseArea:    Number(settings.driversFeeBaseArea)    || 0,
+    driversFeeOutsideArea: Number(settings.driversFeeOutsideArea) || 0,
+  };
 };
 
 // ── Day count with the 22h/25h billing-block rule ──────────────────────────
@@ -188,8 +236,9 @@ const computeFeeBreakdown = ({
 //
 // ASYNC — awaits getSystemSettings() internally (cached, see above) to pull
 // every fee amount from the admin-panel-controlled systemSettings doc.
-const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, durationType, destination, destinationCity, destinationProvince, driveType }) => {
+const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, durationType, destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, driveType }) => {
   const settings = await getSystemSettings();
+  const areaFlags = computeAreaFlags({ destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty }, settings.baseAreaKeywords);
   const { days, diffHrs } = calcBillableDays(startDateTime, endDateTime, durationType);
 
   // No valid date range selected yet — nothing should be charged at all,
@@ -197,12 +246,12 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   // to slip through even with days === 0 and show a phantom price before
   // the customer had picked any dates.
   if (days === 0) {
-    return { driversFeeBaseArea: Number(settings.driversFeeBaseArea) || 0, driversFeeOutsideArea: Number(settings.driversFeeOutsideArea) || 0, days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, gatewayFeeBase: 0, serviceFeeRate: pct(settings.serviceFeePercent), gatewayFeeRate: pct(settings.gatewayFeePercent), securityDeposit: 0, grandTotal: 0 };
+    return { ...areaFlags, extraFeeOutsideArea: Number(settings.extraFeeOutsideArea) || 0, driversFeeBaseArea: Number(settings.driversFeeBaseArea) || 0, driversFeeOutsideArea: Number(settings.driversFeeOutsideArea) || 0, days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, gatewayFeeBase: 0, serviceFeeRate: pct(settings.serviceFeePercent), gatewayFeeRate: pct(settings.gatewayFeePercent), securityDeposit: 0, grandTotal: 0 };
   }
 
   const rentalFee = days * (Number(pricePerDay) || 0);
 
-  const baseArea = isBaseArea(destination, { destinationCity, destinationProvince }, settings.baseAreaKeywords);
+  const baseArea = !areaFlags.outsideArea;
   const extraFee   = baseArea ? 0 : settings.extraFeeOutsideArea;
   const driversFee = driveType === "chauffeur" ? (baseArea ? settings.driversFeeBaseArea : settings.driversFeeOutsideArea) : 0;
 
@@ -219,6 +268,10 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
 
   return {
     days, diffHrs, rentalFee, extraFee, driversFee,
+    // Where the "outside the base area" charge came from — the booking page uses
+    // these to say WHICH location is outside (pickup and/or destination).
+    ...areaFlags,
+    extraFeeOutsideArea: Number(settings.extraFeeOutsideArea) || 0,
     // Both rates are always returned (even before dates/destination are picked)
     // so the booking page can show what "With Driver" costs up front.
     driversFeeBaseArea:    Number(settings.driversFeeBaseArea)    || 0,
@@ -275,6 +328,10 @@ const derivePaymentStatus = (payment) => {
 
 module.exports = {
   isBaseArea,
+  isOutsideByPin,
+  computeAreaFlags,
+  getBaseAreaConfig,
+  BASE_AREA_BASIS,
   calcBillableDays,
   computeBookingFees,
   computeFeeBreakdown,

@@ -12,15 +12,21 @@ const { REFUND_FULL_WINDOW_HOURS } = require("../../utils/payments/paymentBreakd
 
 const num = (v, fallback) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : fallback);
 
+// The numbers themselves — also used by the Terms & Conditions builder
+// (utils/terms/terms.service.js) so the text and this endpoint never disagree.
+const getPolicyValues = async () => {
+  const s = await getSystemSettings(); // cached for ~60s
+  return {
+    depositAmount:     num(s.securityDepositAmount, 1000),
+    serviceFeePercent: num(s.serviceFeePercent, 5),
+    gatewayFeePercent: num(s.gatewayFeePercent, 5),
+    fullRefundHours:   REFUND_FULL_WINDOW_HOURS,
+  };
+};
+
 const getPolicySettings = async (req, res) => {
   try {
-    const s = await getSystemSettings(); // cached for ~60s
-    return res.json({
-      depositAmount:     num(s.securityDepositAmount, 1000),
-      serviceFeePercent: num(s.serviceFeePercent, 5),
-      gatewayFeePercent: num(s.gatewayFeePercent, 5),
-      fullRefundHours:   REFUND_FULL_WINDOW_HOURS,
-    });
+    return res.json(await getPolicyValues());
   } catch (error) {
     console.error("getPolicySettings error:", error.message);
     // Fail safe: the pages fall back to the same defaults.
@@ -28,4 +34,4 @@ const getPolicySettings = async (req, res) => {
   }
 };
 
-module.exports = { getPolicySettings };
+module.exports = { getPolicySettings, getPolicyValues };

@@ -6,6 +6,7 @@ const createUserAddress  = require("../../models/user/userAddress.model");
 const createUserDocument = require("../../models/user/userDocument.model");
 const createReferral     = require("../../models/referral/referral.model");
 const { recordAudit }    = require("../../utils/auditLogs/auditLogs.util");
+const { checkTermsAcceptance, ensureTermsSnapshot, termsRequired } = require("../../utils/terms/terms.service");
 const { generateUniqueReferralCode, findUserByReferralCode } = require("../../utils/referrals/referral.util");
 
 // Same role IDs as bookings.controller.js's CANCELLATION_APPROVER_ROLE_IDS /
@@ -123,6 +124,7 @@ const signup = async (req, res) => {
     driversLicenseNumber,
     driverLicenseBase64,
     selfieWithIdBase64,
+    termsHash, // hash of the Terms & Conditions text shown when the customer ticked the box
   } = req.body;
 
   try {
@@ -136,6 +138,21 @@ const signup = async (req, res) => {
       const check = parseImageDataUrl(value, label);
       if (check.error) return res.status(400).json({ message: check.error });
     }
+
+    // 0b. Terms & Conditions acceptance (see utils/terms/terms.service.js). A stale or missing
+    // hash is rejected only when REQUIRE_TERMS_ACCEPTANCE=true; otherwise it's just not recorded.
+    let termsCheck;
+    try {
+      termsCheck = await checkTermsAcceptance(termsHash);
+      if (termsCheck.ok && termsCheck.accepted) await ensureTermsSnapshot(termsCheck.terms);
+    } catch (termsErr) {
+      console.error("Terms check failed:", termsErr.message);
+      if (termsRequired()) {
+        return res.status(503).json({ message: "We couldn't verify the Terms & Conditions right now. Please try again in a moment." });
+      }
+      termsCheck = { ok: true, accepted: false };
+    }
+    if (!termsCheck.ok) return res.status(termsCheck.status).json(termsCheck.body);
 
     // 1. Create user in Firebase Auth
     const firebaseUser = await auth.createUser({
@@ -169,10 +186,26 @@ const signup = async (req, res) => {
 
       // ── "user" collection ────────────────────────────────────
       const userRef = db.collection("user").doc(userID);
+      const acceptedAt = new Date();
       batch.set(userRef, createUser(userID, {
         username, email, phone,
         referralCode: ownReferralCode,
+        termsAcceptedAt: termsCheck.accepted ? acceptedAt : null,
+        termsVersion:    termsCheck.accepted ? termsCheck.terms.version : null,
+        termsHash:       termsCheck.accepted ? termsCheck.terms.hash : null,
       }));
+      if (termsCheck.accepted) {
+        // Append-only evidence of the signup acceptance (same collection as booking acceptances).
+        batch.set(db.collection("termsAcceptances").doc(`signup_${userID}`), {
+          acceptanceID: `signup_${userID}`,
+          context:      "signup",
+          userID,
+          termsVersion: termsCheck.terms.version,
+          termsHash:    termsCheck.terms.hash,
+          method:       "checkbox",
+          acceptedAt,
+        });
+      }
 
       // ── "userDetails" collection (keyed by userID for easy lookup) ──
       const userDetailsRef = db.collection("userDetails").doc(userID);
