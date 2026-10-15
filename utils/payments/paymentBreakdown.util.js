@@ -325,6 +325,28 @@ const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false 
   };
 };
 
+// The same policy from the stored verdict instead of timestamps. refundRequests keep ONE fact about the 48-hour rule,
+// returnDeposit: true = the deposit goes back (asked 48h or more before pickup), false = it is kept (asked later, or
+// after the pickup). A missing value is not judged here (callers treat it as a full refund). The late / no-show
+// split is not kept: both are "late" here.
+const getRefundPolicyFromFlag = (payment, { returnDeposit, waiveForfeit = false } = {}) => {
+  const depositAmount = getDepositAmount(payment);
+  const amountPaid    = getPaymentBreakdown(payment).amountPaid;
+  const keep = returnDeposit === false;
+  const wouldForfeit = keep ? Math.min(depositAmount, amountPaid) : 0;
+  return {
+    tier: keep ? "late" : "full",
+    hoursBeforePickup: null,
+    depositAmount,
+    forfeit: waiveForfeit ? 0 : wouldForfeit,
+    waived: !!waiveForfeit && wouldForfeit > 0,
+    waivedAmount: waiveForfeit ? wouldForfeit : 0,
+    unknownTiming: false,
+    fromFlag: true,
+    windowHours: REFUND_FULL_WINDOW_HOURS,
+  };
+};
+
 // Policy + plan in one call: what a refund requested at `requestedAt` is worth.
 const computeRefundQuote = (payment, { pickupAt, requestedAt, waiveForfeit = false } = {}) => {
   const policy = getRefundPolicy(payment, { pickupAt, requestedAt, waiveForfeit });
@@ -332,4 +354,4 @@ const computeRefundQuote = (payment, { pickupAt, requestedAt, waiveForfeit = fal
   return { policy, plan };
 };
 
-module.exports = { PAYMENT_ID_MISSING_NOTE, depositWasOnline, getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getRefundPolicy, computeRefundQuote, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS };
+module.exports = { PAYMENT_ID_MISSING_NOTE, depositWasOnline, getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getRefundPolicy, getRefundPolicyFromFlag, computeRefundQuote, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS };

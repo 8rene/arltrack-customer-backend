@@ -163,7 +163,7 @@ const buildPaymentEntries = (p, docID, opts = {}) => {
       method: m.method,
       amount: recorded ? Number(rec) : expectedBalance,
       status: "success",
-      referenceNumber: null,
+      referenceNumber: nullIfSentinel(p.balanceReferenceNumber),
       sessionID: null,
       transactionFee: null,
       processedBy: nullIfSentinel(p.balanceCollectedBy),
@@ -348,12 +348,15 @@ const MOVED_PAYMENT_FIELDS = [
   "depositPaymongoPaymentID", "balancePaymongoPaymentID", "paymongoPaymentID",
   "depositPaymongoFee", "balancePaymongoFee", "paymongoFeeTotal", "paymongoChannel", "lastSettledVia",
   "paidAt", "balancePaidAt", "confirmedBy", "confirmedAt",
-  "balanceMethod", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
+  "balanceMethod", "balanceReferenceNumber", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
   // staff collected the balance in person / handed a discount spillover back: both are facts of an entry row
   "balanceCollected", "balanceCollectedAmount", "refundIssuedBy", "refundIssuedAt",
 ];
 const MOVED_PENALTY_FIELDS = ["paymentMethod", "referenceNumber", "paidAt"];
-const MOVED_REFUND_FIELDS  = ["parts", "manualRefund", "unrefundable", "unrefundableAmount", "paymongoRefundID"];
+// onlineAmount / manualAmount / forfeitWaivedAmount are derived too (sums of the "out" rows, the deposit that was not kept):
+// refund requests no longer store them, hydrateRefundRequest puts them back for readers.
+const MOVED_REFUND_FIELDS  = ["parts", "manualRefund", "unrefundable", "unrefundableAmount", "paymongoRefundID",
+                              "onlineAmount", "manualAmount", "forfeitWaivedAmount"];
 
 /**
  * opts.rowsOnly  READ mode: the rows are the ONLY source. Whatever the document still carries in the moved fields
@@ -392,6 +395,7 @@ const hydratePayment = (payment, entries, opts = {}) => {
       if (bal.status === "success") fill("balancePaidAt", bal.settledAt);
     } else {
       fill("balanceMethod", BALANCE_METHOD_LABEL[bal.method] || null);
+      fill("balanceReferenceNumber", bal.referenceNumber);
       fill("balanceCollectedBy", bal.processedBy);
       fill("balanceCollectedAt", bal.processedAt || bal.settledAt);
       // "staff collected the balance" is no longer stored on the payment: it IS a settled in-person balance row.
@@ -490,7 +494,7 @@ const buildRefundEntries = (r, docID, opts = {}) => {
   let parts = Array.isArray(r.parts) && r.parts.length ? r.parts : null;
   if (!parts && nullIfSentinel(r.paymongoRefundID)) {
     parts = [{
-      kind: "deposit", paymongoRefundID: r.paymongoRefundID, amount: num(r.onlineAmount) || num(r.amount),
+      kind: "deposit", paymongoRefundID: r.paymongoRefundID, amount: num(r.onlineAmount) || num(r.toRefundAmount) || num(r.amount),
       status: low(r.status) === "refunded" ? "succeeded" : low(r.status) === "failed" ? "failed" : "pending",
     }];
   }
@@ -590,6 +594,22 @@ const hydrateRefundRequest = (request, entries, opts = {}) => {
   }
   if (unref.length) {
     out.unrefundableAmount = unref.reduce((s, e) => s + e.amount, 0);
+  }
+
+  // onlineAmount / manualAmount are not stored on the request any more: they are the sums of its rows. A request
+  // that still carries them (not cleaned up yet) keeps its stored value. Failed parts never moved money, so they
+  // are left out; a pending PayMongo part counts (it is on its way).
+  const missing = (k) => out[k] === undefined || out[k] === null;
+  if (missing("onlineAmount")) out.onlineAmount = online.filter((e) => e.status !== "failed").reduce((s, e) => s + num(e.amount), 0);
+  if (missing("manualAmount")) out.manualAmount = rows.filter((e) => e.source === "in_person").reduce((s, e) => s + num(e.amount), 0);
+  // A waived forfeit stores only the boolean; the amount it waived is the deposit that was not kept.
+  if (out.forfeitWaived === true && missing("forfeitWaivedAmount") && num(out.depositAmount) > 0) out.forfeitWaivedAmount = num(out.depositAmount);
+  // refundedAt is stored when the admin side completes the request. One the customer backend's webhook completed has
+  // none, so it is the latest settledAt of the request's successful "out" rows.
+  if (out.status === "Refunded" && missing("refundedAt")) {
+    const settled = rows.filter((e) => e.status === "success" && e.settledAt)
+      .reduce((best, e) => { const t = e.settledAt.toMillis ? e.settledAt.toMillis() : new Date(e.settledAt).getTime(); return t > best.t ? { t, v: e.settledAt } : best; }, { t: -Infinity, v: null });
+    if (settled.v) out.refundedAt = settled.v;
   }
   return out;
 };
