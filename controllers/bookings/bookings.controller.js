@@ -92,13 +92,53 @@ const getHolidayMap = async (startDateTime, endDateTime) => {
 // /check-coding and /coding-notice once a car + dates are chosen — this
 // endpoint never blocks anything, it only feeds the map's visual warning.
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// Optional body { carID, startDateTime, endDateTime }:
+//   - carID only      -> just the cities with a rule that bans THIS plate's last digit.
+//   - carID + dates   -> only the cities where this plate is actually coded on a
+//                        (non-holiday) weekday inside the booking, i.e. the same cities
+//                        /check-coding would warn about. The map then agrees with the warning.
+//   - no carID        -> every city with any rule (the old general heads-up).
 const getCodingCities = async (req, res) => {
   try {
+    const { carID, startDateTime, endDateTime } = req.body || {};
     const rules = await getCodingRules();
-    const cities = [...new Set(
+    const allCities = [...new Set(
       rules.map((r) => String(r.city || "").trim()).filter(Boolean)
     )];
-    return res.status(200).json({ cities });
+    if (!carID) return res.status(200).json({ cities: allCities, filtered: false });
+
+    const { notFound, lastDigit } = await getPlateLastDigit(String(carID));
+    // Unknown car or a plate that doesn't end in a digit: no coding applies, show nothing.
+    if (notFound || isNaN(lastDigit)) return res.status(200).json({ cities: [], filtered: true });
+
+    // Rules that ban this plate's digit and have a usable day + time window.
+    const plateRules = rules.filter((r) =>
+      parseBannedDigits(r.bannedDigits).includes(lastDigit) &&
+      !isNaN(Number(r.dayOfWeek)) &&
+      parseCodingTime(r.startTime) !== null && parseCodingTime(r.endTime) !== null);
+    const plateCities = [...new Set(
+      plateRules.map((r) => String(r.city || "").trim()).filter(Boolean)
+    )];
+
+    const start = startDateTime ? new Date(startDateTime) : null;
+    if (!start || isNaN(start.getTime())) {
+      return res.status(200).json({ cities: plateCities, filtered: true, plateDigit: lastDigit });
+    }
+    const parsedEnd = endDateTime ? new Date(endDateTime) : null;
+    const end = parsedEnd && !isNaN(parsedEnd.getTime()) ? parsedEnd : start;
+
+    // Same day-by-day logic as /check-coding, one pseudo-location per city.
+    const holidays = await getHolidayMap(start, end);
+    const cities = [];
+    for (const city of plateCities) {
+      const r = evaluateCodingRange({
+        rules: plateRules, startDateTime: start, endDateTime: end, lastDigit, holidays,
+        locations: [{ id: "city", label: city, destination: city, destinationCity: city }],
+      });
+      if (r.violations.length) cities.push(city);
+    }
+    return res.status(200).json({ cities, filtered: true, plateDigit: lastDigit });
   } catch (error) {
     console.error("getCodingCities error:", error);
     return res.status(500).json({ message: "Failed to load coding cities." });
