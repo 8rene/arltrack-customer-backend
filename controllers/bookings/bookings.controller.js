@@ -5,7 +5,7 @@ const { checkTermsAcceptance, termsRequired } = require("../../utils/terms/terms
 const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus, getBaseAreaConfig } = require("../../utils/pricing");
 const {
-  toManila, manilaDayRange, cityMatchesRule, parseCodingTime, parseBannedDigits, fmtCodingMins,
+  toManila, manilaDayRange, cityMatchesRule, parseCodingTime, parseBannedDigits, fmtCodingMins, ruleDay,
   buildCodingLocations, evaluateCodingRange, codingBlockMessage, codingWarningMessage,
 } = require("../../utils/bookings/codingRange.util");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
@@ -516,10 +516,11 @@ const createBooking = async (req, res) => {
             block: {
               message: codingBlockMessage({
                 lastDigit,
-                violations: result.violations,
+                violations: result.blockingViolations,
+                pickup: result.blockReason === "pickup",
                 windowText: `${fmtCodingMins(toManila(startDateTime).mins)} – ${fmtCodingMins(toManila(endDateTime).mins)}`,
               }),
-              violations: result.violations,
+              violations: result.blockingViolations,
             },
             warnings: [],
             warningMessage: "",
@@ -1389,19 +1390,50 @@ const checkCodingRule = async (req, res) => {
     });
 
     if (!result.violations.length) {
-      return res.status(200).json({ blocked: false, holidays: holidayList, holidaysSkipped: result.holidaysSkipped, ...legacyHoliday });
+      // TEMPORARY DIAGNOSTIC (non-production only): why did no rule match? Shows up in the
+      // Network tab response as `debug`. Remove once the coding check is confirmed working.
+      let debug;
+      if (process.env.NODE_ENV !== "production") {
+        const locs = buildCodingLocations({ destination, destinationCity, codingStops, pickup, pickupCity });
+        const dayInfo = toManila(bookingStart);
+        const dow = new Date(`${dayInfo.day}T00:00:00Z`).getUTCDay() || 7;
+        debug = {
+          note: "temporary diagnostic — no rule matched",
+          plateLastDigit: lastDigit,
+          rulesLoaded: codingRules.length,
+          bookingStartManila: dayInfo.day,
+          bookingStartWeekday_Mon1_Sun7: dow,
+          locationsChecked: locs.map((l) => ({ id: l.id, city: l.destinationCity, address: l.destination })),
+          // every rule that falls on the start day, with the result of each test
+          rulesOnThatWeekday: codingRules
+            .filter((r) => ruleDay(r) === dow)
+            .slice(0, 40)
+            .map((r) => ({
+              city: r.city,
+              dayOfWeek: r.dayOfWeek,
+              startTime: JSON.stringify(r.startTime),
+              endTime: JSON.stringify(r.endTime),
+              bannedDigits: r.bannedDigits,
+              timeParsed: parseCodingTime(r.startTime) !== null && parseCodingTime(r.endTime) !== null,
+              digitBanned: parseBannedDigits(r.bannedDigits).includes(lastDigit),
+              cityMatchesAnyLocation: locs.some((l) => cityMatchesRule(r.city, l.destinationCity, l.destination)),
+            })),
+        };
+      }
+      return res.status(200).json({ blocked: false, holidays: holidayList, holidaysSkipped: result.holidaysSkipped, ...legacyHoliday, ...(debug ? { debug } : {}) });
     }
 
     if (result.mode === "block") {
       // Window text in MANILA time (this used to call toLocaleTimeString on the
       // server, i.e. UTC on Vercel, so the message showed times 8 hours off).
       const windowText = `${fmtCodingMins(toManila(bookingStart).mins)}${parsedEnd ? " – " + fmtCodingMins(toManila(bookingEnd).mins) : ""}`;
-      const first = result.violations[0];
+      const first = result.blockingViolations[0];
       return res.status(200).json({
         blocked: true,
-        reason: codingBlockMessage({ lastDigit, violations: result.violations, windowText }),
+        blockReason: result.blockReason,
+        reason: codingBlockMessage({ lastDigit, violations: result.blockingViolations, windowText, pickup: result.blockReason === "pickup" }),
         // One entry per (day, location, rule) — the page marks each one.
-        violations: result.violations,
+        violations: result.blockingViolations,
         holidays: holidayList,
         holidaysSkipped: result.holidaysSkipped,
         // Kept for older callers: the first restriction found.

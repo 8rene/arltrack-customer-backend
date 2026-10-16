@@ -155,7 +155,10 @@ const manilaDaysBetween = (firstDay, lastDay) => {
  * @param {number}   p.lastDigit      last digit of the car's plate
  * @param {object[]} p.locations      from buildCodingLocations()
  * @param {Map<string,string>} [p.holidays]  "YYYY-MM-DD" (Manila) -> holiday name
- * @returns {{ mode: "block"|"warn", hours: number, violations: object[], holidaysSkipped: {date:string,name:string}[] }}
+ * @returns {{ mode: "block"|"warn", blockReason: "pickup"|"short"|null, blockingViolations: object[], hours: number, violations: object[], holidaysSkipped: {date:string,name:string}[] }}
+ *   A PICKUP location that is coded on the PICKUP date (the Manila day the trip starts) is a hard
+ *   block: the car has to be collected there that day. Every other conflict (the destination, extra
+ *   stops, later days) stays a warning the customer confirms.
  *   violations: one entry per (day, location, rule) — { id, location, city, date, dayName,
  *   startTime, endTime, bannedDigits, digit }
  */
@@ -207,7 +210,19 @@ const evaluateCodingRange = ({ rules, startDateTime, endDateTime, lastDigit, loc
   }
 
   violations.sort((a, b) => a.date.localeCompare(b.date) || parseCodingTime(a.startTime) - parseCodingTime(b.startTime));
-  return { mode: CODING_BLOCK_MAX_HOURS > 0 && hours <= CODING_BLOCK_MAX_HOURS ? "block" : "warn", hours, violations, holidaysSkipped };
+
+  // Pickup location coded on the pickup date → blocked (not a warning).
+  const pickupBlockers = violations.filter((v) => v.id === "pickup" && v.date === start.day);
+  const shortBlock = CODING_BLOCK_MAX_HOURS > 0 && hours <= CODING_BLOCK_MAX_HOURS && violations.length > 0;
+  let blockReason = null;
+  if (pickupBlockers.length) blockReason = "pickup";
+  else if (shortBlock) blockReason = "short";
+  return {
+    mode: blockReason ? "block" : "warn",
+    blockReason,
+    blockingViolations: blockReason === "pickup" ? pickupBlockers : violations,
+    hours, violations, holidaysSkipped,
+  };
 };
 
 const fmtDay = (iso) => {
@@ -229,7 +244,11 @@ const describeViolations = (violations) => {
 };
 
 // One user-facing sentence for a hard block.
-const codingBlockMessage = ({ lastDigit, violations, windowText }) => {
+const codingBlockMessage = ({ lastDigit, violations, windowText, pickup = false }) => {
+  if (pickup) {
+    return `This vehicle (plate ending in ${lastDigit}) cannot be picked up there on that date because of the Number Coding Scheme: ${describeViolations(violations)}. ` +
+      `Please choose a different pickup date, a different pickup location, or another vehicle.`;
+  }
   const windowPart = windowText ? ` Your booking window (${windowText}) overlaps with ${violations.length > 1 ? "these restrictions" : "this restriction"}.` : "";
   return `This vehicle (plate ending in ${lastDigit}) is not allowed under the Number Coding Scheme: ${describeViolations(violations)}.${windowPart} Please choose a different date, time, or another vehicle.`;
 };
