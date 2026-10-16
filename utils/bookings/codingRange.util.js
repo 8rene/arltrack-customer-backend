@@ -3,33 +3,30 @@
 //
 // The old check only looked at the weekday of the START date, so a Mon → Fri
 // booking was only ever tested against Monday. This walks every Manila
-// calendar day the booking touches and tests each one against the rules,
-// using the part of the booking that actually falls on that day:
-//
-//     first day  : start time  → end of day
-//     middle days: whole day
-//     last day   : start of day → end time
+// calendar day the booking touches (first day, middle days and last day alike)
+// and tests each one against the rules. The time of day is NOT compared: a day
+// with a matching rule is flagged whatever hour the trip starts or ends.
 //
 // Holidays suspend coding for that one day only (the old code only looked at
 // the start date).
 //
 // Every location is tested (pickup, primary destination, extra stops).
 //
-// Short bookings (<= CODING_BLOCK_MAX_HOURS) are BLOCKED when a restriction
-// applies — same as before. Longer bookings are returned as WARNINGS the
-// customer must acknowledge, because a multi-day rental in a coded city would
-// otherwise touch every plate's coding day and be impossible to book with any
-// car (the car can simply stay parked on its coded day).
+// A restriction is returned as a WARNING the customer must acknowledge — we
+// can't know when in the booking window they will actually reach a coded city
+// (e.g. a Mon -> Fri trip with a Monday rule), so nothing is hard-blocked.
+// Set CODING_BLOCK_MAX_HOURS above 0 to hard-block bookings up to that many
+// hours long again. It is a plain constant in this file, NOT stored in any
+// Firestore collection or model.
 //
 // Rule days: the admin panel stores dayOfWeek as Mon=1 … Sun=7. (The old
 // customer check compared that to JS getDay() 0=Sun…6=Sat, so Sunday rules
 // never matched.) Everything here uses Mon=1 … Sun=7.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Bookings up to this length are hard-blocked on a coding conflict; longer ones
-// only produce acknowledgeable warnings. Set to 0 to always warn, or to a very
-// large number (e.g. 10_000) to always block like before.
-const CODING_BLOCK_MAX_HOURS = 24;
+// 0 = never block, always warn. A value above 0 hard-blocks bookings up to that
+// many hours long (the old behaviour was 24); longer ones only warn.
+const CODING_BLOCK_MAX_HOURS = 0;
 
 // Safety cap — a booking can never legitimately span more days than this
 // (bookings of 10+ billable days are rejected elsewhere).
@@ -172,8 +169,6 @@ const evaluateCodingRange = ({ rules, startDateTime, endDateTime, lastDigit, loc
       continue;
     }
     const dow = new Date(`${day}T00:00:00Z`).getUTCDay() || 7;          // Mon=1 … Sun=7
-    const from = day === start.day ? start.mins : 0;
-    const to   = day === end.day   ? end.mins   : 24 * 60;
 
     for (const loc of locations) {
       for (const rule of rules) {
@@ -183,7 +178,9 @@ const evaluateCodingRange = ({ rules, startDateTime, endDateTime, lastDigit, loc
         const rStart = parseCodingTime(rule.startTime);
         const rEnd   = parseCodingTime(rule.endTime);
         if (rStart === null || rEnd === null) continue;
-        if (!(from < rEnd && to > rStart)) continue;                    // trip doesn't touch the coded hours that day
+        // No time-of-day test: every booked day that has a matching rule is flagged, even when the
+        // trip starts after (or ends before) the coded hours that day. We can't know when the
+        // customer will actually be in the coded city, so the whole day counts.
         if (!parseBannedDigits(rule.bannedDigits).includes(lastDigit)) continue;
 
         const key = `${day}|${loc.id}|${rule.startTime}|${rule.endTime}`;
@@ -205,7 +202,7 @@ const evaluateCodingRange = ({ rules, startDateTime, endDateTime, lastDigit, loc
   }
 
   violations.sort((a, b) => a.date.localeCompare(b.date) || parseCodingTime(a.startTime) - parseCodingTime(b.startTime));
-  return { mode: hours <= CODING_BLOCK_MAX_HOURS ? "block" : "warn", hours, violations, holidaysSkipped };
+  return { mode: CODING_BLOCK_MAX_HOURS > 0 && hours <= CODING_BLOCK_MAX_HOURS ? "block" : "warn", hours, violations, holidaysSkipped };
 };
 
 const fmtDay = (iso) => {

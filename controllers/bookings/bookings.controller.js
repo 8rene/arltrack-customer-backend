@@ -197,7 +197,8 @@ const findCodingNotices = ({ rules, lastDigit, locations }) => {
 // test) over pickup, destination and every extra stop. A rule that matches several stops
 // appears once (deduped by ruleID). It is a snapshot copied from the rule, so it stays
 // readable if the rule is edited or deleted later. Built on the SERVER, never from the
-// browser. Never throws: on any failure it returns [].
+// browser. Throws on failure (the caller refuses the booking) — it must never
+// silently save an empty warning list.
 const buildCodingWarnings = async ({ carID, destination, destinationCity, codingStops, pickup, pickupCity }) => {
   try {
     const carDoc = await db.collection("cars").doc(carID).get();
@@ -228,8 +229,8 @@ const buildCodingWarnings = async ({ carID, destination, destinationCity, coding
       x.dayOfWeek - y.dayOfWeek ||
       parseCodingTime(x.startTime) - parseCodingTime(y.startTime));
   } catch (e) {
-    console.warn("buildCodingWarnings failed:", e.message);
-    return [];
+    console.error("buildCodingWarnings failed:", e.message);
+    throw e;
   }
 };
 
@@ -453,7 +454,7 @@ const createBooking = async (req, res) => {
     // blocked on a conflict; multi-day bookings need the customer's acknowledgement
     // (codingAcknowledged) — see utils/bookings/codingRange.util.js.
     const codingOutcome = await (async () => {
-      const none = { block: null, warnings: [], warningMessage: "" };
+      const none = { block: null, warnings: [], warningMessage: "", failed: false };
       try {
         const { notFound, lastDigit } = await getPlateLastDigit(carID);
         if (notFound || isNaN(lastDigit)) return none;
@@ -486,10 +487,18 @@ const createBooking = async (req, res) => {
         }
         return { block: null, warnings: result.violations, warningMessage: codingWarningMessage({ lastDigit, violations: result.violations }) };
       } catch (e) {
-        console.warn("Coding rule check skipped:", e.message);
-        return none;
+        // Fail CLOSED: if the rules can't be checked, the booking is not created —
+        // otherwise it would go through with no warning shown or saved.
+        console.error("Coding rule check failed:", e.message);
+        return { ...none, failed: true };
       }
     })();
+
+    if (codingOutcome.failed) {
+      return res.status(503).json({
+        message: "We couldn't verify the Number Coding rules right now. Please try again in a moment.",
+      });
+    }
 
     if (codingOutcome.block) {
       return res.status(400).json({
@@ -695,7 +704,14 @@ const createBooking = async (req, res) => {
     const bookingSessionRef = db.collection("bookingSessions").doc(); // own auto-generated PK
     const bookingSessionID  = bookingSessionRef.id;
 
-    const codingWarnings = await buildCodingWarnings({ carID, destination, destinationCity, codingStops, pickup: pickupLocation, pickupCity });
+    let codingWarnings;
+    try {
+      codingWarnings = await buildCodingWarnings({ carID, destination, destinationCity, codingStops, pickup: pickupLocation, pickupCity });
+    } catch (e) {
+      return res.status(503).json({
+        message: "We couldn't verify the Number Coding rules right now. Please try again in a moment.",
+      });
+    }
     const bookingSessionData =
       createBookingSession(bookingSessionID, bookingID, {
         pickupLocation: pickupLat != null && pickupLng != null
