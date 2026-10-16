@@ -142,7 +142,7 @@ const getMyBookingPenalties = async (req, res) => {
 
     // Derived, never stored: an online checkout for this booking's penalties is open and unfinished.
     let onlinePaymentPending = false;
-    if (stillOwed > 0) {
+    if (unpaidTotal > 0) {
       try { onlinePaymentPending = !!(await listPendingCheckouts(userID))[bookingID]; }
       catch (pendErr) { console.warn("getMyBookingPenalties: could not read pending checkouts:", pendErr.message); }
     }
@@ -160,6 +160,7 @@ const getMyBookingPenalties = async (req, res) => {
         refundMethod,
         refundedAt,
         stillOwed,
+        payableNow: unpaidTotal,   // every unpaid Confirmed penalty -- what the online checkout charges
         // Kept for older clients: signed deposit - unpaid penalties.
         runningBalance: depositAmount !== null ? depositAmount - unpaidTotal : null,
         settlement,
