@@ -122,10 +122,11 @@ const isBaseArea = (destination, { destinationCity, destinationProvince, destina
 
 // Which location(s) decide the "outside the base area" charge (extra fee + the
 // higher chauffeur fee):
-//   "either"      — outside if the PICKUP or the DESTINATION is outside   (default)
-//   "pickup"      — only the pickup counts
+//   "either"      — outside if the PICKUP or the DESTINATION is outside
+//   "pickup"      — only the pickup counts (current behaviour — the destination
+//                   is for documentation only, so it must not affect the fee)
 //   "destination" — only the destination counts (the old behaviour)
-const BASE_AREA_BASIS = "either";
+const BASE_AREA_BASIS = "pickup";
 
 // True only when the pin gave us a city/province AND neither matches a base-area
 // keyword. A pin with no structured place (e.g. the in-store pickup, which is the

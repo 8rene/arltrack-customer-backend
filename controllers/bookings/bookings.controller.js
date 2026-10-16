@@ -83,6 +83,29 @@ const getHolidayMap = async (startDateTime, endDateTime) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/bookings/coding-cities
+// Public, read-only: the distinct city names covered by at least one coding
+// rule (regardless of which digits/day/time the rule actually bans) — just
+// enough for the Destination map to shade a general "heads up, this city has
+// SOME coding restriction" zone before the customer has picked a car or date.
+// The precise, date/plate-exact check still happens separately via
+// /check-coding and /coding-notice once a car + dates are chosen — this
+// endpoint never blocks anything, it only feeds the map's visual warning.
+// ─────────────────────────────────────────────────────────────────────────────
+const getCodingCities = async (req, res) => {
+  try {
+    const rules = await getCodingRules();
+    const cities = [...new Set(
+      rules.map((r) => String(r.city || "").trim()).filter(Boolean)
+    )];
+    return res.status(200).json({ cities });
+  } catch (error) {
+    console.error("getCodingCities error:", error);
+    return res.status(500).json({ message: "Failed to load coding cities." });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/bookings/quote
 // Body: { carID, duration, startDate, startTime, endDate, endTime, destination, driveType, paymentAmount }
 //
@@ -1412,4 +1435,4 @@ const getBaseArea = async (req, res) => {
   }
 };
 
-module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getBookingQuote, getBaseArea };
+module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea };
