@@ -307,7 +307,6 @@ const createBooking = async (req, res) => {
     destinationProvince,
     extraDestinations,
     codingStops, // [{ id, address, city }] — every additional stop, for the coding check
-    codingAcknowledged, // true once the customer confirmed a multi-day Number Coding warning
     termsVersionID, // termsVersions doc ID of the Terms & Conditions text the customer was shown when they ticked the box
     pickupProvince,
     pickupRegion,
@@ -451,8 +450,9 @@ const createBooking = async (req, res) => {
     // ── 0. Coding rule check (server-side enforcement) ──────────
     // Walks EVERY Manila calendar day of the booking (not just the start day) and
     // tests the pickup, the destination and every extra stop. Short bookings are
-    // blocked on a conflict; multi-day bookings need the customer's acknowledgement
-    // (codingAcknowledged) — see utils/bookings/codingRange.util.js.
+    // blocked on a conflict (when CODING_BLOCK_MAX_HOURS is set); otherwise the conflicts come
+    // back as warnings that are saved on the session. The customer is shown them and continuing
+    // the booking counts as accepting them — see utils/bookings/codingRange.util.js.
     const codingOutcome = await (async () => {
       const none = { block: null, warnings: [], warningMessage: "", failed: false };
       try {
@@ -505,15 +505,6 @@ const createBooking = async (req, res) => {
         message: codingOutcome.block.message,
         codingViolation: true,
         violations: codingOutcome.block.violations,
-      });
-    }
-    if (codingOutcome.warnings.length && codingAcknowledged !== true) {
-      return res.status(400).json({
-        message: "Please confirm the Number Coding warning for this booking before continuing.",
-        codingWarning: true,
-        requiresAcknowledgement: true,
-        warnings: codingOutcome.warnings,
-        warningMessage: codingOutcome.warningMessage,
       });
     }
     const codingWarned = codingOutcome.warnings.length;

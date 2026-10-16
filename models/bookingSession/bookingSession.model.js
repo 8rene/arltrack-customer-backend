@@ -39,8 +39,9 @@ const createBookingSession = (bookingSessionID, bookingID, data = {}) => ({
   // the admin never looks anything up in codingRules to show it — it still reads
   // correctly after the rule is edited or deleted.
   // Written by the CUSTOMER backend (bookings.controller.js, buildCodingWarnings); the
-  // admin only READS it. A booking can't proceed unless the customer agrees, so no
-  // acknowledgement is stored here. Older sessions simply lack it (read as []).
+  // admin only READS it. The customer is shown these warnings and continuing the booking
+  // counts as accepting them, so no acknowledgement is stored here. Older sessions simply
+  // lack it (read as []).
   // Entry: { city, plateLastDigit, ruleID, dayOfWeek, startTime, endTime }
   //   ruleID only records WHICH rule matched (codingRules/{ruleID}) — it may no longer
   //   exist; never rely on it. dayOfWeek is 1-7 (Monday = 1).
