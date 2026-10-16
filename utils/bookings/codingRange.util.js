@@ -64,7 +64,12 @@ const cityMatchesRule = (ruleCity, destinationCity, destination) => {
   // Also accept the free-text address, so a typed destination still matches
   // when the pin's city name is missing or spelled differently.
   const destBase = placeBase(destination);
-  return !!destBase && destBase.includes(ruleBase);
+  if (!destBase) return false;
+  if (destBase.includes(ruleBase)) return true;
+  // The rule says "Angeles City" but a typed/searched address reads "Angeles, Central Luzon,
+  // Philippines" — it never contains the word "city". Match the rule's core name ("angeles")
+  // as a whole word as well, so a trailing "City" on the rule doesn't hide the match.
+  return !!ruleCore && (` ${destBase} `).includes(` ${ruleCore} `);
 };
 
 // "7:00 AM" → minutes from midnight (null if it can't be parsed)
