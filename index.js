@@ -16,7 +16,6 @@ const paymongoRoutes  = require("./routes/paymongo.routes"); // ← NEW
 const policyRoutes    = require("./routes/policy.routes");
 const termsRoutes     = require("./routes/terms.routes");
 const violationsRoutes = require("./routes/violations.routes");
-const handoversRoutes  = require("./routes/handovers.routes");
 const cronRoutes      = require("./routes/cron.routes"); // ← NEW
 const penaltyRoutes    = require("./routes/penalty.routes"); // ← NEW
 
@@ -57,7 +56,6 @@ app.use("/api/location",  locationRoutes);
 app.use("/api/admin",     adminRoutes);
 app.use("/api/paymongo",  paymongoRoutes); // ← NEW
 app.use("/api/violations", violationsRoutes); // a renter reports a ticket / sees the notices recorded for their booking
-app.use("/api/handovers",  handoversRoutes);  // pickup handover: eligibility + the renter's signature
 app.use("/api/terms",     termsRoutes);    // public: the current Terms & Conditions (from the admin's termsVersions) and earlier versions by ID
 app.use("/api/policy",    policyRoutes);   // public: deposit / fee % / refund window quoted by the T&C pages
 app.use("/api/cron",      cronRoutes); // ← NEW
