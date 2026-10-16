@@ -1,6 +1,7 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { hydratePenalties } = require("../../utils/payments/paymentEntries.util");
 const { getDepositView } = require("../../utils/payments/depositView.util");
+const { listPendingCheckouts } = require("../../utils/payments/penaltyPayment.util");
 
 // Firestore Timestamp | Date | string -> ISO string (or null), so the
 // frontend never has to deal with {_seconds,_nanoseconds}.
@@ -139,8 +140,16 @@ const getMyBookingPenalties = async (req, res) => {
       stillOwed = unpaidTotal; // no deposit on file: whatever is unpaid is owed outright
     }
 
+    // Derived, never stored: an online checkout for this booking's penalties is open and unfinished.
+    let onlinePaymentPending = false;
+    if (stillOwed > 0) {
+      try { onlinePaymentPending = !!(await listPendingCheckouts(userID))[bookingID]; }
+      catch (pendErr) { console.warn("getMyBookingPenalties: could not read pending checkouts:", pendErr.message); }
+    }
+
     return res.status(200).json({
       data: {
+        onlinePaymentPending,
         depositAmount,
         depositStatus: deposit ? deposit.status : "NotCollected",
         depositSettled: !!settlement,

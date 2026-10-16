@@ -1,6 +1,6 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { axios, PAYMONGO_V1, paymongoHeaders, retrieveCheckoutSession } = require("../../utils/payments/paymongoClient.util");
-const { CHECKOUTS, listUnpaidForBooking, unpaidTotal, settlePenaltyCheckout, owedOn } = require("../../utils/payments/penaltyPayment.util");
+const { CHECKOUTS, listUnpaidForBooking, unpaidTotal, settlePenaltyCheckout, owedOn, listPendingCheckouts } = require("../../utils/payments/penaltyPayment.util");
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
@@ -144,7 +144,11 @@ const getMyOutstandingPenalties = async (req, res) => {
       if (owed > 0 && p.bookingID) byBooking[p.bookingID] = Math.round(((byBooking[p.bookingID] || 0) + owed) * 100) / 100;
     });
     const total = Math.round(Object.values(byBooking).reduce((s, n) => s + n, 0) * 100) / 100;
-    return res.status(200).json({ data: { byBooking, total } });
+    // Bookings whose penalty the customer has already opened a checkout for but not finished paying.
+    const openCheckouts = await listPendingCheckouts(req.user.userID);
+    const pendingByBooking = {};
+    Object.keys(byBooking).forEach((id) => { if (openCheckouts[id]) pendingByBooking[id] = true; });
+    return res.status(200).json({ data: { byBooking, pendingByBooking, total } });
   } catch (error) {
     console.error("getMyOutstandingPenalties error:", error.message);
     return res.status(500).json({ message: "Failed to load outstanding penalties." });

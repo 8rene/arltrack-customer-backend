@@ -1033,6 +1033,28 @@ const getUserBookings = async (req, res) => {
       };
     });
 
+    // Number Coding warnings saved on each booking's session (see buildCodingWarnings). The list only needs the COUNT and
+    // the cities for a small badge; the full schedule stays on the Booking Details page. One "in" query per 30 bookings,
+    // and a display list must never fail on this: any error just means no badge.
+    try {
+      const ids = result.map((b) => b.bookingID).filter(Boolean);
+      const warnByBooking = {};
+      for (let i = 0; i < ids.length; i += 30) {
+        const snap = await db.collection("bookingSessions").where("bookingID", "in", ids.slice(i, i + 30)).get();
+        snap.docs.forEach((d) => {
+          const s = d.data();
+          if (s.bookingID && Array.isArray(s.codingWarnings)) warnByBooking[s.bookingID] = s.codingWarnings;
+        });
+      }
+      result.forEach((b) => {
+        const list = warnByBooking[b.bookingID] || [];
+        b.codingWarningCount = list.length;
+        b.codingCities = [...new Set(list.map((w) => (w && w.city) || "").filter(Boolean))];
+      });
+    } catch (codingErr) {
+      console.warn("getUserBookings: could not read coding warnings:", codingErr.message);
+    }
+
     // Fetch payments for each booking
     const paymentSnaps = await Promise.all(
       result.map((b) =>

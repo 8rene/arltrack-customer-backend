@@ -43,6 +43,27 @@ const millis = (v) => {
 };
 const byAge = (a, b) => millis(a.createdAt) - millis(b.createdAt);
 
+// A checkout the customer opened but has not finished. PayMongo sessions expire after 24h, so a "pending" doc older
+// than that is stale (nothing has flipped it to "expired" yet) and must not mark a penalty as awaiting payment.
+// This is DERIVED on read, like the rest of the penalty state: nothing is stored on the penalty for it.
+const PENDING_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** { [bookingID]: { checkoutID, checkoutUrl, amount, createdAt } } -- this customer's still-open penalty checkouts. */
+const listPendingCheckouts = async (userID) => {
+  const snap = await db.collection(CHECKOUTS)
+    .where("userID", "==", userID).where("status", "==", "pending").get();
+  const cutoff = Date.now() - PENDING_WINDOW_MS;
+  const out = {};
+  snap.docs.map((d) => d.data()).forEach((c) => {
+    if (!c.bookingID || millis(c.createdAt) < cutoff) return;
+    const prev = out[c.bookingID];
+    if (!prev || millis(c.createdAt) > millis(prev.createdAt)) {
+      out[c.bookingID] = { checkoutID: c.checkoutID, checkoutUrl: c.checkoutUrl || null, amount: num(c.amount), createdAt: c.createdAt };
+    }
+  });
+  return out;
+};
+
 /** Confirmed penalties of this booking that still owe money, oldest first. */
 const listUnpaidForBooking = async (userID, bookingID) => {
   const snap = await db.collection("penalties")
@@ -153,4 +174,4 @@ const settlePenaltyCheckout = async ({ checkoutRef, paymongoPaymentID = null, ch
   return result;
 };
 
-module.exports = { CHECKOUTS, listUnpaidForBooking, unpaidTotal, settlePenaltyCheckout, owedOn };
+module.exports = { CHECKOUTS, listUnpaidForBooking, unpaidTotal, settlePenaltyCheckout, owedOn, listPendingCheckouts };

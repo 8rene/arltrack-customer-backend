@@ -2,6 +2,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const admin  = require("firebase-admin");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { generateUniqueReferralCode } = require("../../utils/referrals/referral.util");
+const { listPendingCheckouts } = require("../../utils/payments/penaltyPayment.util");
 
 // Same role IDs as editRequest.controller.js/signup.controller.js's
 // STAFF_NOTIFY_ROLE_IDS — kept as a local literal here too since each
@@ -184,8 +185,12 @@ const getFullProfile = async (req, res) => {
     }, 0);
     // Which bookings that balance belongs to — lets MyBookings.jsx's
     // banner link straight to the booking instead of just showing a total.
+    // `pending` = the customer already opened an online checkout for it and hasn't finished paying.
+    // A failed lookup only drops the badge; it never blocks the profile.
+    let openCheckouts = {};
+    try { openCheckouts = await listPendingCheckouts(userID); } catch (e) { console.warn("profile: could not read pending penalty checkouts:", e.message); }
     const outstandingPenaltyBookings = Object.entries(outstandingByBooking)
-      .map(([bookingID, amount]) => ({ bookingID, amount }));
+      .map(([bookingID, amount]) => ({ bookingID, amount, pending: !!openCheckouts[bookingID] }));
 
     // Primary address = isDefault true, or first one
     const primaryAddress = addresses.find(a => a.isDefault) || addresses[0] || {};
@@ -206,7 +211,7 @@ const getFullProfile = async (req, res) => {
       // Queried live from `penalties` above — see MyBookings.jsx's
       // outstanding-balance banner, which reads this same response field.
       outstandingPenaltyBalance,
-      outstandingPenaltyBookings, // [{ bookingID, amount }] — one entry per booking with unpaid penalties
+      outstandingPenaltyBookings, // [{ bookingID, amount, pending }] — one entry per booking with unpaid penalties
       // referral — this user's own shareable code and how many people
       // they've referred so far. Was already on the "user" doc since
       // signup started writing it, just never surfaced through this
