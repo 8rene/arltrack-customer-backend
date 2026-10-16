@@ -3,8 +3,9 @@ const router  = express.Router();
 
 const { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea } = require("../controllers/bookings/bookings.controller");
 const { getBookingDetails } = require("../controllers/bookings/bookingSessions.controller");
-const { resendReceipt } = require("../controllers/bookings/receipt.controller");
+const { getStatement, getStatementPdf, emailStatement, getReceipt, getReceiptPdf, emailReceipt } = require("../controllers/bookings/receipt.controller");
 const verifyToken = require("../middlewares/auth.middleware");
+const rateLimit = require("../middlewares/rateLimit.middleware");
 
 router.post("/create",                        verifyToken, createBooking);
 router.get("/user/:userID",                   verifyToken, getUserBookings);
@@ -16,6 +17,16 @@ router.post("/coding-cities",       getCodingCities);   // no auth needed — di
 router.post("/base-area",            getBaseArea);       // no auth needed — base-area keywords + out-of-area fee amounts (read-only)
 router.post("/quote",               getBookingQuote);   // no auth needed — pricing preview only, writes nothing
 router.get("/:bookingID/details",   verifyToken, getBookingDetails);
-router.post("/:bookingID/resend-receipt", verifyToken, resendReceipt);
+
+// Receipts + booking statement (same documents as the admin side). Owner-only; PDFs and emails are rate limited on top of
+// the shared 5-minute email limit, since a PDF costs CPU.
+const pdfLimit   = rateLimit({ windowMs: 10 * 60 * 1000, max: 30, keyPrefix: "receipt-pdf" });
+const emailLimit = rateLimit({ windowMs: 10 * 60 * 1000, max: 10, keyPrefix: "receipt-email" });
+router.get("/:bookingID/statement",                          verifyToken, getStatement);
+router.get("/:bookingID/statement/pdf",                      verifyToken, pdfLimit,   getStatementPdf);
+router.post("/:bookingID/statement/email",                   verifyToken, emailLimit, emailStatement);
+router.get("/:bookingID/receipts/:entryID",                  verifyToken, getReceipt);
+router.get("/:bookingID/receipts/:entryID/pdf",              verifyToken, pdfLimit,   getReceiptPdf);
+router.post("/:bookingID/receipts/:entryID/email",           verifyToken, emailLimit, emailReceipt);
 
 module.exports = router;

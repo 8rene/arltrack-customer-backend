@@ -218,4 +218,4 @@ const sendCombinedPaymentReceiptEmail = ({
   `) });
 };
 
-module.exports = { sendAccountApprovedEmail, sendPaymentReceiptEmail, sendCombinedPaymentReceiptEmail };
+module.exports = { sendAccountApprovedEmail, sendPaymentReceiptEmail, sendCombinedPaymentReceiptEmail, sendGenericEmail };
