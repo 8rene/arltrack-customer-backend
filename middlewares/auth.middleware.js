@@ -40,6 +40,17 @@ const verifyToken = async (req, res, next) => {
             : "Your account has been deactivated. Please contact support.",
       });
     }
+
+    // A JWT is stateless, so "log out" and "reset password" used to leave every token already
+    // issued working until its own 1-day expiry. Those two actions now stamp
+    // `tokensValidAfter` (epoch SECONDS) on this same user doc, and any token issued
+    // before that moment is refused here. Compared in whole seconds (a JWT's `iat` has no
+    // finer resolution), so a token issued in the same second as the stamp still works —
+    // logging straight back in is never refused. Accounts without the field are unaffected.
+    const validAfter = Number(userDoc.data().tokensValidAfter) || 0;
+    if (validAfter && !(verified.iat >= validAfter)) {
+      return res.status(401).json({ message: "Your session has ended. Please log in again." });
+    }
   } catch (err) {
     console.error("Auth middleware status check failed:", err.message);
     return res.status(500).json({ message: "Server error. Please try again." });

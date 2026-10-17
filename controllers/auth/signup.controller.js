@@ -106,8 +106,8 @@ const uploadBase64Image = async (base64DataUrl, destPath) => {
 // ─────────────────────────────────────────────────────────────
 const signup = async (req, res) => {
   const {
-    username,
-    email,
+    username: rawUsername,
+    email: rawEmail,
     password,
     phone,
     firstName,
@@ -126,6 +126,12 @@ const signup = async (req, res) => {
     selfieWithIdBase64,
     termsVersionID, // termsVersions doc ID of the Terms & Conditions text shown when the customer ticked the box
   } = req.body;
+
+  // Store email and username the way check-availability already compares them (trimmed + lowercase).
+  // Before, the form lowercased the email but the username kept its capitals, so the lowercase
+  // availability lookup could never match an existing "Juan" and a second "Juan" was let through.
+  const email    = typeof rawEmail    === "string" ? rawEmail.trim().toLowerCase()    : rawEmail;
+  const username = typeof rawUsername === "string" ? rawUsername.trim().toLowerCase() : rawUsername;
 
   try {
     // 0. Reject bad ID images BEFORE creating anything (otherwise the account would
@@ -152,6 +158,14 @@ const signup = async (req, res) => {
       termsCheck = { ok: true, accepted: false };
     }
     if (!termsCheck.ok) return res.status(termsCheck.status).json(termsCheck.body);
+
+    // 0c. The username must be unique. Only the browser's pre-check (check-availability) looked before,
+    // so nothing stopped a request that skipped it. (Usernames saved before this change may still
+    // contain capitals and can't be matched by this lookup.)
+    if (username) {
+      const taken = await db.collection("user").where("username", "==", username).limit(1).get();
+      if (!taken.empty) return res.status(409).json({ message: "Username is already taken." });
+    }
 
     // 1. Create user in Firebase Auth
     const firebaseUser = await auth.createUser({
@@ -323,6 +337,11 @@ const signup = async (req, res) => {
       return res.status(409).json({ message: "Email is already in use." });
     if (error.code === "auth/invalid-phone-number")
       return res.status(400).json({ message: "Invalid phone number format." });
+    // check-availability only looks at email + username, so a phone number that is already on another
+    // account is first discovered here — it used to fall through to the generic 500 below.
+    // (createUser runs before any upload, so nothing is left behind when this fires.)
+    if (error.code === "auth/phone-number-already-exists")
+      return res.status(409).json({ message: "Phone number is already in use." });
     if (error.code === "auth/weak-password")
       return res.status(400).json({ message: "Password is too weak." });
     return res.status(500).json({ message: "Server error. Please try again." });
