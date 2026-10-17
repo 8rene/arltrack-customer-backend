@@ -814,6 +814,17 @@ const findOpenRefundRequest = async (paymentID, tx = null) => {
   return snap.empty ? null : snap.docs[0].data();
 };
 
+// A refund request staff already rejected is final: the customer can't file another one for the same payment.
+// (A "Failed" request -- the PayMongo refund itself errored -- is not a decision, so that one can still be retried.)
+const findRejectedRefundRequest = async (paymentID) => {
+  const snap = await db.collection("refundRequests")
+    .where("paymentID", "==", paymentID)
+    .where("status", "==", "Rejected")
+    .limit(1)
+    .get();
+  return snap.empty ? null : snap.docs[0].data();
+};
+
 // Loads + validates everything a refund quote needs. Shared by requestRefund
 // (which creates the request) and previewRefund (which shows the customer the
 // amount first). Returns { error: { status, message } } or { payment, booking }.
@@ -834,6 +845,10 @@ const loadRefundContext = async (userID, paymentID) => {
   // "paid" = confirmed through PayMongo, "Approved" = confirmed by staff (cash).
   if (!["paid", "approved"].includes(lower(payment.status))) {
     return { error: { status: 400, message: "Only paid payments can be refunded." } };
+  }
+
+  if (await findRejectedRefundRequest(paymentID)) {
+    return { error: { status: 403, message: "Your refund request for this booking was already rejected, so it can't be requested again. Please contact support if you need help." } };
   }
 
   // ── The booking must not have started ──
