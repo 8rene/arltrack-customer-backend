@@ -2,6 +2,8 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { axios, PAYMONGO_V1, paymongoHeaders, retrieveCheckoutSession } = require("../../utils/payments/paymongoClient.util");
 const { CHECKOUTS, listUnpaidForBooking, unpaidTotal, settlePenaltyCheckout, owedOn, listPendingCheckouts } = require("../../utils/payments/penaltyPayment.util");
 
+const { getSystemSettings, computePenaltyCheckoutFees } = require("../../utils/pricing");
+
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
 // Same channels the booking checkout offers.
@@ -15,6 +17,16 @@ const newCheckoutID = () => `PENCO-${db.collection(CHECKOUTS).doc().id}`;
 //
 // Opens a PayMongo checkout for everything this booking's customer still owes
 // in confirmed penalties. The amount is computed here, never read from the body.
+//
+// The customer also pays the online payment (gateway) fee on it. Each penalty carries the gatewayFeeRate that was in
+// System Settings when it was created, and is charged at that rate on what it still owes (a penalty from before
+// the rate was saved uses the current setting). The fee is a SEPARATE line on the checkout and is not part of
+// the penalty: the penalty's own amount / paidAmount only ever move by the penalty money (see settlePenaltyCheckout).
+//   checkout.amount         = what the customer is charged in total (penaltyAmount + gatewayFee)
+//   checkout.penaltyAmount  = the penalty money inside it
+//   checkout.gatewayFee     = the online payment fee inside it
+//   checkout.lines          = [{ penaltyID, amount, rate, fee }] per penalty, so settlement gives each its own fee
+//   checkout.gatewayFeeRate = the one % every line shares (null when the penalties were created at different rates)
 // ─────────────────────────────────────────────────────────────────────────────
 const createPenaltyPaymentLink = async (req, res) => {
   const userID = req.user.userID;
@@ -49,10 +61,16 @@ const createPenaltyPaymentLink = async (req, res) => {
     }
 
     const unpaid = await listUnpaidForBooking(userID, bookingID);
-    const amount = unpaidTotal(unpaid);
-    if (!(amount > 0)) {
+    const penaltyAmount = unpaidTotal(unpaid);
+    if (!(penaltyAmount > 0)) {
       return res.status(200).json({ message: "There's nothing left to pay on this booking's penalties.", alreadyPaid: true, bookingID });
     }
+    const settings = await getSystemSettings();
+    const fee = computePenaltyCheckoutFees(
+      unpaid.map((p) => ({ penaltyID: p.penaltyID || p._ref.id, owed: owedOn(p), gatewayFeeRate: p.gatewayFeeRate })),
+      settings.gatewayFeePercent
+    );
+    const amount = fee.total;                       // what the customer is actually charged
     const centavos = Math.round(amount * 100);
     if (centavos < MIN_CENTAVOS) {
       return res.status(400).json({ message: "Online payment needs at least ₱20.00. Please pay this small balance in store." });
@@ -63,13 +81,21 @@ const createPenaltyPaymentLink = async (req, res) => {
       .where("bookingID", "==", bookingID).where("userID", "==", userID).where("status", "==", "pending").get();
     const reusable = open.docs.map((d) => d.data()).find((c) => num2(c.amount) === amount && c.channel === channel[0]);
     if (reusable) {
-      return res.status(200).json({ message: "Payment link already exists.", checkoutUrl: reusable.checkoutUrl, checkoutID: reusable.checkoutID, amount });
+      return res.status(200).json({
+        message: "Payment link already exists.", checkoutUrl: reusable.checkoutUrl, checkoutID: reusable.checkoutID,
+        amount, penaltyAmount: fee.penaltyAmount, gatewayFee: fee.gatewayFee, gatewayFeeRate: fee.gatewayFeeRate,
+      });
     }
 
     const checkoutID = newCheckoutID();
     const pmRes = await axios.post(`${PAYMONGO_V1}/checkout_sessions`, {
       data: { attributes: {
-        line_items: [{ name: `ARLTrack Booking #${bookingID} (Penalty)`, amount: centavos, currency: "PHP", quantity: 1 }],
+        line_items: [
+          { name: `ARLTrack Booking #${bookingID} (Penalty)`, amount: Math.round(fee.penaltyAmount * 100), currency: "PHP", quantity: 1 },
+          ...(fee.gatewayFee > 0
+            ? [{ name: fee.gatewayFeeRate ? `Online payment fee (${fee.gatewayFeeRate}%)` : "Online payment fee", amount: Math.round(fee.gatewayFee * 100), currency: "PHP", quantity: 1 }]
+            : []),
+        ],
         payment_method_types: channel,
         success_url: `${FRONTEND_URL}/payment-return?penaltyCheckoutID=${checkoutID}&bookingID=${bookingID}`,
         cancel_url:  `${FRONTEND_URL}/my-bookings?tab=history`,
@@ -82,11 +108,15 @@ const createPenaltyPaymentLink = async (req, res) => {
     const now = new Date();
     await db.collection(CHECKOUTS).doc(checkoutID).set({
       checkoutID, bookingID, userID, amount, channel: channel[0],
+      penaltyAmount: fee.penaltyAmount, gatewayFee: fee.gatewayFee, gatewayFeeRate: fee.gatewayFeeRate, lines: fee.lines,
       sessionID: session.id, checkoutUrl, status: "pending",
       createdAt: now, updatedAt: now,
     });
 
-    return res.status(200).json({ message: "Payment link created.", checkoutUrl, checkoutID, amount });
+    return res.status(200).json({
+      message: "Payment link created.", checkoutUrl, checkoutID,
+      amount, penaltyAmount: fee.penaltyAmount, gatewayFee: fee.gatewayFee, gatewayFeeRate: fee.gatewayFeeRate,
+    });
   } catch (error) {
     console.error("createPenaltyPaymentLink error:", error?.response?.data || error.message);
     return res.status(500).json({ message: "Failed to create payment link. Please try again." });
@@ -137,18 +167,27 @@ const getMyOutstandingPenalties = async (req, res) => {
   try {
     const snap = await db.collection("penalties")
       .where("userID", "==", req.user.userID).where("status", "==", "Confirmed").get();
+    const settings = await getSystemSettings();
     const byBooking = {};
+    const feeByBooking = {};
     snap.docs.forEach((d) => {
       const p = d.data();
       const owed = owedOn(p);
-      if (owed > 0 && p.bookingID) byBooking[p.bookingID] = Math.round(((byBooking[p.bookingID] || 0) + owed) * 100) / 100;
+      if (owed > 0 && p.bookingID) {
+        byBooking[p.bookingID] = Math.round(((byBooking[p.bookingID] || 0) + owed) * 100) / 100;
+        // that penalty's own online payment fee (its saved rate, else the current setting)
+        const f = computePenaltyCheckoutFees([{ penaltyID: p.penaltyID || d.id, owed, gatewayFeeRate: p.gatewayFeeRate }], settings.gatewayFeePercent);
+        feeByBooking[p.bookingID] = Math.round(((feeByBooking[p.bookingID] || 0) + f.gatewayFee) * 100) / 100;
+      }
     });
     const total = Math.round(Object.values(byBooking).reduce((s, n) => s + n, 0) * 100) / 100;
     // Bookings whose penalty the customer has already opened a checkout for but not finished paying.
     const openCheckouts = await listPendingCheckouts(req.user.userID);
     const pendingByBooking = {};
     Object.keys(byBooking).forEach((id) => { if (openCheckouts[id]) pendingByBooking[id] = true; });
-    return res.status(200).json({ data: { byBooking, pendingByBooking, total } });
+    // The online payment fee is added at checkout. feeByBooking = that fee per booking (each penalty at its own saved
+    // rate), so the app can show "₱100 + ₱5 online payment fee" before the customer taps pay.
+    return res.status(200).json({ data: { byBooking, feeByBooking, pendingByBooking, total } });
   } catch (error) {
     console.error("getMyOutstandingPenalties error:", error.message);
     return res.status(500).json({ message: "Failed to load outstanding penalties." });

@@ -231,6 +231,41 @@ const computeFeeBreakdown = ({
   return { serviceFee, gatewayFee, gatewayFeeBase: gatewayBase, grandTotal, serviceFeeRate: serviceRate, gatewayFeeRate: gatewayRate };
 };
 
+// ── Online payment (gateway) fee on a PENALTY ───────────────────────────────
+// A penalty paid through PayMongo costs the business PayMongo's cut, so the customer is charged the same
+// gatewayFeePercent as the booking (one setting for the owner to manage). Same rounding as computeFeeBreakdown:
+// a whole peso. The fee is NOT part of the penalty: the penalty's amount stays what was charged for the
+// lateness / damage, and the fee exists only on the online checkout (never for in-store or deposit-covered).
+//   gatewayFee = round(penaltyAmount x gatewayFeePercent / 100)      total = penaltyAmount + gatewayFee
+const computePenaltyGatewayFee = (penaltyAmount = 0, gatewayFeePercent = 0) => {
+  const base = Math.max(0, Math.round((Number(penaltyAmount) || 0) * 100) / 100);
+  const rate = pct(gatewayFeePercent);
+  const gatewayFee = Math.round(base * rate / 100);
+  return { penaltyAmount: base, gatewayFeeRate: rate, gatewayFee, total: Math.round((base + gatewayFee) * 100) / 100 };
+};
+
+// The fee for a whole penalty checkout: each unpaid penalty is charged at ITS OWN saved gatewayFeeRate (the % that was
+// in System Settings when the penalty was created), on what it still owes. A penalty with no saved rate (created before
+// this existed) uses the current setting instead. items: [{ penaltyID, owed, gatewayFeeRate }].
+// Returns the per-penalty `lines` (kept on the checkout so settlement can give each penalty its own fee), the totals,
+// and gatewayFeeRate = the one % shared by every line (null when the lines differ, 0 when nothing is charged).
+const computePenaltyCheckoutFees = (items = [], fallbackPercent = 0) => {
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  const lines = items.map((it) => {
+    const stored = it.gatewayFeeRate;
+    const hasRate = stored !== undefined && stored !== null && stored !== "" && Number.isFinite(Number(stored));
+    const f = computePenaltyGatewayFee(it.owed, hasRate ? stored : fallbackPercent);
+    return { penaltyID: it.penaltyID, amount: f.penaltyAmount, rate: f.gatewayFeeRate, fee: f.gatewayFee };
+  });
+  const penaltyAmount = r2(lines.reduce((s, l) => s + l.amount, 0));
+  const gatewayFee = r2(lines.reduce((s, l) => s + l.fee, 0));
+  const rates = [...new Set(lines.map((l) => l.rate))];
+  return {
+    lines, penaltyAmount, gatewayFee, total: r2(penaltyAmount + gatewayFee),
+    gatewayFeeRate: rates.length === 1 ? rates[0] : rates.length === 0 ? 0 : null,
+  };
+};
+
 // ── Full fee breakdown for a booking ────────────────────────────────────────
 // pricePerDay must come from the car's own carPricing doc (looked up by the
 // caller using carID + durationType) — never from the client.
@@ -336,6 +371,8 @@ module.exports = {
   calcBillableDays,
   computeBookingFees,
   computeFeeBreakdown,
+  computePenaltyGatewayFee,
+  computePenaltyCheckoutFees,
   computePaymentSplit,
   derivePaymentStatus,
   getSystemSettings,

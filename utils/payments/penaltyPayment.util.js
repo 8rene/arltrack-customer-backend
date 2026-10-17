@@ -7,8 +7,13 @@
 // computed here on the server, never taken from the client.
 //
 //   penaltyCheckouts/{PENCO-xxxx}   one doc per PayMongo session
-//     { checkoutID, bookingID, userID, amount, channel, sessionID, checkoutUrl,
-//       status: pending | paid, ... }
+//     { checkoutID, bookingID, userID, amount, penaltyAmount, gatewayFee, gatewayFeeRate, lines, channel, sessionID,
+//       checkoutUrl, status: pending | paid, ... }
+//     lines = [{ penaltyID, amount, rate, fee }]: what each penalty owed when the checkout opened, at ITS OWN
+//     gatewayFeeRate, and the fee on it. Settlement adds every penalty's fee to ITS penalties.gatewayFeePaid.
+//     amount = what the customer was charged = penaltyAmount + gatewayFee. Only penaltyAmount is penalty money;
+//     gatewayFee is the online payment fee (same % as the booking). Checkouts opened before the fee existed have
+//     neither field, and for them amount IS the penalty money.
 //
 // Like settlePayment.util.js, ONE function (settlePenaltyCheckout) settles a
 // checkout no matter who discovers the payment first — the webhook or the
@@ -42,6 +47,21 @@ const millis = (v) => {
   return Number.isFinite(t) ? t : 0;
 };
 const byAge = (a, b) => millis(a.createdAt) - millis(b.createdAt);
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+/** Splits `total` pesos across `weights` in proportion, in whole centavos, the last share taking the rounding
+ *  remainder, so the shares always add back up to exactly `total`. */
+const splitProportional = (total, weights) => {
+  const sum = weights.reduce((s, w) => s + w, 0);
+  if (!weights.length || !(sum > 0)) return weights.map(() => 0);
+  const cents = Math.round(num(total) * 100);
+  let given = 0;
+  return weights.map((w, i) => {
+    const share = i === weights.length - 1 ? cents - given : Math.round((cents * w) / sum);
+    given += share;
+    return share / 100;
+  });
+};
 
 // A checkout the customer opened but has not finished. PayMongo sessions expire after 24h, so a "pending" doc older
 // than that is stale (nothing has flipped it to "expired" yet) and must not mark a penalty as awaiting payment.
@@ -101,17 +121,55 @@ const settlePenaltyCheckout = async ({ checkoutRef, paymongoPaymentID = null, ch
       .filter((p) => p.userID === co.userID && owedOn(p) > 0)
       .sort(byAge);
 
-    let remaining = num(co.amount);
-    const applied = [];
-    const groupID = db.collection(ENTRIES).doc().id;
+    // Only the penalty money is applied to penalties. The online payment fee the customer also paid is NOT penalty
+    // money: it never touches a penalty's paidAmount (or it would clear the penalty early and show up below as an
+    // overpayment). A checkout from before the fee existed has no penaltyAmount: its whole amount is penalty money.
+    const hasSplit = co.penaltyAmount !== undefined && co.penaltyAmount !== null;
+    const penaltyDue = hasSplit ? num(co.penaltyAmount) : num(co.amount);
+    const feeCharged = hasSplit ? num(co.gatewayFee) : 0;
 
+    // First decide how much goes to which penalty (oldest first), then write.
+    let remaining = penaltyDue;
+    const plan = [];
     for (const p of unpaid) {
       if (remaining <= 0) break;
       const apply = Math.min(owedOn(p), remaining);
-      remaining = Math.round((remaining - apply) * 100) / 100;
+      remaining = round2(remaining - apply);
+      plan.push({ p, apply });
+    }
+    const appliedTotal = round2(penaltyDue - remaining);
+
+    // Each penalty keeps the fee of ITS OWN line (its own rate), scaled to the part of it that was really applied: if
+    // the penalty was partly or fully settled meanwhile, the fee on the part that could not be applied is returned
+    // with it. A checkout without lines (no per-penalty rates) falls back to sharing the fee in proportion.
+    const weights = plan.map((x) => x.apply);
+    const lineOf = new Map((Array.isArray(co.lines) ? co.lines : []).map((l) => [l.penaltyID, l]));
+    let feeShares;
+    if (lineOf.size) {
+      const pid = (x) => x.p.penaltyID || x.p._ref.id;
+      feeShares = plan.map((x) => {
+        const l = lineOf.get(pid(x));
+        return l && num(l.amount) > 0 ? round2((num(l.fee) * Math.min(x.apply, num(l.amount))) / num(l.amount)) : 0;
+      });
+    } else {
+      const kept = penaltyDue > 0 ? round2((feeCharged * appliedTotal) / penaltyDue) : 0;
+      feeShares = splitProportional(kept, weights);
+    }
+    const feeKept = round2(feeShares.reduce((s, n) => s + n, 0));
+    // PayMongo's own fee is for the WHOLE charge. It used to be stamped in full on every penalty the checkout
+    // covered, which counted it once per penalty; it is now split across the rows so they add up to the real fee.
+    const hasPaymongoFee = charge && charge.fee !== undefined && charge.fee !== null;
+    const paymongoShares = hasPaymongoFee ? splitProportional(num(charge.fee), weights) : null;
+
+    const applied = [];
+    const groupID = db.collection(ENTRIES).doc().id;
+
+    plan.forEach(({ p, apply }, i) => {
       const penaltyID = p.penaltyID || p._ref.id;
 
-      tx.update(p._ref, { paidAmount: num(p.paidAmount) + apply, updatedAt: now });
+      // paidAmount only ever counts penalty money; the online payment fee is kept apart in gatewayFeePaid (a running total
+      // like paidAmount), so the penalty can never look paid early because of a fee.
+      tx.update(p._ref, { paidAmount: num(p.paidAmount) + apply, gatewayFeePaid: round2(num(p.gatewayFeePaid) + feeShares[i]), updatedAt: now });
 
       const entryRef = db.collection(ENTRIES).doc();
       const entry = buildPenaltyPaymentEntry({
@@ -124,19 +182,23 @@ const settlePenaltyCheckout = async ({ checkoutRef, paymongoPaymentID = null, ch
         ...entry,
         source: "online",                       // paid through PayMongo, not at the counter
         sessionID: co.sessionID || null,
-        transactionFee: charge && charge.fee !== undefined ? charge.fee : null,
+        // amount = the penalty money only. The online payment fee the customer paid is on the penalty (gatewayFeePaid).
+        transactionFee: paymongoShares ? paymongoShares[i] : null,   // PayMongo's actual cut for this row
       });
       applied.push({ penaltyID, amount: apply, paymentID: p.paymentID || null });
-    }
+    });
 
-    const appliedTotal = Math.round((num(co.amount) - remaining) * 100) / 100;
     tx.update(checkoutRef, {
       status: "paid", paidAt: now, updatedAt: now, settledBy: source,
       paymongoPaymentID: paymongoPaymentID || null,
       appliedAmount: appliedTotal, unappliedAmount: remaining, appliedTo: applied,
+      gatewayFeeApplied: feeKept, unappliedGatewayFee: round2(feeCharged - feeKept),
     });
 
-    return { settled: true, checkout: co, applied: appliedTotal, unapplied: remaining, appliedTo: applied };
+    return {
+      settled: true, checkout: co, applied: appliedTotal, unapplied: remaining, appliedTo: applied,
+      gatewayFee: feeKept, unappliedGatewayFee: round2(feeCharged - feeKept),
+    };
   });
 
   if (!result.settled) return result;
@@ -159,16 +221,18 @@ const settlePenaltyCheckout = async ({ checkoutRef, paymongoPaymentID = null, ch
     });
   }
 
+  const returnDue = round2(result.unapplied + result.unappliedGatewayFee);   // penalty money + the fee paid on it
   recordAudit({
     action: "update", userID: co.userID, bookingID: co.bookingID, paymentID: first.paymentID || null,
-    description: `Customer paid ₱${result.applied.toLocaleString()} of penalties on booking ${co.bookingID} online via ${label}`
-      + `${result.unapplied > 0 ? ` (₱${result.unapplied.toLocaleString()} could not be applied — penalties were already settled; needs a manual refund)` : ""}.`,
+    description: `Customer paid ₱${result.applied.toLocaleString()} of penalties${result.gatewayFee > 0 ? ` (+ ₱${result.gatewayFee.toLocaleString()} online payment fee)` : ""} on booking ${co.bookingID} online via ${label}`
+      + `${returnDue > 0 ? ` (₱${returnDue.toLocaleString()} could not be applied — penalties were already settled; needs a manual refund)` : ""}.`,
   });
 
   createNotification({
     type: "penalty_paid", userID: co.userID, refID: co.bookingID,
     title: "Penalty payment received",
-    message: `We received your online payment of ₱${result.applied.toLocaleString()} for the penalties on booking ${co.bookingID}. Thank you!`,
+    message: `We received your online payment of ₱${result.applied.toLocaleString()} for the penalties on booking ${co.bookingID}`
+      + `${result.gatewayFee > 0 ? ` (plus a ₱${result.gatewayFee.toLocaleString()} online payment fee)` : ""}. Thank you!`,
   }).catch((e) => console.error("[penalty-pay] notification failed:", e.message));
 
   return result;
