@@ -882,7 +882,10 @@ const loadRefundContext = async (userID, paymentID) => {
 // The timing is judged by when the customer ASKS, never when staff approve.
 const quoteCustomerRefund = (payment, booking, requestedAt) => {
   const pickupAt = resolvePickupAt(booking);
-  const { policy, plan } = computeRefundQuote(payment, { pickupAt, requestedAt });
+  // The 2-hour "booked by mistake" grace runs from when the deposit was paid (the booking only becomes real then);
+  // older payments without that timestamp fall back to when the booking was created.
+  const bookedAt = payment.paidAt || booking.createdAt || null;
+  const { policy, plan } = computeRefundQuote(payment, { pickupAt, requestedAt, bookedAt });
   return { policy, plan, pickupAt };
 };
 
@@ -919,6 +922,8 @@ const previewRefund = async (req, res) => {
       eligible: plan.total > 0,
       message: plan.total > 0 ? null : nothingToRefundMessage(policy, plan),
       tier: policy.tier,                           // "full" | "late" | "no_show"
+      graceApplied: !!policy.graceApplied,         // asked within graceHours of booking: deposit goes back even though it's "late"
+      graceHours: policy.graceHours,
       windowHours: policy.windowHours,             // 48
       hoursBeforePickup: policy.hoursBeforePickup, // null when the pickup time is unknown
       pickupAt,
@@ -977,6 +982,7 @@ const requestRefund = async (req, res) => {
       toRefundAmount: plan.total,                // what the customer gets back: everything paid, minus the deposit if it's under 48 hours
       bookingPaid: plan.grossPaid,               // everything the customer had paid
       returnDeposit: !(policy.forfeit > 0),      // the 48-hour verdict, locked at the moment of the request: false = the deposit is kept
+      depositGraceApplied: !!policy.graceApplied, // true = under 48h, but asked within the grace window so the deposit goes back
       depositForfeited: policy.forfeit,          // kept from the refund (0 when the deposit goes back)
       status: "Pending",
       createdAt: now,                            // the moment the customer asked (server time) -- the 48-hour window is measured from it
@@ -997,7 +1003,9 @@ const requestRefund = async (req, res) => {
       return res.status(409).json({ message: "A refund request for this payment is already in progress." });
     }
 
-    const tierNote = policy.forfeit > 0
+    const tierNote = policy.graceApplied
+      ? ` (under ${policy.windowHours}h before pickup, but asked within ${policy.graceHours}h of booking; deposit returned)`
+      : policy.forfeit > 0
       ? ` (${policy.tier === "no_show" ? "after pickup time" : `under ${policy.windowHours}h before pickup`}; ${peso(policy.forfeit)} deposit withheld)`
       : "";
 

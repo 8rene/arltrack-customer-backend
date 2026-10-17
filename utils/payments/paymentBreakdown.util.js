@@ -255,6 +255,9 @@ const computeRefundPlan = (payment, opts = {}) => {
 // cancellation). The tier is still reported; the forfeit is just 0.
 // ─────────────────────────────────────────────────────────────────────────────
 const REFUND_FULL_WINDOW_HOURS = 48;
+// "Booked by mistake" grace: a refund asked within this many hours of the deposit being paid gets the deposit back
+// even when pickup is under REFUND_FULL_WINDOW_HOURS away. It never applies once the pickup time has passed (no-show).
+const REFUND_GRACE_HOURS = 2;
 const HOUR_MS = 60 * 60 * 1000;
 
 const toDate = (v) => {
@@ -292,7 +295,7 @@ const getDepositAmount = (payment) => {
   return num(p.securityDeposit) || num(p.deposit && p.deposit.amount) || num(p.depositFee);
 };
 
-const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false } = {}) => {
+const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false, bookedAt = null } = {}) => {
   const pickup    = toDate(pickupAt);
   const requested = toDate(requestedAt);
   const depositAmount = getDepositAmount(payment);
@@ -309,10 +312,18 @@ const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false 
              : hoursBeforePickup >= 0                        ? "late"
              :                                                 "no_show";
 
-  const wouldForfeit = tier === "full" ? 0 : Math.min(depositAmount, amountPaid);
+  // Grace: the customer asks soon after paying (bookedAt = when the deposit was paid, else when the booking was
+  // made) and the pickup hasn't passed. Unknown bookedAt means no grace.
+  const booked = toDate(bookedAt);
+  const hoursSinceBooked = booked ? (requested.getTime() - booked.getTime()) / HOUR_MS : null;
+  const graceApplied = tier === "late" && hoursSinceBooked !== null && hoursSinceBooked >= 0 && hoursSinceBooked < REFUND_GRACE_HOURS;
+
+  const wouldForfeit = (tier === "full" || graceApplied) ? 0 : Math.min(depositAmount, amountPaid);
   const forfeit = waiveForfeit ? 0 : wouldForfeit;
 
   return {
+    graceApplied,
+    graceHours: REFUND_GRACE_HOURS,
     tier,
     hoursBeforePickup: Math.round(hoursBeforePickup * 100) / 100,
     depositAmount,
@@ -348,10 +359,10 @@ const getRefundPolicyFromFlag = (payment, { returnDeposit, waiveForfeit = false 
 };
 
 // Policy + plan in one call: what a refund requested at `requestedAt` is worth.
-const computeRefundQuote = (payment, { pickupAt, requestedAt, waiveForfeit = false } = {}) => {
-  const policy = getRefundPolicy(payment, { pickupAt, requestedAt, waiveForfeit });
+const computeRefundQuote = (payment, { pickupAt, requestedAt, waiveForfeit = false, bookedAt = null } = {}) => {
+  const policy = getRefundPolicy(payment, { pickupAt, requestedAt, waiveForfeit, bookedAt });
   const plan   = computeRefundPlan(payment, { forfeit: policy.forfeit });
   return { policy, plan };
 };
 
-module.exports = { PAYMENT_ID_MISSING_NOTE, depositWasOnline, getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getRefundPolicy, getRefundPolicyFromFlag, computeRefundQuote, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS };
+module.exports = { PAYMENT_ID_MISSING_NOTE, depositWasOnline, getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getRefundPolicy, getRefundPolicyFromFlag, computeRefundQuote, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS, REFUND_GRACE_HOURS };
