@@ -14,6 +14,54 @@ const STAFF_NOTIFY_ROLE_IDS = [
   "fFA8G2R2ANLbVsH00jlv", // Supervisor
 ];
 
+// ────────────────────────────────────────────────────────────
+// Profile edit rules (shared by PUT /details/:userID and PUT /profile/:userID)
+//
+// Identity / contact / address fields are checked by staff against the ID the
+// customer submitted at signup, so they can ONLY change through the admin-approved
+// edit-request flow (POST /api/user/edit-requests — see editRequest.controller.js).
+// These endpoints used to accept them directly, which skipped that approval.
+// ────────────────────────────────────────────────────────────
+const APPROVAL_REQUIRED_FIELDS = [
+  "email", "phone", "birthDate",
+  "region", "province", "city", "municipality", "barangay", "postalCode", "zipCode",
+];
+const APPROVAL_MESSAGE =
+  "Email, phone, birth date and address (province / city / barangay) changes need admin approval. " +
+  "Please submit an edit request from your profile instead.";
+const hasApprovalField = (body) =>
+  !!body && APPROVAL_REQUIRED_FIELDS.some((f) => body[f] !== undefined);
+
+// Returns { value } (trimmed), { skip: true } when undefined, or { error }.
+const cleanText = (raw, label, { min = 0, max = 100 } = {}) => {
+  if (raw === undefined) return { skip: true };
+  if (typeof raw !== "string") return { error: `${label} must be text.` };
+  const value = raw.trim();
+  if (value.length < min) return { error: `${label} is required.` };
+  if (value.length > max) return { error: `${label} must be ${max} characters or fewer.` };
+  return { value };
+};
+
+const TEXT_RULES = {
+  firstName:  { label: "First name",  min: 1, max: 50  },
+  lastName:   { label: "Last name",   min: 1, max: 50  },
+  middleName: { label: "Middle name", min: 0, max: 50  },
+  suffix:     { label: "Suffix",      min: 0, max: 10  },
+  username:   { label: "Username",    min: 3, max: 30  },
+  street:     { label: "Street",      min: 0, max: 120 },
+  village:    { label: "Village",     min: 0, max: 120 },
+};
+// Validates the allowed text fields present in `body`. Returns { fields } or { error }.
+const cleanProfileFields = (body, allowed) => {
+  const fields = {};
+  for (const key of allowed) {
+    const r = cleanText(body[key], TEXT_RULES[key].label, TEXT_RULES[key]);
+    if (r.error) return { error: r.error };
+    if (!r.skip) fields[key] = r.value;
+  }
+  return { fields };
+};
+
 // ─────────────────────────────────────────────────────────────
 // GET /api/user/details/:userID
 // ─────────────────────────────────────────────────────────────
@@ -58,23 +106,18 @@ const updateUserDetails = async (req, res) => {
   if (req.user.userID !== userID) {
     return res.status(403).json({ message: "Access denied." });
   }
-  const { firstName, lastName, middleName, suffix, birthDate } = req.body;
+  if (hasApprovalField(req.body)) {
+    return res.status(403).json({ message: APPROVAL_MESSAGE });
+  }
 
-  // suffix is optional (can be empty string to clear it) — not included in required check
-  const hasAtLeastOneField = firstName || lastName || middleName || birthDate || suffix !== undefined;
-  if (!hasAtLeastOneField)
+  const { fields, error } = cleanProfileFields(req.body || {}, ["firstName", "lastName", "middleName", "suffix"]);
+  if (error) return res.status(400).json({ message: error });
+  if (!Object.keys(fields).length) {
     return res.status(400).json({ message: "At least one field is required to update." });
+  }
 
   try {
-    // Build update object with only the fields present in the request
-    const updates = { updatedAt: new Date() };
-    if (firstName  !== undefined) updates.firstName  = firstName;
-    if (lastName   !== undefined) updates.lastName   = lastName;
-    if (middleName !== undefined) updates.middleName = middleName;
-    if (birthDate  !== undefined) updates.birthDate  = birthDate;
-    if (suffix     !== undefined) updates.suffix     = suffix; // allow "" to clear suffix
-
-    await db.collection("userDetails").doc(userID).set(updates, { merge: true });
+    await db.collection("userDetails").doc(userID).set({ ...fields, updatedAt: new Date() }, { merge: true });
     return res.status(200).json({ message: "User details updated." });
   } catch (error) {
     console.error("updateUserDetails error:", error);
@@ -266,59 +309,69 @@ const updateFullProfile = async (req, res) => {
   if (req.user.userID !== userID) {
     return res.status(403).json({ message: "Access denied." });
   }
-  const {
-    // user
-    phone, username, profileImage,
-    // userDetails
-    firstName, lastName, middleName, suffix, birthDate,
-    // userAddress (include userAddressID to update specific doc)
-    userAddressID,
-    province, city, municipality, barangay, street, postalCode, village,
-  } = req.body;
+  if (hasApprovalField(req.body)) {
+    return res.status(403).json({ message: APPROVAL_MESSAGE });
+  }
+
+  // Only what the Profile page really saves directly. (profileImage has its own
+  // endpoint — POST /profile/:userID/avatar — so it is no longer accepted here.)
+  const { userAddressID } = req.body || {};
+  const { fields, error } = cleanProfileFields(req.body || {},
+    ["username", "firstName", "lastName", "middleName", "suffix", "street", "village"]);
+  if (error) return res.status(400).json({ message: error });
+  if (userAddressID !== undefined && (typeof userAddressID !== "string" || !userAddressID || userAddressID.includes("/"))) {
+    return res.status(400).json({ message: "Invalid userAddressID." });
+  }
+  if (!Object.keys(fields).length) {
+    return res.status(400).json({ message: "At least one field is required to update." });
+  }
 
   try {
-    const now   = new Date();
+    // Usernames are stored lowercase and must be unique (same rule as signup).
+    if (fields.username !== undefined) {
+      fields.username = fields.username.toLowerCase();
+      const taken = await db.collection("user").where("username", "==", fields.username).limit(2).get();
+      if (taken.docs.some((d) => d.id !== userID)) {
+        return res.status(409).json({ message: "Username is already taken." });
+      }
+    }
+
+    const now = new Date();
     const batch = db.batch();
 
     // — user fields —
-    const userFields = {};
-    if (phone           !== undefined) userFields.phone           = phone;
-    if (username        !== undefined) userFields.username        = username;
-    if (profileImage !== undefined) userFields.profileImage = profileImage;
-    if (Object.keys(userFields).length) {
-      userFields.updatedAt = now;
-      batch.set(db.collection("user").doc(userID), userFields, { merge: true });
+    if (fields.username !== undefined) {
+      batch.set(db.collection("user").doc(userID), { username: fields.username, updatedAt: now }, { merge: true });
     }
 
     // — userDetails fields —
     const detailFields = {};
-    if (firstName  !== undefined) detailFields.firstName  = firstName;
-    if (lastName   !== undefined) detailFields.lastName   = lastName;
-    if (middleName !== undefined) detailFields.middleName = middleName;
-    if (suffix     !== undefined) detailFields.suffix     = suffix;
-    if (birthDate  !== undefined) detailFields.birthDate  = birthDate;
+    for (const k of ["firstName", "lastName", "middleName", "suffix"]) {
+      if (fields[k] !== undefined) detailFields[k] = fields[k];
+    }
     if (Object.keys(detailFields).length) {
-      detailFields.userID    = userID;
+      detailFields.userID = userID;
       detailFields.updatedAt = now;
       batch.set(db.collection("userDetails").doc(userID), detailFields, { merge: true });
     }
 
-    // — userAddress fields —
+    // — userAddress fields (street / village only) —
     const addrFields = {};
-    if (province     !== undefined) addrFields.province     = province;
-    if (city         !== undefined) addrFields.city         = city;
-    if (municipality !== undefined) addrFields.municipality = municipality;
-    if (barangay     !== undefined) addrFields.barangay     = barangay;
-    if (street       !== undefined) addrFields.street       = street;
-    if (postalCode   !== undefined) { addrFields.postalCode = postalCode; addrFields.zipCode = postalCode; }
-    if (village      !== undefined) addrFields.village      = village;
-
+    for (const k of ["street", "village"]) {
+      if (fields[k] !== undefined) addrFields[k] = fields[k];
+    }
     if (Object.keys(addrFields).length) {
-      addrFields.userID    = userID;
+      addrFields.userID = userID;
       addrFields.updatedAt = now;
-      // Update the specific address doc if ID given, else query for user's address
       if (userAddressID) {
-        batch.set(db.collection("userAddress").doc(userAddressID), addrFields, { merge: true });
+        // The ID comes from the request body, so it must be PROVEN to be this user's own
+        // address. Without this check anyone could overwrite (and re-assign to
+        // themselves, via the userID field above) another customer's address document.
+        const addrDoc = await db.collection("userAddress").doc(userAddressID).get();
+        if (!addrDoc.exists || addrDoc.data().userID !== userID) {
+          return res.status(403).json({ message: "Access denied." });
+        }
+        batch.set(addrDoc.ref, addrFields, { merge: true });
       } else {
         // Try to find existing address doc for user
         const existingSnap = await db.collection("userAddress").where("userID", "==", userID).limit(1).get();

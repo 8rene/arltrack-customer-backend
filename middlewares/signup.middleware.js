@@ -10,11 +10,11 @@ const validateSignup = (req, res, next) => {
     return res.status(400).json({ message: "Invalid email format" });
   }
 
-  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()\-_=+\[\]{};':"\\|,.<>/?]).{8,16}$/;
+  const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()\-_=+\[\]{};':"\\|,.<>/?]).{8,64}$/;
   if (!passwordRegex.test(password)) {
     return res.status(400).json({
       message:
-        "Password must be 8–16 characters with at least 1 uppercase, 1 lowercase, 1 number, and 1 special character",
+        "Password must be 8–64 characters with at least 1 uppercase, 1 lowercase, 1 number, and 1 special character",
     });
   }
 

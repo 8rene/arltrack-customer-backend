@@ -7,6 +7,11 @@ const OTP_EXPIRY_MS  = 5 * 60 * 1000;  // 5 minutes
 const OTP_COOLDOWN_MS = 60 * 1000;     // 1 minute cooldown between requests
 const MAX_ATTEMPTS = 5;                // max wrong guesses before lockout
 
+// Firebase Auth matches emails case-insensitively, but the OTP document is keyed by the exact text
+// — so "Juan@x.com" and "juan@x.com" got separate cooldowns, attempt counters and codes (and a code
+// requested under one spelling could not be verified under the other). Always trimmed + lowercase.
+const normalizeEmail = (raw) => (typeof raw === "string" ? raw.trim().toLowerCase() : "");
+
 // ── OTP storage / verification helpers ───────────────────────────────────────
 // Also used by resetPassword.controller.js.
 //  - The code is never stored in plain text: Firestore keeps an HMAC of it
@@ -96,7 +101,8 @@ const verifyAndConsumeOTP = async ({ email, otp, purpose, consume = true }) => {
 // test which emails are registered. (The reset-password step can't be used to
 // probe either: it needs a valid OTP, and unknown emails never get one.)
 const sendOTP = async (req, res) => {
-  const { email, name, purpose } = req.body;
+  const { name, purpose } = req.body;
+  const email = normalizeEmail(req.body.email);
   if (!email) return res.status(400).json({ message: "Email is required." });
 
   try {
@@ -185,8 +191,9 @@ const sendOTP = async (req, res) => {
 
 // POST /api/auth/verify-otp
 const verifyOTP = async (req, res) => {
-  const { email, otp } = req.body;
-  if (!email || !otp || typeof email !== "string") {
+  const { otp } = req.body;
+  const email = normalizeEmail(req.body.email);
+  if (!email || !otp) {
     return res.status(400).json({ message: "Email and OTP are required." });
   }
 
@@ -221,4 +228,4 @@ const verifyOTP = async (req, res) => {
   }
 };
 
-module.exports = { sendOTP, verifyOTP, verifyAndConsumeOTP };
+module.exports = { sendOTP, verifyOTP, verifyAndConsumeOTP, normalizeEmail };

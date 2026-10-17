@@ -104,28 +104,53 @@ const getStaleReason = (booking, payment = null) => {
   return null;
 };
 
-// Cancels a single "to pay" booking (+ its payment + bookingSession docs),
-// idempotent against races (re-reads the booking status right before
-// writing, so a live request and the cron sweep can't double-cancel it).
+// Cancels a single "to pay" booking (+ its payment + bookingSession docs).
+//
+// The "is it still unpaid / still 'to pay'?" check and the write that cancels it
+// happen in ONE Firestore transaction. This used to be a plain read followed by a
+// separate write, so a PayMongo webhook that settled the payment (and moved the booking to
+// "upcoming") in the gap between the two was silently overwritten with "cancelled" —
+// a paid booking cancelled. Now, if anything changes the booking or the payment
+// after we read them, Firestore retries and this sees the new state instead.
 const cancelStaleBooking = async (bookingID, reason) => {
   const now = new Date();
 
   const bookingSnap = await db.collection("bookings").where("bookingID", "==", bookingID).limit(1).get();
   if (bookingSnap.empty) return false;
+  const bookingRef = bookingSnap.docs[0].ref;
 
-  const bookingDoc = bookingSnap.docs[0];
-  const booking    = bookingDoc.data();
+  const outcome = await db.runTransaction(async (tx) => {
+    // all reads first
+    const [freshBooking, freshPayments] = await Promise.all([
+      tx.get(bookingRef),
+      tx.get(db.collection("payments").where("bookingID", "==", bookingID).limit(1)),
+    ]);
+    if (!freshBooking.exists) return { cancelled: false };
 
-  // Re-check under the same status this function is meant to act on — if
-  // something else (customer, admin, another sweep) already moved it out
-  // of "to pay", there's nothing to do here.
-  if (booking.status !== BOOKING_STATUS.TO_PAY) return false;
+    const b = freshBooking.data();
+    // If something else (customer, admin, webhook, another sweep) already moved it
+    // out of "to pay", there's nothing to do here.
+    if (b.status !== BOOKING_STATUS.TO_PAY) return { cancelled: false };
+    // Real money arrived since the caller looked — never cancel a paid booking.
+    if (!freshPayments.empty && isDepositPaid(freshPayments.docs[0].data())) {
+      return { cancelled: false, paid: true };
+    }
 
-  // The reason lives in cancellationRequests (type "direct"), not on the booking.
-  const cancelBatch = db.batch();
-  cancelBatch.update(bookingDoc.ref, { status: BOOKING_STATUS.CANCELLED, updatedAt: now });
-  recordDirectCancellation(bookingID, { userID: booking.userID || null, reason, cancelledBy: "system" }, cancelBatch);
-  await cancelBatch.commit();
+    // then the writes. The reason lives in cancellationRequests (type "direct"), not on the booking.
+    tx.update(bookingRef, { status: BOOKING_STATUS.CANCELLED, updatedAt: now });
+    recordDirectCancellation(bookingID, { userID: b.userID || null, reason, cancelledBy: "system" }, tx);
+    return { cancelled: true, booking: b };
+  });
+
+  if (outcome.paid) {
+    // Paid but still marked "to pay" (the webhook is half-way through) — finish the job
+    // instead of leaving it for the next sweep.
+    await promoteBookingToUpcoming(bookingID)
+      .catch((err) => console.error(`cancelStaleBooking: could not promote paid booking ${bookingID}:`, err.message));
+    return false;
+  }
+  if (!outcome.cancelled) return false;
+  const booking = outcome.booking;
 
   // Mirror onto the payment doc — only touches fields that are still
   // "pending" (never overwrites an already-paid/failed deposit, and never

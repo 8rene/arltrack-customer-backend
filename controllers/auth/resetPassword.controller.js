@@ -1,24 +1,25 @@
 const { db, auth } = require("../../config/firebaseConnection/firebase");
 const { isBlockedAdminRole } = require("../../utils/roles/role.util");
-const { verifyAndConsumeOTP } = require("./otp.controller");
+const { verifyAndConsumeOTP, normalizeEmail } = require("./otp.controller");
 
 // Same strength rule enforced client-side at signup (SignUpModal.jsx) —
 // checked again here since this is a new, separate entry point.
-const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()\-_=+[\]{};':"\\|,.<>/?]).{8,16}$/;
+const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()\-_=+[\]{};':"\\|,.<>/?]).{8,64}$/;
 
 // POST /api/auth/reset-password
 // body: { email, otp, newPassword }
 // Reuses the same 'otpCodes' collection/flow as signup's send-otp — the
 // OTP must have already been requested via POST /api/auth/send-otp.
 const resetPassword = async (req, res) => {
-  const { email, otp, newPassword } = req.body;
+  const { otp, newPassword } = req.body;
+  const email = normalizeEmail(req.body.email); // trimmed + lowercase, same key as send-otp
 
   if (!email || !otp || !newPassword || typeof email !== "string") {
     return res.status(400).json({ message: "Email, OTP, and new password are required." });
   }
   if (!PASSWORD_REGEX.test(newPassword)) {
     return res.status(400).json({
-      message: "Password must be 8–16 characters with at least 1 uppercase, 1 lowercase, 1 number, and 1 special character.",
+      message: "Password must be 8–64 characters with at least 1 uppercase, 1 lowercase, 1 number, and 1 special character.",
     });
   }
 
@@ -73,6 +74,15 @@ const resetPassword = async (req, res) => {
 
     // 3. Update the password
     await auth.updateUser(firebaseUser.uid, { password: newPassword });
+
+    // 3a. End every session that already exists for this account — if someone else had a token
+    // (that is often WHY the owner is resetting), it must stop working now. See verifyToken.
+    // If this write fails the request errors out before the OTP is deleted, so the customer
+    // can simply retry the reset with the same code.
+    await db.collection("user").doc(firebaseUser.uid).set(
+      { tokensValidAfter: Math.floor(Date.now() / 1000) },
+      { merge: true }
+    );
 
     // 4. OTP is single-use — delete it now that it's been consumed
     await otpRef.delete();

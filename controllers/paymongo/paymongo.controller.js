@@ -647,8 +647,14 @@ const handleWebhook = async (req, res) => {
     return res.status(200).json({ received: true });
 
   } catch (error) {
+    // Reaching this point means the event passed signature verification but we then FAILED to
+    // process it (Firestore error, a bug...). Answering 200 here told PayMongo "got it", so it
+    // never retried — a payment could be taken and never recorded. A non-2xx makes PayMongo
+    // deliver the event again. Safe to repeat: settlePhasePayment is transactional + idempotent,
+    // and the cases that need no action (unknown event, no matching payment, already settled)
+    // all return 200 explicitly above and never reach this catch.
     console.error("handleWebhook error:", error.message);
-    return res.status(200).json({ received: true });
+    return res.status(500).json({ received: false, message: "Webhook processing failed; please retry." });
   }
 };
 
@@ -739,12 +745,13 @@ const VALID_REFUND_REASONS = [
 const peso = (n) => `₱${Number(n || 0).toLocaleString()}`;
 
 // An open (Pending/Approved) refund request for this payment, if any.
-const findOpenRefundRequest = async (paymentID) => {
-  const snap = await db.collection("refundRequests")
+// Pass a Firestore transaction as `tx` to do the read inside it.
+const findOpenRefundRequest = async (paymentID, tx = null) => {
+  const query = db.collection("refundRequests")
     .where("paymentID", "==", paymentID)
     .where("status", "in", ["Pending", "Approved"])
-    .limit(1)
-    .get();
+    .limit(1);
+  const snap = tx ? await tx.get(query) : await query.get();
   return snap.empty ? null : snap.docs[0].data();
 };
 
@@ -901,10 +908,20 @@ const requestRefund = async (req, res) => {
       createdAt: now,                            // the moment the customer asked (server time) -- the 48-hour window is measured from it
       updatedAt: now,
     };
-    const createBatch = db.batch();
-    createBatch.set(refundRef, refundRequest);
-    createPendingRefundRow(refundRef.id, { bookingID: payment.bookingID || null, userID, reason, notes: notes || "", createdAt: now }, createBatch);
-    await createBatch.commit();
+    // The "already in progress?" check above is only a cheap early exit. Two requests that arrive at
+    // the same moment (double-click, retry, script) can BOTH pass it before either has written
+    // anything, which created two Pending requests for one payment. So the check is repeated INSIDE
+    // a transaction together with the write: Firestore lets one through, and the other re-runs,
+    // sees the first one's request and is turned away.
+    const created = await db.runTransaction(async (tx) => {
+      if (await findOpenRefundRequest(paymentID, tx)) return false; // reads first...
+      tx.set(refundRef, refundRequest);                              // ...then writes
+      createPendingRefundRow(refundRef.id, { bookingID: payment.bookingID || null, userID, reason, notes: notes || "", createdAt: now }, tx);
+      return true;
+    });
+    if (!created) {
+      return res.status(409).json({ message: "A refund request for this payment is already in progress." });
+    }
 
     const tierNote = policy.forfeit > 0
       ? ` (${policy.tier === "no_show" ? "after pickup time" : `under ${policy.windowHours}h before pickup`}; ${peso(policy.forfeit)} deposit withheld)`

@@ -7,8 +7,33 @@
 // Vercel's WAF rate limiting — this is the zero-dependency first line.
 const buckets = new Map(); // key -> { count, resetAt }
 
-const clientIP = (req) =>
-  String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip || "unknown";
+// Which address is "the client"?
+// X-Forwarded-For is only a header — anyone can send their own. Each proxy in front of
+// the app APPENDS the address it saw to the RIGHT end of the list, so the LEFT-most entry
+// is client-controlled (the old code used it, which let a caller change the header on every
+// request and never hit the limit). Only the entries added by OUR OWN proxies can be trusted.
+//
+// TRUST_PROXY_HOPS = how many proxies sit between the internet and this app:
+//   unset on Vercel -> 1 (Vercel is the single proxy; it sets the header itself)
+//   unset elsewhere -> 0 (no proxy: use the TCP connection's own address)
+//   e.g. 2 behind Cloudflare + a load balancer
+const trustedHops = () => {
+  const raw = process.env.TRUST_PROXY_HOPS;
+  const n = Number(raw);
+  if (raw !== undefined && raw !== "" && Number.isInteger(n) && n >= 0) return n;
+  return process.env.VERCEL ? 1 : 0;
+};
+
+const clientIP = (req) => {
+  const hops = trustedHops();
+  if (hops > 0) {
+    const list = String(req.headers["x-forwarded-for"] || "").split(",").map((v) => v.trim()).filter(Boolean);
+    if (list.length) return list[Math.max(0, list.length - hops)]; // the address our own proxy recorded
+    const real = String(req.headers["x-real-ip"] || "").trim();
+    if (real) return real;
+  }
+  return req.socket?.remoteAddress || req.ip || "unknown";
+};
 
 const rateLimit = ({ windowMs = 10 * 60 * 1000, max = 30, keyPrefix = "rl" } = {}) => (req, res, next) => {
   const now = Date.now();
@@ -34,3 +59,4 @@ const rateLimit = ({ windowMs = 10 * 60 * 1000, max = 30, keyPrefix = "rl" } = {
 };
 
 module.exports = rateLimit;
+module.exports.clientIP = clientIP; // exported for tests

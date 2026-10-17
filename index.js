@@ -11,7 +11,6 @@ const userRoutes      = require("./routes/user.routes");
 const bookingsRoutes  = require("./routes/bookings.routes");
 const reviewsRoutes   = require("./routes/reviews.routes");
 const locationRoutes  = require("./routes/location.routes");
-const adminRoutes     = require("./routes/admin.routes");
 const paymongoRoutes  = require("./routes/paymongo.routes"); // ← NEW
 const policyRoutes    = require("./routes/policy.routes");
 const termsRoutes     = require("./routes/terms.routes");
@@ -53,7 +52,6 @@ app.use("/api/bookings",  bookingsRoutes);
 app.use("/api/bookings",  penaltyRoutes); // ← NEW — adds GET /api/bookings/:bookingID/penalties
 app.use("/api/reviews",   reviewsRoutes);
 app.use("/api/location",  locationRoutes);
-app.use("/api/admin",     adminRoutes);
 app.use("/api/paymongo",  paymongoRoutes); // ← NEW
 app.use("/api/violations", violationsRoutes); // a renter reports a ticket / sees the notices recorded for their booking
 app.use("/api/terms",     termsRoutes);    // public: the current Terms & Conditions (from the admin's termsVersions) and earlier versions by ID
