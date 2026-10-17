@@ -2,7 +2,7 @@ const express = require("express");
 const router  = express.Router();
 
 const { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea } = require("../controllers/bookings/bookings.controller");
-const { getBookingDetails } = require("../controllers/bookings/bookingsessions.controller");
+const { getBookingDetails } = require("../controllers/bookings/bookingSessions.controller");
 const { getStatement, getStatementPdf, emailStatement, getReceipt, getReceiptPdf, emailReceipt } = require("../controllers/bookings/receipt.controller");
 const verifyToken = require("../middlewares/auth.middleware");
 const rateLimit = require("../middlewares/rateLimit.middleware");
