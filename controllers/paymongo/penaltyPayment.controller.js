@@ -3,9 +3,10 @@ const { axios, PAYMONGO_V1, paymongoHeaders, retrieveCheckoutSession } = require
 const {
   listUnpaidForBooking, unpaidTotal, owedOn, listPendingCheckouts, listPendingGroups, getGroupRows,
   writePendingPenaltyRows, cancelPendingGroup, settlePenaltyCheckout,
+  heldDepositCoverForBooking, heldDepositCoverByBooking, planOnlinePayment,
 } = require("../../utils/payments/penaltyPayment.util");
 
-const { getSystemSettings, computePenaltyCheckoutFees } = require("../../utils/pricing");
+const { getSystemSettings } = require("../../utils/pricing");
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
@@ -23,16 +24,21 @@ const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/paymongo/penalty/create-link   { bookingID, paymentMethod }
 //
-// Opens a PayMongo checkout for everything this booking's customer still owes
-// in confirmed penalties. The amount is computed here, never read from the body.
+// Opens a PayMongo checkout for what this booking's customer still has to pay ONLINE in confirmed penalties. The amount
+// is computed here, never read from the body.
+//
+// A security deposit that is still Held pays the penalties first (staff settle it), and money taken from the deposit has
+// no online payment fee, so only what the deposit does NOT cover is charged here, and only that part carries the fee.
+// Once the deposit is not held any more (already settled and returned, refunded, waived, forfeited, none recorded) every
+// unpaid penalty is charged here, fee included. See planOnlinePayment() in penaltyPayment.util.js.
 //
 // Nothing is stored in a separate collection: opening the checkout writes one PENDING paymentEntries row per
 // penalty (phase "penalty", source "online", the PayMongo sessionID, a shared groupID). The webhook or the
 // status poll flips them to "success" and moves penalties.paidAmount / gatewayFeePaid (see settlePenaltyCheckout).
 //
-// The customer also pays the online payment (gateway) fee on it. Each penalty carries the gatewayFeeRate that was in
-// System Settings when it was created, and is charged at that rate on what it still owes (a penalty from before
-// the rate was saved uses the current setting). The fee is a SEPARATE line on the checkout and is not part of
+// The customer also pays the online payment (gateway) fee on THAT amount. Each penalty carries the gatewayFeeRate that was
+// in System Settings when it was created, and is charged at that rate on the part of it paid online (a penalty from
+// before the rate was saved uses the current setting). The fee is a SEPARATE line on the checkout and is not part of
 // the penalty: a row's amount / the penalty's paidAmount only ever move by the penalty money.
 //   amount         = what the customer is charged in total (penaltyAmount + gatewayFee)
 //   penaltyAmount  = the penalty money inside it (the sum of the rows' amounts)
@@ -73,15 +79,21 @@ const createPenaltyPaymentLink = async (req, res) => {
     }
 
     const unpaid = await listUnpaidForBooking(userID, bookingID);
-    const penaltyAmount = unpaidTotal(unpaid);
-    if (!(penaltyAmount > 0)) {
+    if (!(unpaidTotal(unpaid) > 0)) {
       return res.status(200).json({ message: "There's nothing left to pay on this booking's penalties.", alreadyPaid: true, bookingID });
     }
     const settings = await getSystemSettings();
-    const fee = computePenaltyCheckoutFees(
-      unpaid.map((p) => ({ penaltyID: p.penaltyID || p._ref.id, owed: owedOn(p), gatewayFeeRate: p.gatewayFeeRate })),
-      settings.gatewayFeePercent
-    );
+    const fee = planOnlinePayment(unpaid, {
+      depositCover: await heldDepositCoverForBooking(bookingID),
+      fallbackPercent: settings.gatewayFeePercent,
+    });
+    if (!(fee.onlineDue > 0)) {
+      // The held deposit covers all of it: nothing to pay online, so no checkout and no fee.
+      return res.status(400).json({
+        message: "Your security deposit covers these penalties, so there's nothing to pay online. They are deducted from the deposit when your booking is settled, with no online payment fee.",
+        coveredByDeposit: true, bookingID,
+      });
+    }
     const amount = fee.total;                       // what the customer is actually charged
     const centavos = Math.round(amount * 100);
     if (centavos < MIN_CENTAVOS) {
@@ -116,7 +128,7 @@ const createPenaltyPaymentLink = async (req, res) => {
 
     const session = pmRes.data.data;
     const checkoutUrl = session.attributes.checkout_url;
-    await writePendingPenaltyRows({ unpaid, userID, groupID, sessionID: session.id, channel: channel[0] });
+    await writePendingPenaltyRows({ unpaid, lines: fee.lines, userID, groupID, sessionID: session.id, channel: channel[0] });
 
     return res.status(200).json({
       message: "Payment link created.", checkoutUrl, checkoutID: groupID,
@@ -174,26 +186,36 @@ const getMyOutstandingPenalties = async (req, res) => {
     const snap = await db.collection("penalties")
       .where("userID", "==", req.user.userID).where("status", "==", "Confirmed").get();
     const settings = await getSystemSettings();
-    const byBooking = {};
-    const feeByBooking = {};
+    // A held deposit pays penalties first (no fee); only the rest is paid online and carries the fee.
+    let covers = {};
+    try { covers = await heldDepositCoverByBooking(req.user.userID); }
+    catch (e) { console.warn("getMyOutstandingPenalties: could not read deposits:", e.message); }
+    const docsByBooking = {};
     snap.docs.forEach((d) => {
-      const p = d.data();
-      const owed = owedOn(p);
-      if (owed > 0 && p.bookingID) {
-        byBooking[p.bookingID] = Math.round(((byBooking[p.bookingID] || 0) + owed) * 100) / 100;
-        // that penalty's own online payment fee (its saved rate, else the current setting)
-        const f = computePenaltyCheckoutFees([{ penaltyID: p.penaltyID || d.id, owed, gatewayFeeRate: p.gatewayFeeRate }], settings.gatewayFeePercent);
-        feeByBooking[p.bookingID] = Math.round(((feeByBooking[p.bookingID] || 0) + f.gatewayFee) * 100) / 100;
-      }
+      const p = { ...d.data(), id: d.id };
+      if (owedOn(p) > 0 && p.bookingID) (docsByBooking[p.bookingID] ||= []).push(p);
+    });
+    const byBooking = {};          // all unpaid penalty money (it is what blocks a new booking)
+    const coveredByBooking = {};   // what a held deposit will pay at settlement (no fee)
+    const onlineDueByBooking = {}; // penalty money to pay online
+    const feeByBooking = {};       // the online payment fee on that
+    const payableByBooking = {};   // onlineDue + fee: what the checkout charges
+    Object.entries(docsByBooking).forEach(([bookingID, docs]) => {
+      const plan = planOnlinePayment(docs, { depositCover: covers[bookingID] || 0, fallbackPercent: settings.gatewayFeePercent });
+      byBooking[bookingID] = plan.unpaidTotal;
+      coveredByBooking[bookingID] = plan.coveredByDeposit;
+      onlineDueByBooking[bookingID] = plan.onlineDue;
+      feeByBooking[bookingID] = plan.gatewayFee;
+      payableByBooking[bookingID] = plan.total;
     });
     const total = Math.round(Object.values(byBooking).reduce((s, n) => s + n, 0) * 100) / 100;
     // Bookings whose penalty the customer has already opened a checkout for but not finished paying.
     const openCheckouts = await listPendingCheckouts(req.user.userID);
     const pendingByBooking = {};
     Object.keys(byBooking).forEach((id) => { if (openCheckouts[id]) pendingByBooking[id] = true; });
-    // The online payment fee is added at checkout. feeByBooking = that fee per booking (each penalty at its own saved
-    // rate), so the app can show "₱100 + ₱5 online payment fee" before the customer taps pay.
-    return res.status(200).json({ data: { byBooking, feeByBooking, pendingByBooking, total } });
+    // The online payment fee is added at checkout, on the part the deposit does not cover. feeByBooking = that fee per
+    // booking (each penalty at its own saved rate), so the app can show "₱100 + ₱5 online payment fee" before paying.
+    return res.status(200).json({ data: { byBooking, coveredByBooking, onlineDueByBooking, feeByBooking, payableByBooking, pendingByBooking, total } });
   } catch (error) {
     console.error("getMyOutstandingPenalties error:", error.message);
     return res.status(500).json({ message: "Failed to load outstanding penalties." });

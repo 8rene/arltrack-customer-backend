@@ -1,8 +1,8 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { hydratePenalties } = require("../../utils/payments/paymentEntries.util");
 const { getDepositView } = require("../../utils/payments/depositView.util");
-const { listPendingCheckouts } = require("../../utils/payments/penaltyPayment.util");
-const { getSystemSettings, computePenaltyCheckoutFees } = require("../../utils/pricing");
+const { listPendingCheckouts, owedOn, planOnlinePayment } = require("../../utils/payments/penaltyPayment.util");
+const { getSystemSettings } = require("../../utils/pricing");
 
 // Firestore Timestamp | Date | string -> ISO string (or null), so the
 // frontend never has to deal with {_seconds,_nanoseconds}.
@@ -90,14 +90,6 @@ const getMyBookingPenalties = async (req, res) => {
     const penaltyTotal = confirmed.reduce((s, p) => s + p.amount, 0);                       // everything charged
     const unpaidTotal  = confirmed.reduce((s, p) => s + Math.max(0, p.amount - p.paidAmount), 0); // still unpaid right now
 
-    // What the online checkout would add on top of payableNow: each unpaid penalty at its own saved rate (else the
-    // current setting), exactly as createPenaltyPaymentLink computes it.
-    const feeSettings = await getSystemSettings();
-    const feePreview = computePenaltyCheckoutFees(
-      confirmed.filter((p) => p.amount - p.paidAmount > 0)
-        .map((p) => ({ penaltyID: p.penaltyID, owed: p.amount - p.paidAmount, gatewayFeeRate: p.gatewayFeeRate })),
-      feeSettings.gatewayFeePercent
-    );
     const gatewayFeePaidTotal = Math.round(confirmed.reduce((s, p) => s + p.gatewayFeePaid, 0) * 100) / 100;
 
     // The deposit is read through getDepositView(): flat fields on the payment (depositStatus, depositSettled,
@@ -111,6 +103,30 @@ const getMyBookingPenalties = async (req, res) => {
     const settlement = deposit && deposit.settlement
       ? { ...deposit.settlement, confirmedPenaltyTotal: deposit.shape === "flat" ? penaltyTotal : deposit.settlement.confirmedPenaltyTotal }
       : null;
+
+    // What is paid ONLINE, and so what carries the online payment fee. A deposit that is still Held pays the penalties
+    // first (staff settle it, oldest penalty first) and that part has NO fee; only what it does not cover is paid online,
+    // with the fee on that remainder alone. Once the deposit is not held any more (settled and returned, refunded,
+    // waived, forfeited, none recorded) every unpaid penalty is paid online, fee included. This is the same plan
+    // createPenaltyPaymentLink charges, so the amount shown here is the amount charged. A failed settings read only drops
+    // the fee figure (gatewayFeeKnown: false); it never blocks the card.
+    const depositHeld = !!(deposit && deposit.status === "Held" && !settlement);
+    const depositCover = depositHeld ? depositAmount : 0;
+    const unpaidMoney = Math.round(unpaidTotal * 100) / 100;
+    let plan = {
+      unpaidTotal: unpaidMoney, coveredByDeposit: Math.min(depositCover, unpaidMoney),
+      onlineDue: Math.max(0, Math.round((unpaidMoney - depositCover) * 100) / 100), gatewayFee: 0, gatewayFeeRate: 0,
+    };
+    plan.total = plan.onlineDue;
+    let gatewayFeeKnown = true;
+    try {
+      const feeSettings = await getSystemSettings();
+      const unpaidDocs = shownPenalties.filter((p) => p.status === "Confirmed" && p.userID === userID && owedOn(p) > 0);
+      plan = planOnlinePayment(unpaidDocs, { depositCover, fallbackPercent: feeSettings.gatewayFeePercent });
+    } catch (feeErr) {
+      gatewayFeeKnown = false;
+      console.warn("getMyBookingPenalties: could not work out the online payment fee:", feeErr.message);
+    }
 
     let deductedFromDeposit = null;   // how much of the deposit went to penalties
     let refundAmount        = null;   // what the customer receives back (>= 0)
@@ -145,11 +161,16 @@ const getMyBookingPenalties = async (req, res) => {
             console.warn("getMyBookingPenalties: could not read the deposit return row:", rowErr.message);
           }
         }
-      } else {
+      } else if (depositHeld) {
         // Not settled yet — live preview of what settlement will do.
         deductedFromDeposit = Math.min(depositAmount, unpaidTotal);
         refundAmount = Math.max(0, depositAmount - unpaidTotal);
         stillOwed = Math.max(0, unpaidTotal - depositAmount);
+      } else {
+        // Refunded / Forfeited: the deposit is not held any more, so it pays nothing and every unpaid penalty is paid online.
+        deductedFromDeposit = 0;
+        refundAmount = 0;
+        stillOwed = unpaidTotal;
       }
     } else {
       stillOwed = unpaidTotal; // no deposit on file: whatever is unpaid is owed outright
@@ -175,10 +196,15 @@ const getMyBookingPenalties = async (req, res) => {
         refundMethod,
         refundedAt,
         stillOwed,
-        payableNow: unpaidTotal,   // every unpaid Confirmed penalty (penalty money only)
-        payableFee: feePreview.gatewayFee,          // the online payment fee the checkout adds on top of payableNow
-        payableTotal: feePreview.total,             // payableNow + payableFee: what PayMongo actually charges
-        gatewayFeeRate: feePreview.gatewayFeeRate,  // the one % (null when penalties were saved at different rates)
+        // The online checkout. A held deposit pays first and carries no fee; the rest is penalty money (payableNow, always
+        // equal to stillOwed) plus the online payment fee on top of it (never part of the penalty itself).
+        depositHeld,                                // true = a held deposit will pay penalties when staff settle
+        coveredByDeposit: plan.coveredByDeposit,    // what that deposit will pay (no fee)
+        payableNow: plan.onlineDue,                 // penalty money left to pay online
+        payableFee: plan.gatewayFee,                // the online payment fee the checkout adds on top of payableNow
+        payableTotal: plan.total,                   // payableNow + payableFee: what PayMongo actually charges
+        gatewayFeeRate: plan.gatewayFeeRate,        // the one % (null when penalties were saved at different rates)
+        gatewayFeeKnown,                            // false = the fee could not be worked out just now
         gatewayFeePaid: gatewayFeePaidTotal,        // online fee already paid on this booking's penalties
         // Kept for older clients: signed deposit - unpaid penalties.
         runningBalance: depositAmount !== null ? depositAmount - unpaidTotal : null,

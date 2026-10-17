@@ -3,7 +3,8 @@ const admin  = require("firebase-admin");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { generateUniqueReferralCode } = require("../../utils/referrals/referral.util");
 const { listPendingCheckouts } = require("../../utils/payments/penaltyPayment.util");
-const { getSystemSettings, computePenaltyCheckoutFees } = require("../../utils/pricing");
+const { getSystemSettings } = require("../../utils/pricing");
+const { planOnlinePayment, heldDepositCoverByBooking } = require("../../utils/payments/penaltyPayment.util");
 
 // Same role IDs as editRequest.controller.js/signup.controller.js's
 // STAFF_NOTIFY_ROLE_IDS — kept as a local literal here too since each
@@ -219,13 +220,13 @@ const getFullProfile = async (req, res) => {
       .where("status", "==", "Confirmed")
       .get();
     const outstandingByBooking = {};
-    const feeItemsByBooking = {};   // what each unpaid penalty would be charged online, to show the fee before paying
+    const unpaidDocsByBooking = {};   // the same penalties createPenaltyPaymentLink works the online payment out from
     const outstandingPenaltyBalance = unpaidPenaltiesSnap.docs.reduce((sum, doc) => {
       const p = doc.data();
       const owed = Math.max(0, (Number(p.amount) || 0) - (Number(p.paidAmount) || 0));
       if (owed > 0 && p.bookingID) {
         outstandingByBooking[p.bookingID] = (outstandingByBooking[p.bookingID] || 0) + owed;
-        (feeItemsByBooking[p.bookingID] ||= []).push({ penaltyID: p.penaltyID || doc.id, owed, gatewayFeeRate: p.gatewayFeeRate });
+        (unpaidDocsByBooking[p.bookingID] ||= []).push({ ...p, id: doc.id });
       }
       return sum + owed;
     }, 0);
@@ -235,12 +236,27 @@ const getFullProfile = async (req, res) => {
     // A failed lookup only drops the badge; it never blocks the profile.
     let openCheckouts = {};
     try { openCheckouts = await listPendingCheckouts(userID); } catch (e) { console.warn("profile: could not read pending penalty checkouts:", e.message); }
-    let feePercent = 0;
-    try { feePercent = (await getSystemSettings()).gatewayFeePercent; } catch (e) { console.warn("profile: could not read the gateway fee setting:", e.message); }
+    // What of each booking's balance is really paid ONLINE, and the online payment fee on it. A deposit that is still
+    // Held pays penalties first (no fee); only the rest is paid online, with the fee on that remainder alone. The fee is
+    // not part of outstandingPenaltyBalance. A failed lookup only drops these figures; it never blocks the profile.
+    const planByBooking = {};
+    try {
+      const [feeSettings, covers] = await Promise.all([getSystemSettings(), heldDepositCoverByBooking(userID)]);
+      Object.entries(unpaidDocsByBooking).forEach(([bookingID, docs]) => {
+        planByBooking[bookingID] = planOnlinePayment(docs, { depositCover: covers[bookingID] || 0, fallbackPercent: feeSettings.gatewayFeePercent });
+      });
+    } catch (e) { console.warn("profile: could not work out the online payment fee on unpaid penalties:", e.message); }
     const outstandingPenaltyBookings = Object.entries(outstandingByBooking)
       .map(([bookingID, amount]) => {
-        const f = computePenaltyCheckoutFees(feeItemsByBooking[bookingID] || [], feePercent);
-        return { bookingID, amount, fee: f.gatewayFee, total: f.total, pending: !!openCheckouts[bookingID] };
+        const plan = planByBooking[bookingID];
+        return {
+          bookingID, amount,
+          coveredByDeposit: plan ? plan.coveredByDeposit : 0,   // a held deposit pays this part at settlement (no fee)
+          onlineDue: plan ? plan.onlineDue : amount,            // penalty money to pay online
+          fee: plan ? plan.gatewayFee : 0,                      // the online payment fee on that
+          total: plan ? plan.total : amount,                    // what the checkout charges
+          pending: !!openCheckouts[bookingID],
+        };
       });
 
     // Primary address = isDefault true, or first one
@@ -262,7 +278,7 @@ const getFullProfile = async (req, res) => {
       // Queried live from `penalties` above — see MyBookings.jsx's
       // outstanding-balance banner, which reads this same response field.
       outstandingPenaltyBalance,
-      outstandingPenaltyBookings, // [{ bookingID, amount, fee, total, pending }] — one entry per booking with unpaid penalties
+      outstandingPenaltyBookings, // [{ bookingID, amount, coveredByDeposit, onlineDue, fee, total, pending }] — one entry per booking with unpaid penalties
       // referral — this user's own shareable code and how many people
       // they've referred so far. Was already on the "user" doc since
       // signup started writing it, just never surfaced through this

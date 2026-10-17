@@ -46,15 +46,14 @@ const Payment = {
   balanceAmount: 0,     // what the open balance checkout charges
   // NOT stored here: balanceCollected / balanceCollectedAmount. "Staff collected the balance in person" is a settled
   // in-person balance row in paymentEntries, and hydratePayment() derives both from it. Likewise refundIssuedBy /
-  // refundIssuedAt are the processedBy / processedAt of the phase "discount" out-row.
+  // refundIssuedAt are the processedBy / processedAt of the discount-refund row (phase "discount").
 
   // A staff discount is an adjustment of what is owed, not a money movement, so it lives on the payment.
   discountAmount: 0,
   discountReason: "",
   discountBy: "",
   discountAt: null,
-  discountCorrectedBy: "",   // set by correctIssuedDiscount() when a discount is changed after its refund was issued
-  discountCorrectedAt: null,
+
   // Set by applyDiscount() when a discount is applied to a booking that's
   // already fully (or partially) paid past what the new discount covers —
   // the spillover is cash that's now owed back to the customer. 0 means
@@ -64,12 +63,12 @@ const Payment = {
   // Flipped true via markRefundIssued() once staff or the driver holding
   // the cash actually hands it back. Drives the "Refund Due" banner in
   // PaymentStatusModal and the Payments.jsx table/refund column. Who handed it back and when is the
-  // phase "discount" entry (out-row), not a field here.
+  // discount-refund entry (phase "discount", out-row), not a field here.
   refundIssued: false,
 
   // The security deposit held for the booking. It is charged inside `amount` with the first payment, so the
   // first payment's entry row already holds how it was paid. Flat fields (read them through getDepositView(),
-  // services/payments/depositView.js -- it also understands the old nested `deposit` object until
+  // services/payments/paymentHelpers.js -- it also understands the old nested `deposit` object until
   // scripts/migrate-deposit-flat.js has run):
   //   securityDeposit      (above  ) the deposit amount
   depositStatus: "",            // "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"
@@ -79,9 +78,11 @@ const Payment = {
                                 // The result (Refunded / Settled / OwedByCustomer) is derived, not stored: OwedByCustomer
                                 // is "nothing returned and a Confirmed penalty is still unpaid", so it clears when paid.
   depositSettledAt: null,       // when the deposit stopped being Held (settled, waived, forfeited or refunded)
-  // The deposit going back has no paymentEntries row: depositReturned IS the amount. How it was returned (method,
-  // reference), who did it and when are on the DepositReturn transaction log written by settleBooking() in
-  // penalty.service.js (log id <paymentID>_deposit_settled). Who waived it is in the audit log.
+  // The deposit going back IS a paymentEntries row: phase "deposit_return", direction "out", source "in_person", written
+  // by the admin's settleBooking() (penalty.service.js) in the same transaction as depositReturned, and only when
+  // something was returned. That row holds how it was returned (method, reference), who did it and when; depositReturned
+  // here is the amount. A DepositReturn transaction log (id <paymentID>_deposit_settled) is written as well. Who waived a
+  // deposit is in the audit log.
 
   createdAt: null,
   updatedAt: null,

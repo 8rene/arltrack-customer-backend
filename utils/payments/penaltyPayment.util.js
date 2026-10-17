@@ -38,7 +38,8 @@ const { buildPenaltyPaymentEntry } = require("./paymentEntries.mapper");
 const { recordTransactionLog } = require("../transactionLogs/transactionLogs.util");
 const { recordAudit } = require("../auditLogs/auditLogs.util");
 const { createNotification } = require("../../services/notification/notification.service");
-const { getSystemSettings, computePenaltyGatewayFee } = require("../pricing");
+const { getSystemSettings, computePenaltyGatewayFee, computePenaltyCheckoutFees } = require("../pricing");
+const { getDepositView } = require("./depositView.util");
 
 const ENTRIES   = "paymentEntries";
 const PENALTIES = "penalties";
@@ -133,18 +134,77 @@ const listUnpaidForBooking = async (userID, bookingID) => {
 const unpaidTotal = (list) =>
   Math.round(list.reduce((s, p) => s + owedOn(p), 0) * 100) / 100;
 
+// ── What the customer really pays ONLINE, and so what carries the online payment fee ────────────────────────────────
+// A HELD security deposit pays the penalties first: staff's "Confirm & settle" (admin settleBooking) deducts them from it,
+// oldest first. Money taken from the deposit is not an online payment, so that part has NO gateway fee. Only what the
+// deposit does not cover is paid online, and only that remainder carries the fee (each penalty at its own saved rate).
+// Once the deposit is no longer held (already settled and returned, refunded, waived, forfeited, or none was recorded)
+// every unpaid penalty is paid online in full, fee included.
+
+/** Deposit still available to pay penalties: the payment's deposit while it is Held and not yet settled, else 0. */
+const heldDepositCover = (payment) => {
+  const dep = payment ? getDepositView(payment) : null;
+  return dep && dep.status === "Held" && !dep.settlement ? num(dep.amount) : 0;
+};
+
+/** heldDepositCover() of ONE booking's payment. */
+const heldDepositCoverForBooking = async (bookingID) => {
+  const snap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
+  return snap.empty ? 0 : heldDepositCover(snap.docs[0].data());
+};
+
+/** { [bookingID]: heldDepositCover } for every payment of this customer (one read, for the all-bookings views). */
+const heldDepositCoverByBooking = async (userID) => {
+  const snap = await db.collection("payments").where("userID", "==", userID).get();
+  const out = {};
+  snap.docs.forEach((d) => { const p = d.data(); if (p.bookingID) out[p.bookingID] = heldDepositCover(p); });
+  return out;
+};
+
 /**
- * Opens a checkout: one PENDING paymentEntries row per unpaid penalty, all sharing `groupID` and the PayMongo
- * `sessionID`. `unpaid` is listUnpaidForBooking(). Written in one batch.
+ * The online payment for ONE booking's unpaid penalties. `unpaid` = this customer's Confirmed penalties that still owe.
+ *   unpaidTotal       every unpaid penalty (what blocks a new booking)
+ *   coveredByDeposit  what the held deposit will pay at settlement (no fee)
+ *   onlineDue         the penalty money left to pay online (= penaltyAmount)
+ *   gatewayFee        the online payment fee on onlineDue, each penalty at its own rate (else fallbackPercent)
+ *   total             onlineDue + gatewayFee: what the checkout charges
+ *   lines             [{ penaltyID, amount, rate, fee }] -- the pending row to write for each penalty, and its fee
+ * onlineDue is put on the penalties OLDEST FIRST, the same order settlement applies online money in. Every penalty
+ * therefore carries a fee line for exactly the part of it that is paid online.
  */
-const writePendingPenaltyRows = async ({ unpaid, userID, groupID, sessionID, channel }) => {
+const planOnlinePayment = (unpaid = [], { depositCover = 0, fallbackPercent = 0 } = {}) => {
+  const sorted = [...unpaid].filter((p) => owedOn(p) > 0).sort(byAge);
+  const all = unpaidTotal(sorted);
+  const coveredByDeposit = round2(Math.min(num(depositCover), all));
+  const onlineDue = round2(all - coveredByDeposit);
+  let left = onlineDue;
+  const items = [];
+  for (const p of sorted) {
+    if (left <= 0) break;
+    const part = Math.min(owedOn(p), left);
+    left = round2(left - part);
+    items.push({ penaltyID: p.penaltyID || (p._ref && p._ref.id) || p.id, owed: part, gatewayFeeRate: p.gatewayFeeRate });
+  }
+  return { unpaidTotal: all, coveredByDeposit, onlineDue, ...computePenaltyCheckoutFees(items, fallbackPercent) };
+};
+
+/**
+ * Opens a checkout: one PENDING paymentEntries row per penalty that has something to pay ONLINE, all sharing `groupID`
+ * and the PayMongo `sessionID`. `unpaid` is listUnpaidForBooking(); `lines` is planOnlinePayment().lines, which says
+ * how much of each penalty is paid online (a held deposit pays the rest, so that part gets no row and no fee).
+ * Without `lines` every unpaid penalty is written in full. Written in one batch.
+ */
+const writePendingPenaltyRows = async ({ unpaid, lines = null, userID, groupID, sessionID, channel }) => {
   const now = new Date();
   const batch = db.batch();
+  const onlineOf = lines ? new Map(lines.map((l) => [l.penaltyID, l.amount])) : null;
   unpaid.forEach((p) => {
     const penaltyID = p.penaltyID || p._ref.id;
+    const amount = onlineOf ? num(onlineOf.get(penaltyID)) : owedOn(p);
+    if (!(amount > 0)) return;
     const ref = db.collection(ENTRIES).doc();
     const built = buildPenaltyPaymentEntry({
-      penalty: { ...p, userID }, penaltyID, amount: owedOn(p),
+      penalty: { ...p, userID }, penaltyID, amount,
       method: channel, referenceNumber: null, processedBy: null, groupID, now,
     });
     batch.set(ref, {
@@ -289,4 +349,5 @@ const settlePenaltyCheckout = async ({ groupID, paymongoPaymentID = null, charge
 module.exports = {
   listUnpaidForBooking, unpaidTotal, owedOn, listPendingCheckouts, listPendingGroups, getGroupRows,
   writePendingPenaltyRows, cancelPendingGroup, settlePenaltyCheckout,
+  heldDepositCover, heldDepositCoverForBooking, heldDepositCoverByBooking, planOnlinePayment,
 };
