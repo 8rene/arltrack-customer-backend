@@ -1,6 +1,9 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { axios, PAYMONGO_V1, paymongoHeaders, retrieveCheckoutSession } = require("../../utils/payments/paymongoClient.util");
-const { CHECKOUTS, listUnpaidForBooking, unpaidTotal, settlePenaltyCheckout, owedOn, listPendingCheckouts } = require("../../utils/payments/penaltyPayment.util");
+const {
+  listUnpaidForBooking, unpaidTotal, owedOn, listPendingCheckouts, listPendingGroups, getGroupRows,
+  writePendingPenaltyRows, cancelPendingGroup, settlePenaltyCheckout,
+} = require("../../utils/payments/penaltyPayment.util");
 
 const { getSystemSettings, computePenaltyCheckoutFees } = require("../../utils/pricing");
 
@@ -10,7 +13,12 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 const CHANNEL_MAP = { gcash: ["gcash"], maya: ["paymaya"], qrph: ["qrph"] };
 const MIN_CENTAVOS = 2000; // PayMongo minimum: ₱20.00
 
-const newCheckoutID = () => `PENCO-${db.collection(CHECKOUTS).doc().id}`;
+// PayMongo channel -> the method code stored on a paymentEntries row
+const METHOD_OF_CHANNEL = { gcash: "gcash", paymaya: "maya", qrph: "qrph" };
+
+// One checkout = one groupID shared by the pending penalty rows it creates (also the PayMongo reference_number).
+const newGroupID = () => `PENCO-${db.collection("paymentEntries").doc().id}`;
+const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/paymongo/penalty/create-link   { bookingID, paymentMethod }
@@ -18,15 +26,18 @@ const newCheckoutID = () => `PENCO-${db.collection(CHECKOUTS).doc().id}`;
 // Opens a PayMongo checkout for everything this booking's customer still owes
 // in confirmed penalties. The amount is computed here, never read from the body.
 //
+// Nothing is stored in a separate collection: opening the checkout writes one PENDING paymentEntries row per
+// penalty (phase "penalty", source "online", the PayMongo sessionID, a shared groupID). The webhook or the
+// status poll flips them to "success" and moves penalties.paidAmount / gatewayFeePaid (see settlePenaltyCheckout).
+//
 // The customer also pays the online payment (gateway) fee on it. Each penalty carries the gatewayFeeRate that was in
 // System Settings when it was created, and is charged at that rate on what it still owes (a penalty from before
 // the rate was saved uses the current setting). The fee is a SEPARATE line on the checkout and is not part of
-// the penalty: the penalty's own amount / paidAmount only ever move by the penalty money (see settlePenaltyCheckout).
-//   checkout.amount         = what the customer is charged in total (penaltyAmount + gatewayFee)
-//   checkout.penaltyAmount  = the penalty money inside it
-//   checkout.gatewayFee     = the online payment fee inside it
-//   checkout.lines          = [{ penaltyID, amount, rate, fee }] per penalty, so settlement gives each its own fee
-//   checkout.gatewayFeeRate = the one % every line shares (null when the penalties were created at different rates)
+// the penalty: a row's amount / the penalty's paidAmount only ever move by the penalty money.
+//   amount         = what the customer is charged in total (penaltyAmount + gatewayFee)
+//   penaltyAmount  = the penalty money inside it (the sum of the rows' amounts)
+//   gatewayFee     = the online payment fee inside it
+//   gatewayFeeRate = the one % every penalty shares (null when they were created at different rates)
 // ─────────────────────────────────────────────────────────────────────────────
 const createPenaltyPaymentLink = async (req, res) => {
   const userID = req.user.userID;
@@ -45,18 +56,19 @@ const createPenaltyPaymentLink = async (req, res) => {
     // An earlier attempt may exist. Ask PayMongo what happened to it before
     // opening another one — it may already be paid (webhook slow) and we must
     // never charge twice.
-    const pendingSnap = await db.collection(CHECKOUTS)
-      .where("bookingID", "==", bookingID).where("userID", "==", userID).where("status", "==", "pending").get();
-    for (const d of pendingSnap.docs) {
-      const c = d.data();
-      const v = await retrieveCheckoutSession(c.sessionID);
+    const live = [];   // earlier checkouts that are still open: { group, checkoutUrl }
+    for (const g of await listPendingGroups(userID, { bookingID })) {
+      if (!g.sessionID) continue;
+      const v = await retrieveCheckoutSession(g.sessionID);
       if (!v.ok) {
         return res.status(503).json({ message: "We couldn't confirm your earlier payment attempt with PayMongo just now. Please wait a moment and try again — this protects you from being charged twice." });
       }
       if (v.paid) {
-        await settlePenaltyCheckout({ checkoutRef: d.ref, paymongoPaymentID: v.paymongoPaymentID, charge: v.charge, source: "pay-now" });
+        await settlePenaltyCheckout({ groupID: g.groupID, paymongoPaymentID: v.paymongoPaymentID, charge: v.charge, source: "pay-now" });
       } else if (v.expired) {
-        await d.ref.update({ status: "expired", updatedAt: new Date() });
+        await cancelPendingGroup(g.groupID);
+      } else {
+        live.push({ group: g, checkoutUrl: v.checkoutUrl || null });
       }
     }
 
@@ -77,17 +89,16 @@ const createPenaltyPaymentLink = async (req, res) => {
     }
 
     // Reuse a still-open link for the same amount instead of piling up sessions.
-    const open = await db.collection(CHECKOUTS)
-      .where("bookingID", "==", bookingID).where("userID", "==", userID).where("status", "==", "pending").get();
-    const reusable = open.docs.map((d) => d.data()).find((c) => num2(c.amount) === amount && c.channel === channel[0]);
+    const method = METHOD_OF_CHANNEL[channel[0]];
+    const reusable = live.find((x) => x.checkoutUrl && round2(x.group.penaltyAmount) === round2(fee.penaltyAmount) && x.group.method === method);
     if (reusable) {
       return res.status(200).json({
-        message: "Payment link already exists.", checkoutUrl: reusable.checkoutUrl, checkoutID: reusable.checkoutID,
+        message: "Payment link already exists.", checkoutUrl: reusable.checkoutUrl, checkoutID: reusable.group.groupID,
         amount, penaltyAmount: fee.penaltyAmount, gatewayFee: fee.gatewayFee, gatewayFeeRate: fee.gatewayFeeRate,
       });
     }
 
-    const checkoutID = newCheckoutID();
+    const groupID = newGroupID();
     const pmRes = await axios.post(`${PAYMONGO_V1}/checkout_sessions`, {
       data: { attributes: {
         line_items: [
@@ -97,24 +108,18 @@ const createPenaltyPaymentLink = async (req, res) => {
             : []),
         ],
         payment_method_types: channel,
-        success_url: `${FRONTEND_URL}/payment-return?penaltyCheckoutID=${checkoutID}&bookingID=${bookingID}`,
+        success_url: `${FRONTEND_URL}/payment-return?penaltyGroupID=${groupID}&bookingID=${bookingID}`,
         cancel_url:  `${FRONTEND_URL}/my-bookings?tab=history`,
-        reference_number: checkoutID,   // webhook matches on this (PENCO- prefix = penalty checkout)
+        reference_number: groupID,   // webhook matches on this (PENCO- prefix = penalty checkout) and finds the rows by groupID
       } },
     }, { headers: paymongoHeaders() });
 
     const session = pmRes.data.data;
     const checkoutUrl = session.attributes.checkout_url;
-    const now = new Date();
-    await db.collection(CHECKOUTS).doc(checkoutID).set({
-      checkoutID, bookingID, userID, amount, channel: channel[0],
-      penaltyAmount: fee.penaltyAmount, gatewayFee: fee.gatewayFee, gatewayFeeRate: fee.gatewayFeeRate, lines: fee.lines,
-      sessionID: session.id, checkoutUrl, status: "pending",
-      createdAt: now, updatedAt: now,
-    });
+    await writePendingPenaltyRows({ unpaid, userID, groupID, sessionID: session.id, channel: channel[0] });
 
     return res.status(200).json({
-      message: "Payment link created.", checkoutUrl, checkoutID,
+      message: "Payment link created.", checkoutUrl, checkoutID: groupID,
       amount, penaltyAmount: fee.penaltyAmount, gatewayFee: fee.gatewayFee, gatewayFeeRate: fee.gatewayFeeRate,
     });
   } catch (error) {
@@ -122,36 +127,37 @@ const createPenaltyPaymentLink = async (req, res) => {
     return res.status(500).json({ message: "Failed to create payment link. Please try again." });
   }
 };
-const num2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /api/paymongo/penalty/status/:checkoutID
+// GET /api/paymongo/penalty/status/:groupID
 // The return page polls this; if PayMongo says it's paid we settle it here
 // (same transactional path as the webhook, so whichever lands first wins).
 // ─────────────────────────────────────────────────────────────────────────────
 const getPenaltyPaymentStatus = async (req, res) => {
   const userID = req.user.userID;
-  const { checkoutID } = req.params;
+  const groupID = req.params.groupID || req.params.checkoutID;
   try {
-    const ref = db.collection(CHECKOUTS).doc(checkoutID);
-    const snap = await ref.get();
-    if (!snap.exists || snap.data().userID !== userID) {
+    const rows = await getGroupRows(groupID);
+    if (!rows.length || rows[0].userID !== userID) {
       return res.status(404).json({ message: "Payment not found." });
     }
-    const c = snap.data();
-    if (c.status === "paid") return res.status(200).json({ status: "paid", bookingID: c.bookingID });
-    if (c.status === "expired") return res.status(200).json({ status: "failed", bookingID: c.bookingID });
+    const bookingID = rows[0].bookingID;
+    const pending = rows.filter((r) => r.status === "pending");
+    if (!pending.length) {
+      // Nothing left to settle: paid if any row took money, otherwise it expired / failed.
+      return res.status(200).json({ status: rows.some((r) => r.status === "success") ? "paid" : "failed", bookingID });
+    }
 
-    const v = await retrieveCheckoutSession(c.sessionID);
+    const v = await retrieveCheckoutSession(pending[0].sessionID);
     if (v.ok && v.paid) {
-      await settlePenaltyCheckout({ checkoutRef: ref, paymongoPaymentID: v.paymongoPaymentID, charge: v.charge, source: "status-poll" });
-      return res.status(200).json({ status: "paid", bookingID: c.bookingID });
+      await settlePenaltyCheckout({ groupID, paymongoPaymentID: v.paymongoPaymentID, charge: v.charge, source: "status-poll" });
+      return res.status(200).json({ status: "paid", bookingID });
     }
     if (v.ok && v.expired) {
-      await ref.update({ status: "expired", updatedAt: new Date() });
-      return res.status(200).json({ status: "failed", bookingID: c.bookingID });
+      await cancelPendingGroup(groupID);
+      return res.status(200).json({ status: "failed", bookingID });
     }
-    return res.status(200).json({ status: "pending", bookingID: c.bookingID, verified: !!v.ok });
+    return res.status(200).json({ status: "pending", bookingID, verified: !!v.ok });
   } catch (error) {
     console.error("getPenaltyPaymentStatus error:", error.message);
     return res.status(500).json({ message: "Failed to fetch payment status." });
@@ -198,10 +204,9 @@ const getMyOutstandingPenalties = async (req, res) => {
 // reference_number starts with "PENCO-". Never throws.
 const handlePenaltyWebhookPaid = async ({ checkoutID, session }) => {
   const { pickPaidPayment, chargeFromPaymentResource } = require("../../utils/payments/paymongoFee.util");
-  const ref = db.collection(CHECKOUTS).doc(checkoutID);
   const resource = pickPaidPayment(session?.attributes?.payments);
   const r = await settlePenaltyCheckout({
-    checkoutRef: ref, paymongoPaymentID: resource?.id || null,
+    groupID: checkoutID, paymongoPaymentID: resource?.id || null,
     charge: chargeFromPaymentResource(resource), source: "webhook",
   });
   console.log(`[PayMongo Webhook] penalty checkout ${checkoutID} ${r.settled ? "settled" : r.alreadyPaid ? "already settled" : "not found"}`);

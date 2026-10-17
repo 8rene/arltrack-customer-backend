@@ -3,6 +3,7 @@ const admin  = require("firebase-admin");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { generateUniqueReferralCode } = require("../../utils/referrals/referral.util");
 const { listPendingCheckouts } = require("../../utils/payments/penaltyPayment.util");
+const { getSystemSettings, computePenaltyCheckoutFees } = require("../../utils/pricing");
 
 // Same role IDs as editRequest.controller.js/signup.controller.js's
 // STAFF_NOTIFY_ROLE_IDS — kept as a local literal here too since each
@@ -218,11 +219,13 @@ const getFullProfile = async (req, res) => {
       .where("status", "==", "Confirmed")
       .get();
     const outstandingByBooking = {};
+    const feeItemsByBooking = {};   // what each unpaid penalty would be charged online, to show the fee before paying
     const outstandingPenaltyBalance = unpaidPenaltiesSnap.docs.reduce((sum, doc) => {
       const p = doc.data();
       const owed = Math.max(0, (Number(p.amount) || 0) - (Number(p.paidAmount) || 0));
       if (owed > 0 && p.bookingID) {
         outstandingByBooking[p.bookingID] = (outstandingByBooking[p.bookingID] || 0) + owed;
+        (feeItemsByBooking[p.bookingID] ||= []).push({ penaltyID: p.penaltyID || doc.id, owed, gatewayFeeRate: p.gatewayFeeRate });
       }
       return sum + owed;
     }, 0);
@@ -232,8 +235,13 @@ const getFullProfile = async (req, res) => {
     // A failed lookup only drops the badge; it never blocks the profile.
     let openCheckouts = {};
     try { openCheckouts = await listPendingCheckouts(userID); } catch (e) { console.warn("profile: could not read pending penalty checkouts:", e.message); }
+    let feePercent = 0;
+    try { feePercent = (await getSystemSettings()).gatewayFeePercent; } catch (e) { console.warn("profile: could not read the gateway fee setting:", e.message); }
     const outstandingPenaltyBookings = Object.entries(outstandingByBooking)
-      .map(([bookingID, amount]) => ({ bookingID, amount, pending: !!openCheckouts[bookingID] }));
+      .map(([bookingID, amount]) => {
+        const f = computePenaltyCheckoutFees(feeItemsByBooking[bookingID] || [], feePercent);
+        return { bookingID, amount, fee: f.gatewayFee, total: f.total, pending: !!openCheckouts[bookingID] };
+      });
 
     // Primary address = isDefault true, or first one
     const primaryAddress = addresses.find(a => a.isDefault) || addresses[0] || {};
@@ -254,7 +262,7 @@ const getFullProfile = async (req, res) => {
       // Queried live from `penalties` above — see MyBookings.jsx's
       // outstanding-balance banner, which reads this same response field.
       outstandingPenaltyBalance,
-      outstandingPenaltyBookings, // [{ bookingID, amount, pending }] — one entry per booking with unpaid penalties
+      outstandingPenaltyBookings, // [{ bookingID, amount, fee, total, pending }] — one entry per booking with unpaid penalties
       // referral — this user's own shareable code and how many people
       // they've referred so far. Was already on the "user" doc since
       // signup started writing it, just never surfaced through this

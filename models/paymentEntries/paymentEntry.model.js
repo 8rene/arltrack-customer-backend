@@ -28,10 +28,11 @@
 //     <refundRequestID>_unrefundable<n>  paid online but NO PayMongo payment id: status "unrefundable", with
 //                                        transactionErrorNote "Payment ID does not exist". It is reported, never
 //                                        handed back.
-//     <paymentID>_discountrefund         cash handed back for a staff discount that exceeded what was owed
-//                                        (source "in_person", method "cash", refundReqID null). No refund
-//                                        request exists for it. Written by markRefundIssued() in the same
-//                                        batch as payments.refundIssued.
+//     (auto ID)                          money handed back for a staff discount that exceeded what was owed:
+//                                        phase "discount", refundReqID null (no refund request exists for it).
+//                                        In person: written by markRefundIssued() in the same batch as
+//                                        payments.refundIssued. Online: written by applyDiscount() (pending
+//                                        until PayMongo confirms).
 //     (auto ID)                          the security deposit handed back at settlement: phase "deposit_return", source
 //                                        "in_person", refundReqID null. One row each time settleBooking() returns money
 //                                        (net > 0), written in the same transaction as payments.depositReturned.
@@ -49,7 +50,7 @@
 const ENTRY_COLLECTION = "paymentEntries";
 
 const ENTRY_DIRECTIONS = ["in", "out"];
-const ENTRY_PHASES     = ["deposit", "balance", "penalty", "deposit_return"];
+const ENTRY_PHASES     = ["deposit", "balance", "penalty", "deposit_return", "discount"];
 const ENTRY_SOURCES    = ["online", "in_person"];            // PayMongo | staff collected / handed back
 const ENTRY_METHODS    = ["gcash", "maya", "qrph", "cash", "bank_transfer"];   // customers can only pay online via gcash / maya / qrph
 // "unrefundable" is only used by direction "out" rows (an amount with no PayMongo payment id).
@@ -64,7 +65,7 @@ const PaymentEntry = {
   refundReqID: null,        // FK -> refundRequests.refundRequestID. Set on a refund's "out" rows only.
   penaltyID:   null,        // FK -> penalties.penaltyID. Set on "penalty" phase rows only.
   direction:   "in",        // "in" | "out"
-  phase:       "deposit",   // "deposit" | "balance" | "penalty" | "deposit_return"   (for "out": the phase being refunded)
+  phase:       "deposit",   // "deposit" | "balance" | "penalty" | "deposit_return" | "discount"   (for "out": the phase being refunded)
   source:      "online",    // "online" | "in_person"
   method:      null,        // gcash | maya | qrph | cash | bank_transfer | null (online, channel unknown)
   amount:      0,           // pesos moved by THIS entry

@@ -51,6 +51,7 @@ const retrieveCheckoutSession = async (sessionID) => {
       // PayMongo's own fee for that payment (null when PayMongo didn't send one).
       charge: paidPay ? chargeFromPaymentResource(pickPaidPayment(payments)) : null,
       expired: !paid && String(attrs.status || "").toLowerCase() === "expired",
+      checkoutUrl: attrs.checkout_url || null,   // lets a caller reuse a still-open session
     };
   } catch (e) {
     if (e?.response?.status === 404) return { ok: true, notFound: true, paid: false, paymongoPaymentID: null, charge: null, expired: true };

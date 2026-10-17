@@ -46,7 +46,7 @@ const Payment = {
   balanceAmount: 0,     // what the open balance checkout charges
   // NOT stored here: balanceCollected / balanceCollectedAmount. "Staff collected the balance in person" is a settled
   // in-person balance row in paymentEntries, and hydratePayment() derives both from it. Likewise refundIssuedBy /
-  // refundIssuedAt are the processedBy / processedAt of the "<paymentID>_discountrefund" row.
+  // refundIssuedAt are the processedBy / processedAt of the phase "discount" out-row.
 
   // A staff discount is an adjustment of what is owed, not a money movement, so it lives on the payment.
   discountAmount: 0,
@@ -64,7 +64,7 @@ const Payment = {
   // Flipped true via markRefundIssued() once staff or the driver holding
   // the cash actually hands it back. Drives the "Refund Due" banner in
   // PaymentStatusModal and the Payments.jsx table/refund column. Who handed it back and when is the
-  // "<paymentID>_discountrefund" entry (out-row), not a field here.
+  // phase "discount" entry (out-row), not a field here.
   refundIssued: false,
 
   // The security deposit held for the booking. It is charged inside `amount` with the first payment, so the

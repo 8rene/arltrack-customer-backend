@@ -405,8 +405,8 @@ const hydratePayment = (payment, entries, opts = {}) => {
       }
     }
   }
-  // A discount spillover handed back in person is the "<paymentID>_discountrefund" out-row: who / when come from it.
-  const handBack = (entries || []).find((e) => e && e.direction === "out" && String(e.paymentEntryID || "").endsWith("_discountrefund") && e.status === "success");
+  // A discount spillover handed back in person is the out-row with phase "discount": who / when come from it.
+  const handBack = (entries || []).find((e) => e && e.direction === "out" && e.phase === "discount" && e.status === "success");
   if (handBack) {
     fill("refundIssuedBy", handBack.processedBy);
     fill("refundIssuedAt", handBack.processedAt || handBack.settledAt);
@@ -414,6 +414,22 @@ const hydratePayment = (payment, entries, opts = {}) => {
   // PayMongo's total fee across the successful online charges (was stored as payments.paymongoFeeTotal).
   const feeRows = rows.filter((e) => e.source === "online" && e.status === "success" && e.transactionFee !== undefined && e.transactionFee !== null);
   if (feeRows.length) fill("paymongoFeeTotal", Math.round(feeRows.reduce((a, e) => a + num(e.transactionFee), 0) * 100) / 100);
+  // Penalties paid ONLINE, from their entries. `rows` above leaves penalty rows out on purpose, so paymongoFeeTotal is
+  // deposit + balance only; this is the penalty side, kept apart so the Gateway Breakdown can show it as its own line:
+  //   paymongoFee  what PayMongo kept on those charges (row.transactionFee); null when none was recorded
+  //   paid         the penalty money paid online (row.amount)
+  // The online payment fee the CUSTOMER paid on top is not here: it is kept on the penalties themselves
+  // (penalty.gatewayFeePaid), and getPaymentById() adds it as `received`.
+  const penaltyOnline = (entries || []).filter((e) => e && e.direction !== "out" && e.phase === "penalty" && e.source === "online" && e.status === "success");
+  if (penaltyOnline.length) {
+    const r2 = (n) => Math.round(n * 100) / 100;
+    const withFee = penaltyOnline.filter((e) => e.transactionFee !== undefined && e.transactionFee !== null);
+    out.penaltyGateway = {
+      paymongoFee: withFee.length ? r2(withFee.reduce((a, e) => a + num(e.transactionFee), 0)) : null,
+      paid: r2(penaltyOnline.reduce((a, e) => a + num(e.amount), 0)),
+      count: penaltyOnline.length,
+    };
+  }
   // Latest charge id + the open checkout session.
   const paidOnline = rows.filter((e) => e.source === "online" && e.status === "success" && e.referenceNumber);
   fill("paymongoPaymentID", (latestOf(paidOnline) || {}).referenceNumber);

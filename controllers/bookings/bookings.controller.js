@@ -1,6 +1,6 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { isWithinServiceArea } = require("../location/location.controller");
-const createBookingSession = require("../../models/bookingSession/bookingSession.model");
+const createBookingSession = require("../../models/bookingSession/bookingsession.model");
 const { checkTermsAcceptance, termsRequired } = require("../../utils/terms/terms.service");
 const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus, getBaseAreaConfig } = require("../../utils/pricing");

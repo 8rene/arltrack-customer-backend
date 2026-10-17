@@ -285,6 +285,38 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
   let snap = { empty: true };
   const entrySnap = await db.collection("paymentEntries").where("referenceNumber", "==", refundID).where("direction", "==", "out").limit(1).get();
   const entryReqID = entrySnap.empty ? null : entrySnap.docs[0].data().refundReqID;
+
+  // A staff-discount spillover refunded online is an "out" row with phase "discount" and NO refund request
+  // (refundReqID null). There is nothing to look up: settle the row itself. Never downgrades a success.
+  if (!entrySnap.empty && entrySnap.docs[0].data().phase === "discount") {
+    const rowRef = entrySnap.docs[0].ref;
+    const rowStatus = refundStatus === "succeeded" ? "success" : "failed";
+    const out = await db.runTransaction(async (t) => {
+      const cur = await t.get(rowRef);
+      const d = cur.data();
+      if (d.status === rowStatus || d.status === "success") return { skip: true };
+      const at = new Date();
+      t.update(rowRef, {
+        status: rowStatus,
+        settledAt: rowStatus === "success" ? (d.settledAt || at) : null,
+        transactionErrorNote: rowStatus === "failed" ? "PayMongo reported the discount refund as failed." : null,
+        updatedAt: at,
+      });
+      return { row: d };
+    });
+    if (out.skip) return { found: true, skipped: true };
+    recordTransactionLog({
+      logID: `${out.row.paymentID}_discount_${refundID}`,
+      bookingID: out.row.bookingID, paymentID: out.row.paymentID, userID: out.row.userID || null,
+      type: "Refund", amount: out.row.amount || 0,
+      status: rowStatus === "success" ? "Refunded" : "Failed",
+      paymentMethod: "PayMongo", referenceNumber: refundID,
+      description: rowStatus === "success"
+        ? "Discount refund confirmed by PayMongo."
+        : "PayMongo reported the discount refund as failed.",
+    });
+    return { found: true, discount: true };
+  }
   if (entryReqID) {
     const byEntry = await db.collection("refundRequests").doc(entryReqID).get();
     if (byEntry.exists) snap = { empty: false, docs: [byEntry] };

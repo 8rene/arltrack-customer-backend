@@ -2,6 +2,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { hydratePenalties } = require("../../utils/payments/paymentEntries.util");
 const { getDepositView } = require("../../utils/payments/depositView.util");
 const { listPendingCheckouts } = require("../../utils/payments/penaltyPayment.util");
+const { getSystemSettings, computePenaltyCheckoutFees } = require("../../utils/pricing");
 
 // Firestore Timestamp | Date | string -> ISO string (or null), so the
 // frontend never has to deal with {_seconds,_nanoseconds}.
@@ -76,6 +77,10 @@ const getMyBookingPenalties = async (req, res) => {
         })),
         amount: Number(p.amount) || 0,
         paidAmount: Number(p.paidAmount) || 0,
+        // The online payment fee this penalty's customer payments already carried (penalties.gatewayFeePaid) and the %
+        // saved on it. The fee is never part of paidAmount.
+        gatewayFeePaid: Number(p.gatewayFeePaid) || 0,
+        gatewayFeeRate: p.gatewayFeeRate ?? null,
         paymentMethod: p.paymentMethod || "",
         createdAt: toISO(p.confirmedAt || p.createdAt),
       }))
@@ -84,6 +89,16 @@ const getMyBookingPenalties = async (req, res) => {
     const confirmed = penalties.filter((p) => p.status === "Confirmed");
     const penaltyTotal = confirmed.reduce((s, p) => s + p.amount, 0);                       // everything charged
     const unpaidTotal  = confirmed.reduce((s, p) => s + Math.max(0, p.amount - p.paidAmount), 0); // still unpaid right now
+
+    // What the online checkout would add on top of payableNow: each unpaid penalty at its own saved rate (else the
+    // current setting), exactly as createPenaltyPaymentLink computes it.
+    const feeSettings = await getSystemSettings();
+    const feePreview = computePenaltyCheckoutFees(
+      confirmed.filter((p) => p.amount - p.paidAmount > 0)
+        .map((p) => ({ penaltyID: p.penaltyID, owed: p.amount - p.paidAmount, gatewayFeeRate: p.gatewayFeeRate })),
+      feeSettings.gatewayFeePercent
+    );
+    const gatewayFeePaidTotal = Math.round(confirmed.reduce((s, p) => s + p.gatewayFeePaid, 0) * 100) / 100;
 
     // The deposit is read through getDepositView(): flat fields on the payment (depositStatus, depositSettled,
     // depositReturned ...) or the old nested object until it is migrated. null = no deposit recorded yet.
@@ -160,7 +175,11 @@ const getMyBookingPenalties = async (req, res) => {
         refundMethod,
         refundedAt,
         stillOwed,
-        payableNow: unpaidTotal,   // every unpaid Confirmed penalty -- what the online checkout charges
+        payableNow: unpaidTotal,   // every unpaid Confirmed penalty (penalty money only)
+        payableFee: feePreview.gatewayFee,          // the online payment fee the checkout adds on top of payableNow
+        payableTotal: feePreview.total,             // payableNow + payableFee: what PayMongo actually charges
+        gatewayFeeRate: feePreview.gatewayFeeRate,  // the one % (null when penalties were saved at different rates)
+        gatewayFeePaid: gatewayFeePaidTotal,        // online fee already paid on this booking's penalties
         // Kept for older clients: signed deposit - unpaid penalties.
         runningBalance: depositAmount !== null ? depositAmount - unpaidTotal : null,
         settlement,
