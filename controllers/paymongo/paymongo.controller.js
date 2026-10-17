@@ -3,7 +3,7 @@ const { computePaymentSplit } = require("../../utils/pricing");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { recordTransactionLog } = require("../../utils/transactionLogs/transactionLogs.util");
 const { BOOKING_STATUS, enforceToPayValidity, promoteBookingToUpcoming, cancelBookingAfterRefund, isDepositPaid } = require("../../utils/bookings/bookingStatus.util");
-const { createNotification, notifyStaff } = require("../../services/notification/notification.service");
+const { createNotification, notifyStaff, resolveNotification } = require("../../services/notification/notification.service");
 const { axios, PAYMONGO_V1, paymongoHeaders, channelLabel } = require("../../utils/payments/paymongoClient.util");
 const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = require("../../utils/payments/settlePayment.util");
 const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
@@ -302,7 +302,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
         transactionErrorNote: rowStatus === "failed" ? "PayMongo reported the discount refund as failed." : null,
         updatedAt: at,
       });
-      return { row: d };
+      return { row: d, wasFailed: d.status === "failed" };
     });
     if (out.skip) return { found: true, skipped: true };
     recordTransactionLog({
@@ -315,6 +315,33 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
         ? "Discount refund confirmed by PayMongo."
         : "PayMongo reported the discount refund as failed.",
     });
+
+    // Keep the payment in step with the row. applyDiscount() marked it refundIssued when it sent the refund to PayMongo,
+    // so a FAILED refund would otherwise look done: staff would never be told and could not hand the money back in
+    // store (markRefundIssued refuses a payment that is already refundIssued). Failed -> it is owed again, exactly like
+    // an in-store discount refund; a late success after a failure puts it back.
+    try {
+      const paySnap = out.row.paymentID
+        ? await db.collection("payments").where("paymentID", "==", out.row.paymentID).limit(1).get()
+        : { empty: true };
+      if (!paySnap.empty) {
+        if (rowStatus === "failed") {
+          await paySnap.docs[0].ref.update({ refundIssued: false, refundDue: Number(out.row.amount) || 0, updatedAt: new Date() });
+          await notifyStaff({
+            type: "refund_due",
+            refID: out.row.bookingID,
+            refCollection: "bookings",
+            title: "Refund due to customer",
+            message: `The online refund of \u20b1${(Number(out.row.amount) || 0).toLocaleString()} for the discount on booking ${out.row.bookingID} failed. It needs to be returned to the customer in store.`,
+          });
+        } else if (out.wasFailed) {
+          await paySnap.docs[0].ref.update({ refundIssued: true, refundDue: 0, updatedAt: new Date() });
+          await resolveNotification("refund_due", out.row.bookingID);
+        }
+      }
+    } catch (e) {
+      console.error("[PayMongo Webhook] failed to sync the payment after a discount refund result:", e.message);
+    }
     return { found: true, discount: true };
   }
   if (entryReqID) {
