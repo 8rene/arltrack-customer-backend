@@ -29,6 +29,25 @@ const STAFF_NOTIFY_ROLE_IDS = [
 // can't be uploaded under an image MIME type.
 // ─────────────────────────────────────────────────────────────
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // decoded size per image (3 images ≈ 16 MB < 20 MB body limit)
+
+// Minimum age to register. Keep in sync with MIN_AGE in SignUpModal.jsx.
+const MIN_SIGNUP_AGE = 21;
+
+// Age in whole years from an ISO "YYYY-MM-DD" birthdate, counted as of today in the Philippines
+// (the business runs on PH time, so someone turning 21 today is 21 for the whole PH day,
+// whatever timezone the server happens to run in). Returns null when the value isn't a real
+// calendar date (wrong format, Feb 30, ...) or is implausible (over 120).
+const ageFromBirthdate = (iso) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(typeof iso === "string" ? iso.trim() : "");
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const probe = new Date(Date.UTC(y, mo - 1, d));
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return null;
+  const [ty, tm, td] = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Manila" }).split("-").map(Number);
+  let age = ty - y;
+  if (tm < mo || (tm === mo && td < d)) age--;
+  return age > 120 ? null : age;
+};
 const IMAGE_SIGNATURES = {
   "image/jpeg": (b) => b.length > 3  && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
   "image/png":  (b) => b.length > 8  && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47,
@@ -134,6 +153,14 @@ const signup = async (req, res) => {
   const username = typeof rawUsername === "string" ? rawUsername.trim().toLowerCase() : rawUsername;
 
   try {
+    // 0-. Minimum age. The form checks this too, but a request made straight to the API skips the
+    // form, so it has to be enforced here as well — before any image is parsed or anything is created.
+    const age = ageFromBirthdate(birthdate);
+    if (age === null) return res.status(400).json({ message: "A valid date of birth is required." });
+    if (age < MIN_SIGNUP_AGE) {
+      return res.status(400).json({ message: `You must be at least ${MIN_SIGNUP_AGE} years old to register.` });
+    }
+
     // 0. Reject bad ID images BEFORE creating anything (otherwise the account would
     // be created and the image silently dropped).
     for (const [value, label] of [
