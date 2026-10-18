@@ -111,7 +111,10 @@ const getMyBookingPenalties = async (req, res) => {
     // createPenaltyPaymentLink charges, so the amount shown here is the amount charged. A failed settings read only drops
     // the fee figure (gatewayFeeKnown: false); it never blocks the card.
     const depositHeld = !!(deposit && deposit.status === "Held" && !settlement);
-    const depositCover = depositHeld ? depositAmount : 0;
+    // Already used for penalties when they were confirmed (payments.depositApplied): that part is paid and gone.
+    const appliedToDeposit = depositHeld ? (deposit.applied || 0) : 0;
+    const freeDeposit = depositHeld ? Math.max(0, depositAmount - appliedToDeposit) : 0;   // still available for unpaid penalties
+    const depositCover = freeDeposit;
     const unpaidMoney = Math.round(unpaidTotal * 100) / 100;
     let plan = {
       unpaidTotal: unpaidMoney, coveredByDeposit: Math.min(depositCover, unpaidMoney),
@@ -163,9 +166,9 @@ const getMyBookingPenalties = async (req, res) => {
         }
       } else if (depositHeld) {
         // Not settled yet — live preview of what settlement will do.
-        deductedFromDeposit = Math.min(depositAmount, unpaidTotal);
-        refundAmount = Math.max(0, depositAmount - unpaidTotal);
-        stillOwed = Math.max(0, unpaidTotal - depositAmount);
+        deductedFromDeposit = appliedToDeposit + Math.min(freeDeposit, unpaidTotal);
+        refundAmount = Math.max(0, freeDeposit - unpaidTotal);
+        stillOwed = Math.max(0, unpaidTotal - freeDeposit);
       } else {
         // Refunded / Forfeited: the deposit is not held any more, so it pays nothing and every unpaid penalty is paid online.
         deductedFromDeposit = 0;
@@ -189,6 +192,7 @@ const getMyBookingPenalties = async (req, res) => {
         depositAmount,
         depositStatus: deposit ? deposit.status : "NotCollected",
         depositSettled: !!settlement,
+        appliedToDeposit,                           // pesos of the held deposit already deducted for penalties
         penalties,
         penaltyTotal,
         deductedFromDeposit,
@@ -207,7 +211,7 @@ const getMyBookingPenalties = async (req, res) => {
         gatewayFeeKnown,                            // false = the fee could not be worked out just now
         gatewayFeePaid: gatewayFeePaidTotal,        // online fee already paid on this booking's penalties
         // Kept for older clients: signed deposit - unpaid penalties.
-        runningBalance: depositAmount !== null ? depositAmount - unpaidTotal : null,
+        runningBalance: depositAmount !== null ? depositAmount - appliedToDeposit - unpaidTotal : null,
         settlement,
       },
     });

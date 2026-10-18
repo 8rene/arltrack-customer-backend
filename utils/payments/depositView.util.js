@@ -35,6 +35,9 @@ const fromFlat = (p, opts) => {
   const settled = status === "Settled";
   const used = settled ? Math.min(amount, num(p.depositSettled)) : 0;
   const returned = settled ? num(p.depositReturned) : 0;
+  // Pesos of a still-Held deposit already used for penalties (payments.depositApplied, written when staff confirm a
+  // penalty). Settlement folds it into depositSettled.
+  const applied = status === "Held" ? Math.min(amount, num(p.depositApplied)) : 0;
   const unpaid = num(opts && opts.unpaid);   // unpaid Confirmed penalties right now (the live shortfall)
   let settlement = null;
   if (settled) {
@@ -53,6 +56,7 @@ const fromFlat = (p, opts) => {
   return {
     shape: "flat",
     amount,
+    applied,
     status,
     waivedReason: "",
     penaltyTotal: used,
@@ -72,6 +76,7 @@ const fromNested = (d) => {
   return {
     shape: "nested",
     amount,
+    applied: 0,
     status: d.status || "",
     waivedReason: d.waivedReason || "",
     penaltyTotal: s ? num(s.confirmedPenaltyTotal) : 0,

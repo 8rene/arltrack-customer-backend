@@ -144,7 +144,8 @@ const unpaidTotal = (list) =>
 /** Deposit still available to pay penalties: the payment's deposit while it is Held and not yet settled, else 0. */
 const heldDepositCover = (payment) => {
   const dep = payment ? getDepositView(payment) : null;
-  return dep && dep.status === "Held" && !dep.settlement ? num(dep.amount) : 0;
+  // Minus what was already taken for penalties when they were confirmed, so the same deposit is never counted twice.
+  return dep && dep.status === "Held" && !dep.settlement ? Math.max(0, num(dep.amount) - num(dep.applied)) : 0;
 };
 
 /** heldDepositCover() of ONE booking's payment. */
