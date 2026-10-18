@@ -344,6 +344,72 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
     }
     return { found: true, discount: true };
   }
+
+  // A security-deposit return sent back online (admin: settleDeposit with online = true): an "out" row with phase
+  // "deposit_return" and NO refund request. Same idea as the discount branch: settle the row itself, never downgrade a
+  // success. Failed -> staff are told to retry it or hand it back in store (the Refunds page has both buttons).
+  if (!entrySnap.empty && entrySnap.docs[0].data().phase === "deposit_return") {
+    const rowRef = entrySnap.docs[0].ref;
+    const rowStatus = refundStatus === "succeeded" ? "success" : "failed";
+    const out = await db.runTransaction(async (t) => {
+      const cur = await t.get(rowRef);
+      const d = cur.data();
+      if (d.status === rowStatus || d.status === "success") return { skip: true };
+      const at = new Date();
+      t.update(rowRef, {
+        status: rowStatus,
+        settledAt: rowStatus === "success" ? (d.settledAt || at) : null,
+        transactionErrorNote: rowStatus === "failed" ? "PayMongo reported the deposit refund as failed." : null,
+        updatedAt: at,
+      });
+      return { row: d, wasFailed: d.status === "failed" };
+    });
+    if (out.skip) return { found: true, skipped: true };
+    const row = out.row;
+    const amt = Number(row.amount) || 0;
+    recordTransactionLog({
+      // Same logID the in-store path uses, so a deposit is only ever logged as returned once. A failure gets its own id
+      // so it can never block the success that follows a retry.
+      logID: rowStatus === "success" ? `${row.paymentID}_deposit_settled` : `${row.paymentID}_deposit_return_failed_${refundID}`,
+      bookingID: row.bookingID, paymentID: row.paymentID, userID: row.userID || null,
+      type: "DepositReturn", amount: amt,
+      status: rowStatus === "success" ? "Success" : "Failed",
+      paymentMethod: "PayMongo", referenceNumber: refundID,
+      description: rowStatus === "success"
+        ? "Security deposit return confirmed by PayMongo."
+        : "PayMongo reported the security deposit return as failed.",
+    });
+    if (rowStatus === "success") {
+      await resolveNotification("refund_due", row.bookingID).catch(() => {});
+      if (row.userID) {
+        await createNotification({
+          type: "refund_completed",
+          userID: row.userID,
+          refID: row.bookingID || null,
+          title: "Deposit Returned",
+          message: `Your security deposit of \u20b1${amt.toLocaleString()} has been returned to your original payment method.`,
+        }).catch((e) => console.error("[PayMongo Webhook] failed to write the deposit-returned notification:", e.message));
+      }
+    } else {
+      await notifyStaff({
+        type: "refund_due",
+        refID: row.bookingID,
+        refCollection: "bookings",
+        title: "Deposit return needs follow-up",
+        message: `PayMongo could not complete the online return of the \u20b1${amt.toLocaleString()} deposit for booking ${row.bookingID}. Retry it or hand it back in store from the Refunds page.`,
+      }).catch((e) => console.error("[PayMongo Webhook] failed to notify staff about a failed deposit return:", e.message));
+    }
+    recordAudit({
+      action: "update",
+      description: rowStatus === "success"
+        ? `Deposit return of \u20b1${amt.toLocaleString()} confirmed by PayMongo for booking ${row.bookingID}.`
+        : `PayMongo reported the deposit return of \u20b1${amt.toLocaleString()} as failed for booking ${row.bookingID}.`,
+      userID: row.userID || null,
+      bookingID: row.bookingID || null,
+      paymentID: row.paymentID || null,
+    });
+    return { found: true, depositReturn: true };
+  }
   if (entryReqID) {
     const byEntry = await db.collection("refundRequests").doc(entryReqID).get();
     if (byEntry.exists) snap = { empty: false, docs: [byEntry] };
