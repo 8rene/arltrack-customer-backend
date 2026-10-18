@@ -14,7 +14,7 @@ const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/b
 const { notifyStaff } = require("../../services/notification/notification.service");
 const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
-const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, driverCapacityLockRef, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
+const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, driverCapacityLockRef, getFullChauffeurDays, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
 
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
@@ -1569,6 +1569,41 @@ const getDriverAvailability = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/bookings/driver-availability/days   (no auth, writes nothing)
+// Body: { from, to }  ("YYYY-MM-DD", Manila, at most 62 days apart)
+// Returns { fullDays: ["2026-11-03", ...] } -- the days on which no chauffeur is available for the WHOLE
+// day. The calendar shades them orange; they can still be booked Without Driver. Partly booked days are
+// not listed (the exact times decide those). Only dates come back: no drivers, no counts, no bookings.
+// Answers are cached for 30 s per range, since every customer's calendar asks for the same months.
+// ─────────────────────────────────────────────────────────────────────────────
+const FULL_DAYS_TTL_MS = 30 * 1000;
+const FULL_DAYS_MAX_SPAN_DAYS = 62;
+const fullDaysCache = new Map(); // "from|to" -> { at, fullDays }
+
+const getDriverFullDays = async (req, res) => {
+  const { from, to } = req.body || {};
+  const isDay = (d) => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(new Date(`${d}T00:00:00+08:00`).getTime());
+  if (!isDay(from) || !isDay(to)) return res.status(400).json({ message: "from and to must be YYYY-MM-DD dates." });
+  const spanDays = Math.round((new Date(`${to}T00:00:00Z`) - new Date(`${from}T00:00:00Z`)) / 86400000);
+  if (spanDays < 0 || spanDays > FULL_DAYS_MAX_SPAN_DAYS) {
+    return res.status(400).json({ message: `to must be on or after from, within ${FULL_DAYS_MAX_SPAN_DAYS} days.` });
+  }
+  try {
+    const key = `${from}|${to}`;
+    const hit = fullDaysCache.get(key);
+    if (hit && Date.now() - hit.at < FULL_DAYS_TTL_MS) return res.status(200).json({ fullDays: hit.fullDays });
+
+    const fullDays = await getFullChauffeurDays({ fromDay: from, toDay: to });
+    if (fullDaysCache.size > 200) fullDaysCache.clear(); // keep it small
+    fullDaysCache.set(key, { at: Date.now(), fullDays });
+    return res.status(200).json({ fullDays });
+  } catch (error) {
+    console.error("getDriverFullDays error:", error);
+    return res.status(500).json({ message: "Failed to load driver availability." });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/bookings/base-area   (no auth — read-only, same data the quote already reveals)
 // Returns the admin's base-area keywords + the out-of-area fee amounts so the map can
 // shade the base area and the booking page can explain the extra charges up front.
@@ -1583,4 +1618,4 @@ const getBaseArea = async (req, res) => {
   }
 };
 
-module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea, getDriverAvailability };
+module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea, getDriverAvailability, getDriverFullDays };
