@@ -72,7 +72,7 @@ const Payment = {
   // scripts/migrate-deposit-flat.js has run):
   //   securityDeposit      (above  ) the deposit amount
   depositStatus: "",            // "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"
-  depositSettled: 0,            // Settled only: pesos of the deposit USED to pay penalties (never more than the deposit;
+  depositSettled: 0,            // pesos of the deposit USED to pay penalties. Goes up with each penalty taken from the held deposit, final once Settled (never more than the deposit;
                                 // penalties beyond it stay on the penalties, amount - paidAmount, with their reasons).
   depositReturned: 0,           // Settled only: pesos handed back to the customer (depositSettled + this = the deposit)
                                 // The result (Refunded / Settled / OwedByCustomer) is derived, not stored: OwedByCustomer

@@ -210,7 +210,7 @@ const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSettings = 
     let penalties = null;   // penalty receipts only: the charges behind each payment and where each penalty stands
     let note = null;
     const depositAtMs = payment?.depositSettledAt ? new Date(toISO(payment.depositSettledAt)).getTime() : 0;
-    const depositPool = num(payment?.depositSettled) + num(payment?.depositApplied);   // + used before settlement (depositApplied is cleared when it settles)
+    const depositPool = num(payment?.depositSettled);   // grows with each penalty taken from the held deposit
 
     for (const [idx, r] of rows.entries()) {
       if (kind === "penalty") {
@@ -378,7 +378,7 @@ const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSettings 
     // A deposit offset moves no money, so it has no entry. penalties.paidAmount counts it, though: whatever paidAmount
     // holds beyond the real payments was covered by the security deposit. The deposit can only cover as much as was
     // actually used (payments.depositSettled), so that pool is handed out penalty by penalty, oldest first.
-    let depositPool = num(payment?.depositSettled) + num(payment?.depositApplied);   // + used before settlement (depositApplied is cleared when it settles)
+    let depositPool = num(payment?.depositSettled);   // grows with each penalty taken from the held deposit
     const penalties = [];
     for (const p of penaltyRows.sort((a, b) => String(toISO(a.createdAt) || "").localeCompare(String(toISO(b.createdAt) || "")) || String(a.id).localeCompare(String(b.id)))) {
       const status = p.status || "Confirmed";
@@ -414,7 +414,7 @@ const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSettings 
     const heldDeposit = num(payment?.securityDeposit);
     const returnedAmount = depositReturns.length ? sum(depositReturns) : num(payment?.depositReturned);
     const deposit = heldDeposit > 0
-      ? { held: heldDeposit, status: payment?.depositStatus || null, usedForPenalties: num(payment?.depositSettled) + num(payment?.depositApplied), returned: returnedAmount }
+      ? { held: heldDeposit, status: payment?.depositStatus || null, usedForPenalties: num(payment?.depositSettled), returned: returnedAmount }
       : null;
     const refundTotal = sum(refunds);
 

@@ -111,7 +111,7 @@ const getMyBookingPenalties = async (req, res) => {
     // createPenaltyPaymentLink charges, so the amount shown here is the amount charged. A failed settings read only drops
     // the fee figure (gatewayFeeKnown: false); it never blocks the card.
     const depositHeld = !!(deposit && deposit.status === "Held" && !settlement);
-    // Already used for penalties when they were confirmed (payments.depositApplied): that part is paid and gone.
+    // Already used for penalties when they were confirmed (payments.depositSettled): that part is paid and gone.
     const appliedToDeposit = depositHeld ? (deposit.applied || 0) : 0;
     const freeDeposit = depositHeld ? Math.max(0, depositAmount - appliedToDeposit) : 0;   // still available for unpaid penalties
     const depositCover = freeDeposit;

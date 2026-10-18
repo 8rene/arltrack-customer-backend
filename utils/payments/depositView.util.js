@@ -33,11 +33,11 @@ const fromFlat = (p, opts) => {
   const status = String(p.depositStatus);
   const amount = num(p.securityDeposit) || num(p.depositFee);   // a waived deposit keeps its amount, as before
   const settled = status === "Settled";
-  const used = settled ? Math.min(amount, num(p.depositSettled)) : 0;
+  const used = (settled || status === "Held") ? Math.min(amount, num(p.depositSettled)) : 0;   // grows with each penalty while Held, final once Settled
   const returned = settled ? num(p.depositReturned) : 0;
-  // Pesos of a still-Held deposit already used for penalties (payments.depositApplied, written when staff confirm a
-  // penalty). Settlement folds it into depositSettled.
-  const applied = status === "Held" ? Math.min(amount, num(p.depositApplied)) : 0;
+  // Pesos of a still-Held deposit already used for penalties: the same depositSettled figure, written when staff
+  // confirm a penalty and not final until settlement.
+  const applied = status === "Held" ? used : 0;
   const unpaid = num(opts && opts.unpaid);   // unpaid Confirmed penalties right now (the live shortfall)
   let settlement = null;
   if (settled) {
