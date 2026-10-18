@@ -37,6 +37,8 @@ const SETTINGS_DEFAULTS = {
   driversFeeBaseArea: 1000,
   driversFeeOutsideArea: 1500,
   baseAreaKeywords: ["manila", "bulacan"],
+  // Minimum gap between two chauffeur trips (see utils/drivers/driverCapacity.util.js). Admin-editable.
+  driverBufferMinutes: 120,
 };
 
 // Short in-memory cache so a burst of live quote requests while the

@@ -14,6 +14,7 @@ const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/b
 const { notifyStaff } = require("../../services/notification/notification.service");
 const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
+const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, driverCapacityLockRef, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
 
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
@@ -774,6 +775,13 @@ const createBooking = async (req, res) => {
       constructor(body) { super(body.message); this.body = body; }
     }
 
+    // Chauffeur bookings also need a free driver. Headcount + buffer are loaded ONCE here (the
+    // transaction callback below can be retried); the bookings themselves are read inside it.
+    const needsDriver = driveType === "chauffeur";
+    const chauffeurInputs = needsDriver
+      ? { eligibleDrivers: await countEligibleDrivers(endDateTime), bufferMs: await getDriverBufferMs() }
+      : null;
+
     try {
       await db.runTransaction(async (tx) => {
         const lockRef = db.collection("carLocks").doc(String(carID));
@@ -881,8 +889,20 @@ const createBooking = async (req, res) => {
           });
         }
 
+        // Driver capacity (chauffeur only): the busiest moment in this window, counting assigned AND
+        // unassigned chauffeur bookings, must be below the number of eligible drivers. The shared lock
+        // doc is read here and written below, so two customers taking the last driver at the same
+        // moment are serialised -- the second retries, sees the first, and gets the 409.
+        if (needsDriver) {
+          const cap = await checkChauffeurCapacity({ startDateTime, endDateTime, tx, ...chauffeurInputs });
+          if (!cap.available) {
+            throw new BookingConflict({ message: NO_DRIVER_MESSAGE, code: "NO_DRIVER_AVAILABLE" });
+          }
+        }
+
         // ---- then all writes ----
         tx.set(lockRef, { carID, lastBookingID: bookingID, updatedAt: now }, { merge: true });
+        if (needsDriver) tx.set(driverCapacityLockRef(), { lastBookingID: bookingID, updatedAt: now }, { merge: true });
         tx.set(bookingRef, bookingData);
         tx.set(paymentRef, paymentData);
         tx.set(bookingSessionRef, bookingSessionData);
@@ -1522,6 +1542,33 @@ const getCodingNotice = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/bookings/driver-availability   (no auth -- same reasoning as /quote: called while the
+// customer is still picking dates, writes nothing)
+// Body: { startDate, startTime, endDate, endTime }  (Manila wall-clock, same fields as /quote)
+// Returns { available: true } or { available: false, message }. That is all: no driver names,
+// no counts, nothing about other customers' bookings. This is a convenience for the UI only --
+// createBooking re-checks inside its transaction and is what actually enforces it.
+// ─────────────────────────────────────────────────────────────────────────────
+const getDriverAvailability = async (req, res) => {
+  const { startDate, startTime, endDate, endTime } = req.body || {};
+  if (!startDate || !startTime) {
+    return res.status(400).json({ message: "startDate and startTime are required." });
+  }
+  try {
+    const startDateTime = new Date(`${startDate}T${startTime}:00+08:00`);
+    const endDateTime   = endDate && endTime ? new Date(`${endDate}T${endTime}:00+08:00`) : startDateTime;
+    if (Number.isNaN(startDateTime.getTime()) || Number.isNaN(endDateTime.getTime()) || endDateTime < startDateTime) {
+      return res.status(400).json({ message: "Invalid start or end date/time." });
+    }
+    const { available } = await checkChauffeurCapacity({ startDateTime, endDateTime });
+    return res.status(200).json(available ? { available: true } : { available: false, message: NO_DRIVER_MESSAGE });
+  } catch (error) {
+    console.error("getDriverAvailability error:", error);
+    return res.status(500).json({ message: "Failed to check driver availability." });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/bookings/base-area   (no auth — read-only, same data the quote already reveals)
 // Returns the admin's base-area keywords + the out-of-area fee amounts so the map can
 // shade the base area and the booking page can explain the extra charges up front.
@@ -1536,4 +1583,4 @@ const getBaseArea = async (req, res) => {
   }
 };
 
-module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea };
+module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea, getDriverAvailability };
