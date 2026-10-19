@@ -26,6 +26,10 @@ export const CustomerNotification = {
   //   "booking_cancelled"  — booking cancelled (by customer or by staff)
   //   "booking_expired"    — booking's start time passed with no confirmed payment
   //   "booking_rescheduled"— staff changed the booking's date/time
+  //   "terms_updated"      — written by the ADMIN app to EVERY user when a new Terms &
+  //                          Conditions version is published. refCollection "terms", refID is
+  //                          the new termsVersionID (NOT a bookingID); `version` is stored
+  //                          alongside. The bell opens /terms for it, not a booking.
 
   userID: "",            // which customer account this notification belongs to
   refID: "",              // bookingID this notification is about

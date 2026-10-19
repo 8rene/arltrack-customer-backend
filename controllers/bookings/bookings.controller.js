@@ -1,5 +1,4 @@
 const { db } = require("../../config/firebaseConnection/firebase");
-const { isWithinServiceArea } = require("../location/location.controller");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { checkTermsAcceptance, termsRequired } = require("../../utils/terms/terms.service");
 const { makeZone } = createBookingSession;
@@ -158,7 +157,7 @@ const getCodingCities = async (req, res) => {
 // computing pricing itself.
 // ─────────────────────────────────────────────────────────────────────────────
 const getBookingQuote = async (req, res) => {
-  const { carID, duration, startDate, startTime, endDate, endTime, destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, driveType, paymentAmount } = req.body;
+  const { carID, duration, startDate, startTime, endDate, endTime, destination, destinationCity, destinationProvince, destinationCounty, extraDestinations, pickupCity, pickupProvince, pickupCounty, driveType, paymentAmount } = req.body;
 
   if (!carID || !duration) {
     return res.status(400).json({ message: "carID and duration are required." });
@@ -181,6 +180,7 @@ const getBookingQuote = async (req, res) => {
       destinationCity,
       destinationProvince,
       destinationCounty,
+      extraDestinations,
       pickupCity,
       pickupProvince,
       pickupCounty,
@@ -396,16 +396,28 @@ const createBooking = async (req, res) => {
         Math.abs(st.storeLat - pickupLat) < 1e-6 && Math.abs(st.storeLng - pickupLng) < 1e-6;
     }
 
+    // Self-drive is only available when the customer picks up in-store; any other
+    // pickup location must be booked with a chauffeur.
+    if (driveType !== "chauffeur" && !isStorePickup) {
+      return res.status(400).json({
+        code: "SELF_DRIVE_REQUIRES_STORE_PICKUP",
+        message: "Self-drive is only available for in-store pickup. Please book with a driver or choose in-store pickup.",
+      });
+    }
+
+    // Pickup can be anywhere in the Philippines (no region restriction). The only
+    // server-side guard is that the pin falls inside the country's bounding box;
+    // being inside or outside the base area only changes the fees (see pricing.js).
     if (!isStorePickup) {
-      const ok = await isWithinServiceArea([pickupRegion, pickupProvince, pickupCity]);
-      if (!ok) {
+      const inPH = pickupLat >= 4.5 && pickupLat <= 21.5 && pickupLng >= 116.0 && pickupLng <= 127.0;
+      if (!inPH) {
         return res.status(400).json({
-          message: "Pickup is only available within our service regions. Please choose a different pickup location.",
+          message: "Pickup is only available within the Philippines. Please choose a different pickup location.",
         });
       }
     }
   } catch (err) {
-    console.error("createBooking pickup service-area check failed:", err);
+    console.error("createBooking pickup location check failed:", err);
     return res.status(500).json({ message: "Could not verify the pickup location. Please try again." });
   }
 
@@ -455,6 +467,7 @@ const createBooking = async (req, res) => {
       destinationCity,
       destinationProvince,
       destinationCounty,
+      extraDestinations,
       pickupCity,
       pickupProvince,
       pickupCounty,

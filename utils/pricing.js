@@ -122,13 +122,14 @@ const isBaseArea = (destination, { destinationCity, destinationProvince, destina
   return keywords.some((k) => d.includes(k));
 };
 
-// Which location(s) decide the "outside the base area" charge (extra fee + the
-// higher chauffeur fee):
-//   "either"      — outside if the PICKUP or the DESTINATION is outside
-//   "pickup"      — only the pickup counts (current behaviour — the destination
-//                   is for documentation only, so it must not affect the fee)
-//   "destination" — only the destination counts (the old behaviour)
-const BASE_AREA_BASIS = "pickup";
+// How the "outside the base area" charges work:
+//   - EXTRA FEE (+extraFeeOutsideArea): added when the PICKUP or ANY destination
+//     (the main one or an additional stop) is outside the base area. A destination
+//     outside the base area costs the extra fee even when the pickup is inside it.
+//   - DRIVER'S FEE: depends on the PICKUP only — driversFeeBaseArea when the pickup
+//     is inside the base area, driversFeeOutsideArea when it is outside.
+// Pickup itself can be anywhere in the Philippines; the base area only changes fees.
+const BASE_AREA_BASIS = "either";
 
 // True only when the pin gave us a city/province AND neither matches a base-area
 // keyword. A pin with no structured place (e.g. the in-store pickup, which is the
@@ -144,13 +145,17 @@ const isOutsideByPin = ({ city, province, county } = {}, baseAreaKeywords = SETT
 };
 
 // Pickup / destination / overall outside-area flags for one booking.
-const computeAreaFlags = ({ destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty }, baseAreaKeywords) => {
-  const destinationOutside = !isBaseArea(destination, { destinationCity, destinationProvince, destinationCounty }, baseAreaKeywords);
+//   destinationOutside — the main destination OR any additional stop is outside
+//   pickupOutside      — the pickup is outside (this alone decides the driver's fee)
+//   outsideArea        — pickup or destination outside (this decides the extra fee)
+// Additional stops without a map pin can't be judged, so they are never charged.
+const computeAreaFlags = ({ destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, extraDestinations }, baseAreaKeywords) => {
+  const mainOutside   = !isBaseArea(destination, { destinationCity, destinationProvince, destinationCounty }, baseAreaKeywords);
+  const extraOutside  = (Array.isArray(extraDestinations) ? extraDestinations : [])
+    .some((d) => d && isOutsideByPin({ city: d.city, province: d.province, county: d.county }, baseAreaKeywords));
+  const destinationOutside = mainOutside || extraOutside;
   const pickupOutside      = isOutsideByPin({ city: pickupCity, province: pickupProvince, county: pickupCounty }, baseAreaKeywords);
-  const outsideArea =
-    BASE_AREA_BASIS === "pickup"      ? pickupOutside :
-    BASE_AREA_BASIS === "destination" ? destinationOutside :
-    (pickupOutside || destinationOutside);
+  const outsideArea        = pickupOutside || destinationOutside;
   return { pickupOutside, destinationOutside, outsideArea };
 };
 
@@ -274,9 +279,9 @@ const computePenaltyCheckoutFees = (items = [], fallbackPercent = 0) => {
 //
 // ASYNC — awaits getSystemSettings() internally (cached, see above) to pull
 // every fee amount from the admin-panel-controlled systemSettings doc.
-const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, durationType, destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, driveType }) => {
+const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, durationType, destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, extraDestinations, driveType }) => {
   const settings = await getSystemSettings();
-  const areaFlags = computeAreaFlags({ destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty }, settings.baseAreaKeywords);
+  const areaFlags = computeAreaFlags({ destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, extraDestinations }, settings.baseAreaKeywords);
   const { days, diffHrs } = calcBillableDays(startDateTime, endDateTime, durationType);
 
   // No valid date range selected yet — nothing should be charged at all,
@@ -289,9 +294,9 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
 
   const rentalFee = days * (Number(pricePerDay) || 0);
 
-  const baseArea = !areaFlags.outsideArea;
-  const extraFee   = baseArea ? 0 : settings.extraFeeOutsideArea;
-  const driversFee = driveType === "chauffeur" ? (baseArea ? settings.driversFeeBaseArea : settings.driversFeeOutsideArea) : 0;
+  // Extra fee: pickup OR any destination outside. Driver's fee: pickup only.
+  const extraFee   = areaFlags.outsideArea ? settings.extraFeeOutsideArea : 0;
+  const driversFee = driveType === "chauffeur" ? (areaFlags.pickupOutside ? settings.driversFeeOutsideArea : settings.driversFeeBaseArea) : 0;
 
   // Refundable security deposit, charged up front with everything else.
   const securityDeposit = Math.max(0, Number(settings.securityDepositAmount) || 0);
