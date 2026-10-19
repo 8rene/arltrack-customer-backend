@@ -122,12 +122,13 @@ const isBaseArea = (destination, { destinationCity, destinationProvince, destina
   return keywords.some((k) => d.includes(k));
 };
 
-// How the "outside the base area" charges work:
-//   - EXTRA FEE (+extraFeeOutsideArea): added when the PICKUP or ANY destination
-//     (the main one or an additional stop) is outside the base area. A destination
-//     outside the base area costs the extra fee even when the pickup is inside it.
-//   - DRIVER'S FEE: depends on the PICKUP only — driversFeeBaseArea when the pickup
-//     is inside the base area, driversFeeOutsideArea when it is outside.
+// How the "outside the base area" charge works — it is ONE yes/no flag (like a checkbox):
+// if the PICKUP or ANY destination (the main one or an additional stop) is outside the
+// base area, the surcharge applies ONCE. More locations outside never add it again.
+//   - Self-drive (no driver): the surcharge is the separate EXTRA FEE (+extraFeeOutsideArea).
+//   - With a driver: the surcharge is already inside the DRIVER'S FEE — it is
+//     driversFeeBaseArea normally and driversFeeOutsideArea when the flag is on
+//     (e.g. 1,000 -> 1,500). No separate extra fee is added on top, so it is never charged twice.
 // Pickup itself can be anywhere in the Philippines; the base area only changes fees.
 const BASE_AREA_BASIS = "either";
 
@@ -146,17 +147,24 @@ const isOutsideByPin = ({ city, province, county } = {}, baseAreaKeywords = SETT
 
 // Pickup / destination / overall outside-area flags for one booking.
 //   destinationOutside — the main destination OR any additional stop is outside
-//   pickupOutside      — the pickup is outside (this alone decides the driver's fee)
-//   outsideArea        — pickup or destination outside (this decides the extra fee)
+//   pickupOutside      — the pickup is outside
+//   outsideArea        — pickup or any destination outside (this is the one-time surcharge flag)
+//   outsideDestinationIds — which destinations are outside: 'primary' for the main one, then
+//                        each additional stop's own id (so the page can say "Destination 2")
 // Additional stops without a map pin can't be judged, so they are never charged.
 const computeAreaFlags = ({ destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, extraDestinations }, baseAreaKeywords) => {
   const mainOutside   = !isBaseArea(destination, { destinationCity, destinationProvince, destinationCounty }, baseAreaKeywords);
+  const outsideExtraIds = (Array.isArray(extraDestinations) ? extraDestinations : [])
+    .filter((d) => d && isOutsideByPin({ city: d.city, province: d.province, county: d.county }, baseAreaKeywords))
+    .map((d) => d.id)
+    .filter((id) => id != null && id !== "");
   const extraOutside  = (Array.isArray(extraDestinations) ? extraDestinations : [])
     .some((d) => d && isOutsideByPin({ city: d.city, province: d.province, county: d.county }, baseAreaKeywords));
+  const outsideDestinationIds = [...(mainOutside ? ["primary"] : []), ...outsideExtraIds];
   const destinationOutside = mainOutside || extraOutside;
   const pickupOutside      = isOutsideByPin({ city: pickupCity, province: pickupProvince, county: pickupCounty }, baseAreaKeywords);
   const outsideArea        = pickupOutside || destinationOutside;
-  return { pickupOutside, destinationOutside, outsideArea };
+  return { pickupOutside, destinationOutside, outsideArea, outsideDestinationIds };
 };
 
 // What the booking page needs to explain the base area up front: the keywords to
@@ -294,9 +302,12 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
 
   const rentalFee = days * (Number(pricePerDay) || 0);
 
-  // Extra fee: pickup OR any destination outside. Driver's fee: pickup only.
-  const extraFee   = areaFlags.outsideArea ? settings.extraFeeOutsideArea : 0;
-  const driversFee = driveType === "chauffeur" ? (areaFlags.pickupOutside ? settings.driversFeeOutsideArea : settings.driversFeeBaseArea) : 0;
+  // ONE outside-area surcharge, charged once (pickup OR any destination outside):
+  //   with a driver -> it is the higher driver's fee (no separate extra fee on top)
+  //   self-drive    -> it is the separate extra fee
+  const isChauffeur = driveType === "chauffeur";
+  const extraFee   = (areaFlags.outsideArea && !isChauffeur) ? settings.extraFeeOutsideArea : 0;
+  const driversFee = isChauffeur ? (areaFlags.outsideArea ? settings.driversFeeOutsideArea : settings.driversFeeBaseArea) : 0;
 
   // Refundable security deposit, charged up front with everything else.
   const securityDeposit = Math.max(0, Number(settings.securityDepositAmount) || 0);
