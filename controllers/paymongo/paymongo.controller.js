@@ -11,7 +11,7 @@ const { chargeFromPaymentResource, pickPaidPayment, feeFromRefundResource, retai
 const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefundRequests } = require("../../utils/payments/paymentEntries.util");
 const { createPendingRefundRow, attachRefundRowInfo } = require("../../utils/bookings/cancellationRequests.util");
 const { QRPH_BOOKING_NOTICE, qrphRefundNotice } = require("../../utils/payments/refundNotice.util");
-const { sessionIDForPayment, findPaymentSnapBySessionID } = require("../../utils/payments/paymentSession.util");
+const { sessionIDForPayment, phaseForSession, findPaymentSnapBySessionID } = require("../../utils/payments/paymentSession.util");
 
 const { handlePenaltyWebhookPaid } = require("./penaltyPayment.controller");
 
@@ -755,7 +755,8 @@ const handleWebhook = async (req, res) => {
       }
 
       const paymentDoc = paymentSnap.docs[0];
-      const phase      = phaseOf(paymentDoc.data());
+      // The phase comes from WHICH checkout paid, not from the payment's current phase (see phaseForSession).
+      const phase      = (await phaseForSession(paymentDoc, sessionID)) || phaseOf(paymentDoc.data());
 
       // The checkout_session payload embeds the underlying PayMongo payment
       // under attributes.payments — that payment's own id (not the session id)
@@ -786,7 +787,7 @@ const handleWebhook = async (req, res) => {
       if (paymentSnap && !paymentSnap.empty) {
         const failedDoc     = paymentSnap.docs[0];
         const failedPayment = failedDoc.data();
-        const phase         = phaseOf(failedPayment);
+        const phase         = (await phaseForSession(failedDoc, sessionID)) || phaseOf(failedPayment);
 
         // A "failed" event can arrive after the customer already retried
         // successfully on the same checkout page — never downgrade a paid phase.
