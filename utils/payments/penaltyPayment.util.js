@@ -40,6 +40,7 @@ const { recordAudit } = require("../auditLogs/auditLogs.util");
 const { createNotification } = require("../../services/notification/notification.service");
 const { getSystemSettings, computePenaltyGatewayFee, computePenaltyCheckoutFees } = require("../pricing");
 const { getDepositView } = require("./depositView.util");
+const { getDiscountFigures } = require("./discountLedger.util");
 
 const ENTRIES   = "paymentEntries";
 const PENALTIES = "penalties";
@@ -141,17 +142,40 @@ const unpaidTotal = (list) =>
 // Once the deposit is no longer held (already settled and returned, refunded, waived, forfeited, or none was recorded)
 // every unpaid penalty is paid online in full, fee included.
 
-/** Deposit still available to pay penalties: the payment's deposit while it is Held and not yet settled, else 0. */
+/**
+ * What is still available to pay penalties WITHOUT an online payment: the payment's deposit while it is Held and not yet
+ * settled, plus the discount credit held for the customer (a discount given on a fully paid booking, see discountLedger.js).
+ * Settlement pays each penalty from the deposit first, then from the credit (admin applyPenaltyToDeposit / planSettlement), and
+ * neither is an online payment, so neither carries the gateway fee. Else 0.
+ */
 const heldDepositCover = (payment) => {
   const dep = payment ? getDepositView(payment) : null;
+  if (!(dep && dep.status === "Held" && !dep.settlement)) return 0;
   // Minus what was already taken for penalties when they were confirmed, so the same deposit is never counted twice.
-  return dep && dep.status === "Held" && !dep.settlement ? Math.max(0, num(dep.amount) - num(dep.applied)) : 0;
+  const deposit = Math.max(0, num(dep.amount) - num(dep.applied));
+  // getDiscountFigures().credit is 0 for a legacy discount (refunded on the spot) and for no discount.
+  return round2(deposit + getDiscountFigures(payment).credit);
+};
+
+/** The discount credit part of heldDepositCover(): 0 unless the deposit is Held and unsettled and credit is held. */
+const heldCreditOf = (payment) => {
+  const dep = payment ? getDepositView(payment) : null;
+  if (!(dep && dep.status === "Held" && !dep.settlement)) return 0;
+  return round2(getDiscountFigures(payment).credit);
 };
 
 /** heldDepositCover() of ONE booking's payment. */
 const heldDepositCoverForBooking = async (bookingID) => {
   const snap = await db.collection("payments").where("bookingID", "==", bookingID).limit(1).get();
   return snap.empty ? 0 : heldDepositCover(snap.docs[0].data());
+};
+
+/** { [bookingID]: heldCreditOf } for every payment of this customer: how much of each booking's cover is discount credit. */
+const heldCreditByBooking = async (userID) => {
+  const snap = await db.collection("payments").where("userID", "==", userID).get();
+  const out = {};
+  snap.docs.forEach((d) => { const p = d.data(); if (p.bookingID) out[p.bookingID] = heldCreditOf(p); });
+  return out;
 };
 
 /** { [bookingID]: heldDepositCover } for every payment of this customer (one read, for the all-bookings views). */
@@ -350,5 +374,5 @@ const settlePenaltyCheckout = async ({ groupID, paymongoPaymentID = null, charge
 module.exports = {
   listUnpaidForBooking, unpaidTotal, owedOn, listPendingCheckouts, listPendingGroups, getGroupRows,
   writePendingPenaltyRows, cancelPendingGroup, settlePenaltyCheckout,
-  heldDepositCover, heldDepositCoverForBooking, heldDepositCoverByBooking, planOnlinePayment,
+  heldDepositCover, heldDepositCoverForBooking, heldDepositCoverByBooking, heldCreditByBooking, planOnlinePayment,
 };

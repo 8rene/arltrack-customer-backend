@@ -7,9 +7,10 @@ const { createNotification, notifyStaff, resolveNotification } = require("../../
 const { axios, PAYMONGO_V1, paymongoHeaders, channelLabel } = require("../../utils/payments/paymongoClient.util");
 const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = require("../../utils/payments/settlePayment.util");
 const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
-const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
+const { chargeFromPaymentResource, pickPaidPayment, feeFromRefundResource } = require("../../utils/payments/paymongoFee.util");
 const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefundRequests } = require("../../utils/payments/paymentEntries.util");
 const { createPendingRefundRow, attachRefundRowInfo } = require("../../utils/bookings/cancellationRequests.util");
+const { QRPH_BOOKING_NOTICE, qrphRefundNotice } = require("../../utils/payments/refundNotices.util");
 const { sessionIDForPayment, findPaymentSnapBySessionID } = require("../../utils/payments/paymentSession.util");
 
 const { handlePenaltyWebhookPaid } = require("./penaltyPayment.controller");
@@ -57,6 +58,9 @@ const createPaymentLink = async (req, res) => {
   }
 
   const paymentMethodTypes = CHANNEL_MAP[paymentMethod] || ["qrph"];
+  // QR Ph can't be refunded online (PayMongo refuses it): the customer is told BEFORE they pay that a refund is collected in store.
+  const isQrph = paymentMethodTypes.length === 1 && paymentMethodTypes[0] === "qrph";
+  const qrphNotice = isQrph ? { notice: QRPH_BOOKING_NOTICE, refundInStoreOnly: true } : {};
 
   try {
     // 1. Verify the payment doc belongs to this user
@@ -189,6 +193,7 @@ const createPaymentLink = async (req, res) => {
           message:     "Payment link already exists.",
           checkoutUrl: payment.checkoutUrl,
           linkID:      existingSessionID,
+          ...qrphNotice,
         });
       }
       // expired → create a new session below
@@ -261,6 +266,7 @@ const createPaymentLink = async (req, res) => {
       message: "Payment link created.",
       checkoutUrl,
       linkID: sessionID,
+      ...qrphNotice,
     });
 
   } catch (error) {
@@ -280,7 +286,13 @@ const createPaymentLink = async (req, res) => {
 // issued (admin: markManualRefundIssued). Runs in a transaction so two parts
 // reporting at the same moment can't overwrite each other. Idempotent.
 // ─────────────────────────────────────────────────────────────────────────────
-const applyRefundPartResult = async ({ refundID, refundStatus }) => {
+// refundFee: the fee PayMongo reports on this refund, in pesos (null when it reports none). It is written on the settled "out" row
+// as transactionFee, only on success and never over a fee already saved. The charge's own fee is saved elsewhere (settlePayment).
+const feeOnSuccess = (rowStatus, current, refundFee) =>
+  rowStatus === "success" && refundFee !== null && refundFee !== undefined && (current === undefined || current === null)
+    ? { transactionFee: refundFee } : {};
+
+const applyRefundPartResult = async ({ refundID, refundStatus, refundFee = null }) => {
   // The re_... id is the referenceNumber of the refund's "out" row in paymentEntries; that row points at the request.
   let snap = { empty: true };
   const entrySnap = await db.collection("paymentEntries").where("referenceNumber", "==", refundID).where("direction", "==", "out").limit(1).get();
@@ -300,6 +312,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
         status: rowStatus,
         settledAt: rowStatus === "success" ? (d.settledAt || at) : null,
         transactionErrorNote: rowStatus === "failed" ? "PayMongo reported the discount refund as failed." : null,
+        ...feeOnSuccess(rowStatus, d.transactionFee, refundFee),
         updatedAt: at,
       });
       return { row: d, wasFailed: d.status === "failed" };
@@ -345,10 +358,14 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
     return { found: true, discount: true };
   }
 
-  // A security-deposit return sent back online (admin: settleDeposit with online = true): an "out" row with phase
-  // "deposit_return" and NO refund request. Same idea as the discount branch: settle the row itself, never downgrade a
+  // A payout sent back online with NO refund request: the security deposit (phase "deposit_return") or the discount credit
+  // held for the customer (phase "discount_return", see discountLedger.js). The admin writes each as its own "out" row, so
+  // each is settled on its own. Same idea as the discount branch above: settle the row itself, never downgrade a
   // success. Failed -> staff are told to retry it or hand it back in store (the Refunds page has both buttons).
-  if (!entrySnap.empty && entrySnap.docs[0].data().phase === "deposit_return") {
+  const payoutPhase = !entrySnap.empty ? entrySnap.docs[0].data().phase : null;
+  if (payoutPhase === "deposit_return" || payoutPhase === "discount_return") {
+    const isCredit = payoutPhase === "discount_return";
+    const word = isCredit ? "discount" : "deposit";
     const rowRef = entrySnap.docs[0].ref;
     const rowStatus = refundStatus === "succeeded" ? "success" : "failed";
     const out = await db.runTransaction(async (t) => {
@@ -359,7 +376,8 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
       t.update(rowRef, {
         status: rowStatus,
         settledAt: rowStatus === "success" ? (d.settledAt || at) : null,
-        transactionErrorNote: rowStatus === "failed" ? "PayMongo reported the deposit refund as failed." : null,
+        transactionErrorNote: rowStatus === "failed" ? `PayMongo reported the ${word} refund as failed.` : null,
+        ...feeOnSuccess(rowStatus, d.transactionFee, refundFee),
         updatedAt: at,
       });
       return { row: d, wasFailed: d.status === "failed" };
@@ -368,47 +386,66 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
     const row = out.row;
     const amt = Number(row.amount) || 0;
     recordTransactionLog({
-      // Same logID the in-store path uses, so a deposit is only ever logged as returned once. A failure gets its own id
+      // Same logID the in-store path uses, so a payout is only ever logged as returned once. A failure gets its own id
       // so it can never block the success that follows a retry.
-      logID: rowStatus === "success" ? `${row.paymentID}_deposit_settled` : `${row.paymentID}_deposit_return_failed_${refundID}`,
+      logID: rowStatus === "success"
+        ? (isCredit ? `${row.paymentID}_discount_returned` : `${row.paymentID}_deposit_settled`)
+        : `${row.paymentID}_${payoutPhase}_failed_${refundID}`,
       bookingID: row.bookingID, paymentID: row.paymentID, userID: row.userID || null,
-      type: "DepositReturn", amount: amt,
+      type: isCredit ? "Discount" : "DepositReturn", amount: amt,
       status: rowStatus === "success" ? "Success" : "Failed",
       paymentMethod: "PayMongo", referenceNumber: refundID,
       description: rowStatus === "success"
-        ? "Security deposit return confirmed by PayMongo."
-        : "PayMongo reported the security deposit return as failed.",
+        ? (isCredit ? "Discount credit return confirmed by PayMongo." : "Security deposit return confirmed by PayMongo.")
+        : (isCredit ? "PayMongo reported the discount credit return as failed." : "PayMongo reported the security deposit return as failed."),
     });
     if (rowStatus === "success") {
-      await resolveNotification("refund_due", row.bookingID).catch(() => {});
+      // The "refund due" alert is per booking. Only clear it when the booking's OTHER payout (the deposit when this is the
+      // discount, or the discount when this is the deposit) is not still failed, or its alert would be lost.
+      let otherStillFailed = false;
+      try {
+        const sib = await db.collection("paymentEntries").where("paymentID", "==", row.paymentID).where("direction", "==", "out").get();
+        const millis = (v) => { const dt = v && v.toDate ? v.toDate() : v ? new Date(v) : null; return dt && !isNaN(dt) ? dt.getTime() : 0; };
+        const newest = {};
+        sib.docs.forEach((doc) => {
+          const e = doc.data();
+          if (e.phase !== "deposit_return" && e.phase !== "discount_return") return;
+          const at = millis(e.createdAt || e.processedAt);
+          if (!newest[e.phase] || at >= newest[e.phase].at) newest[e.phase] = { at, status: e.status };
+        });
+        otherStillFailed = Object.entries(newest).some(([phase, v]) => phase !== payoutPhase && v.status === "failed");
+      } catch (e) { /* best-effort: worst case the alert stays up until staff clear it */ otherStillFailed = true; }
+      if (!otherStillFailed) await resolveNotification("refund_due", row.bookingID).catch(() => {});
       if (row.userID) {
         await createNotification({
           type: "refund_completed",
           userID: row.userID,
           refID: row.bookingID || null,
-          title: "Deposit Returned",
-          message: `Your security deposit of \u20b1${amt.toLocaleString()} has been returned to your original payment method.`,
-        }).catch((e) => console.error("[PayMongo Webhook] failed to write the deposit-returned notification:", e.message));
+          title: isCredit ? "Discount Returned" : "Deposit Returned",
+          message: isCredit
+            ? `Your discount of \u20b1${amt.toLocaleString()} has been returned to your original payment method.`
+            : `Your security deposit of \u20b1${amt.toLocaleString()} has been returned to your original payment method.`,
+        }).catch((e) => console.error(`[PayMongo Webhook] failed to write the ${word}-returned notification:`, e.message));
       }
     } else {
       await notifyStaff({
         type: "refund_due",
         refID: row.bookingID,
         refCollection: "bookings",
-        title: "Deposit return needs follow-up",
-        message: `PayMongo could not complete the online return of the \u20b1${amt.toLocaleString()} deposit for booking ${row.bookingID}. Retry it or hand it back in store from the Refunds page.`,
-      }).catch((e) => console.error("[PayMongo Webhook] failed to notify staff about a failed deposit return:", e.message));
+        title: isCredit ? "Discount return needs follow-up" : "Deposit return needs follow-up",
+        message: `PayMongo could not complete the online return of the \u20b1${amt.toLocaleString()} ${word} for booking ${row.bookingID}. Retry it or hand it back in store from the Refunds page.`,
+      }).catch((e) => console.error(`[PayMongo Webhook] failed to notify staff about a failed ${word} return:`, e.message));
     }
     recordAudit({
       action: "update",
       description: rowStatus === "success"
-        ? `Deposit return of \u20b1${amt.toLocaleString()} confirmed by PayMongo for booking ${row.bookingID}.`
-        : `PayMongo reported the deposit return of \u20b1${amt.toLocaleString()} as failed for booking ${row.bookingID}.`,
+        ? `${isCredit ? "Discount" : "Deposit"} return of \u20b1${amt.toLocaleString()} confirmed by PayMongo for booking ${row.bookingID}.`
+        : `PayMongo reported the ${word} return of \u20b1${amt.toLocaleString()} as failed for booking ${row.bookingID}.`,
       userID: row.userID || null,
       bookingID: row.bookingID || null,
       paymentID: row.paymentID || null,
     });
-    return { found: true, depositReturn: true };
+    return isCredit ? { found: true, discountReturn: true } : { found: true, depositReturn: true };
   }
   if (entryReqID) {
     const byEntry = await db.collection("refundRequests").doc(entryReqID).get();
@@ -446,7 +483,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
       const newStatus = anyFailed ? "Failed" : (allSucceeded && !manualOutstanding ? "Refunded" : r.status);
       const at = new Date();
 
-      t.update(target.ref, { status: rowStatus, settledAt: rowStatus === "success" ? (td.settledAt || at) : null, updatedAt: at });
+      t.update(target.ref, { status: rowStatus, settledAt: rowStatus === "success" ? (td.settledAt || at) : null, ...feeOnSuccess(rowStatus, td.transactionFee, refundFee), updatedAt: at });
       t.update(reqRef, { status: newStatus, updatedAt: at });
       return {
         request:   { ...r, status: newStatus },
@@ -765,7 +802,7 @@ const handleWebhook = async (req, res) => {
       if (refundStatus !== "succeeded" && refundStatus !== "failed") {
         return res.status(200).json({ received: true });
       }
-      await applyRefundPartResult({ refundID, refundStatus });
+      await applyRefundPartResult({ refundID, refundStatus, refundFee: feeFromRefundResource(refund) });
       return res.status(200).json({ received: true });
     }
 
@@ -1001,6 +1038,10 @@ const previewRefund = async (req, res) => {
       onlineAmount: plan.total - plan.manualAmount,
       manualAmount: plan.manualAmount,
       unrefundableAmount: plan.unrefundableAmount, // paid online but no payment reference on record
+      heldCredit: plan.heldCredit,                 // a discount held for the customer: money they already paid, so it is inside refundAmount
+      qrphAmount: plan.qrphAmount,                 // the part paid by QR Ph: PayMongo can't refund it, so it is collected in store
+      inStoreOnly: plan.qrphAmount > 0,
+      notice: plan.qrphAmount > 0 ? qrphRefundNotice(plan.qrphAmount) : null,
       unknownTiming: policy.unknownTiming,
       asOf: requestedAt,
     });
@@ -1099,6 +1140,7 @@ const requestRefund = async (req, res) => {
       message: policy.forfeit > 0
         ? `Refund request sent. Because it was made ${policy.tier === "no_show" ? "after your pickup time" : `less than ${policy.windowHours} hours before pickup`}, your ${peso(policy.forfeit)} deposit is non-refundable. ${peso(plan.total)} will be returned once it's reviewed.`
         : "Refund request sent. We'll notify you once it's reviewed.",
+      ...(plan.qrphAmount > 0 ? { notice: qrphRefundNotice(plan.qrphAmount), inStoreOnly: true, qrphAmount: plan.qrphAmount } : {}),
       ...(plan.unrefundableAmount > 0 ? { warning: `${peso(plan.unrefundableAmount)} of this payment has no payment reference on record and can't be refunded automatically — our staff will review it.` } : {}),
       // The stored doc is slimmer now; the response still carries what the customer app showed before.
       refundRequest: { ...refundRequest, userID, reason, notes: notes || "", amount: plan.total, grossPaid: plan.grossPaid },

@@ -1,100 +1,63 @@
-// GENERATED from arltrack-admin-backend/services/payments/depositView.js -- DO NOT EDIT BY HAND.
-// Change the admin file, then run: node scripts/build-customer-payment-entries.mjs <this repo>
-// One place that knows how a payment stores its security deposit.
+// What the CUSTOMER is allowed to see about a payment's staff discount.
 //
-// NEW (flat) shape on payments/{paymentID}:
-//   securityDeposit      the deposit amount charged with the first payment (already existed)
-//   depositStatus        "Held" | "Waived" | "Settled" | "Forfeited" | "Refunded"
-//   depositSettled       pesos of the deposit USED to pay penalties (Settled only). Never more than the deposit:
-//                        penalties beyond it stay on the penalties (amount - paidAmount), with their reasons.
-//   depositReturned      pesos handed back to the customer (Settled only) = the _depositreturn row's amount
-//   depositSettledAt     when the deposit stopped being Held (settled, waived, forfeited or refunded)
-// Used + returned = the deposit, so nothing else is stored. The result (Refunded / Settled / OwedByCustomer) is
-// derived and is NOT saved: "OwedByCustomer" is live (it clears when the customer pays the shortfall), so it needs
-// the unpaid Confirmed penalty total, passed in as getDepositView(payment, { unpaid }). How the deposit was returned
-// (method, reference, who, when) is the "<paymentID>_depositreturn" out-row in paymentEntries; who settled is the
-// DepositReturn transaction log; why a waive happened is the audit log.
+// discountLedger.getDiscountView() is the staff view: it carries who gave the discount, every ledger event and the
+// consistency check. None of that goes to a customer. This keeps only the figures and the payout state they need to
+// understand where their discount went (see discountLedger.js for the model):
 //
-// OLD (nested) shape, still read until scripts/migrate-deposit-flat.js has run:
-//   payments.deposit = { amount, status, waivedReason, received, returned, settlement }
+//   offBalance        came off what they still owed: the booking really costs this much less
+//   usedForPenalties  was used to pay a penalty (after the deposit)
+//   held              credit still held for them (the booking was already fully paid), returned after the trip
+//   returned          credit already sent back (returnedInRefund of it went back inside a cancellation refund)
+//   payout            where the credit's own payout stands: null | { state, amount, via, method, at }
+//   priceOff          how much the booking total shown to the customer drops: the discount while it is "off balance",
+//                     nothing for credit (they paid the full price; the credit is returned, not deducted).
+//                     A legacy discount (given before the ledger) was refunded on the spot, so it keeps the old
+//                     meaning: the whole discount.
 //
-// getDepositView() returns the same shape for both, so no reader needs to know which one it is looking at.
-// It has no imports, so it can be copied to another repo unchanged.
+// Pure functions: no Firestore.
 
-const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-const has = (v) => v !== undefined && v !== null && v !== "";
+const { getDiscountView } = require("./discountLedger.util");
 
-const DEPOSIT_STATUSES = ["Held", "Waived", "Settled", "Forfeited", "Refunded"];
+const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+const num = (v) => Number(v) || 0;
 
-/** Settlement result for a net amount (deposit - penalties): money back, exact, or still owed. */
-const settlementStatusFor = (net) => (net > 0 ? "Refunded" : net === 0 ? "Settled" : "OwedByCustomer");
+/** payment doc + its paymentEntries rows -> the customer's discount object, or null when no discount was ever given. */
+const buildCustomerDiscount = (payment, entries = []) => {
+  const v = getDiscountView(payment, entries);
+  if (!v) return null;
 
-const fromFlat = (p, opts) => {
-  const status = String(p.depositStatus);
-  const amount = num(p.securityDeposit) || num(p.depositFee);   // a waived deposit keeps its amount, as before
-  const settled = status === "Settled";
-  const used = (settled || status === "Held") ? Math.min(amount, num(p.depositSettled)) : 0;   // grows with each penalty while Held, final once Settled
-  const returned = settled ? num(p.depositReturned) : 0;
-  // Pesos of a still-Held deposit already used for penalties: the same depositSettled figure, written when staff
-  // confirm a penalty and not final until settlement.
-  const applied = status === "Held" ? used : 0;
-  const unpaid = num(opts && opts.unpaid);   // unpaid Confirmed penalties right now (the live shortfall)
-  let settlement = null;
-  if (settled) {
-    // Money back -> positive. Nothing back: negative while a penalty is still unpaid, else exactly settled.
-    const net = returned > 0 ? returned : (unpaid > 0 ? -unpaid : 0);
-    settlement = {
-      status: settlementStatusFor(net), net, confirmedPenaltyTotal: used,
-      settledBy: null, settledAt: p.depositSettledAt ?? null,
-    };
-  } else if (status === "Waived") {
-    settlement = {
-      status: "Waived", net: 0, confirmedPenaltyTotal: 0,
-      settledBy: null, settledAt: p.depositSettledAt ?? null,
+  if (!v.ledger) {
+    return {
+      ledger: false, status: "legacy", total: v.total, reason: payment.discountReason || null,
+      offBalance: v.total, usedForPenalties: 0, held: 0, returned: 0, returnedInRefund: 0,
+      payout: null, priceOff: v.total,
     };
   }
+
+  const usedForPenalties = round2(v.appliedPenalty);
+  // Taken from the stored figures (applied = off the balance + on penalties), so it still adds up when the rows
+  // could not be read.
+  const offBalance = round2(Math.max(0, v.applied - usedForPenalties));
+  const cr = v.creditReturn;
   return {
-    shape: "flat",
-    amount,
-    applied,
-    status,
-    waivedReason: "",
-    penaltyTotal: used,
-    settlement,
-    settled: !!settlement,
-    net: settlement ? settlement.net : null,
-    deducted: used,                  // penalties actually taken from the deposit
-    returnedAmount: returned,
-    settledAt: p.depositSettledAt ?? null,
+    ledger: true,
+    status: v.status,                 // applied | held | partly_returned | returned
+    total: v.total,
+    reason: payment.discountReason || null,
+    offBalance,
+    usedForPenalties,
+    held: v.credit,
+    returned: v.returned,
+    returnedInRefund: round2(v.returnedInRefund),
+    payout: cr ? { state: cr.state, amount: cr.amount, via: cr.via, method: cr.method, at: cr.at } : null,
+    priceOff: offBalance,
   };
 };
 
-const fromNested = (d) => {
-  const s = d.settlement && d.settlement.status ? d.settlement : null;
-  const amount = num(d.amount);
-  const net = s ? num(s.net) : null;
-  return {
-    shape: "nested",
-    amount,
-    applied: 0,
-    status: d.status || "",
-    waivedReason: d.waivedReason || "",
-    penaltyTotal: s ? num(s.confirmedPenaltyTotal) : 0,
-    settlement: s,
-    settled: !!s,
-    net,
-    deducted: s ? amount - Math.max(0, net) : 0,
-    returnedAmount: num(d.returned && d.returned.amount),
-    settledAt: s ? (s.settledAt ?? null) : null,
-  };
+/** The pesos to take off the booking total the customer sees. Works with or without the full discount object. */
+const discountPriceOff = (payment, discount) => {
+  if (discount && typeof discount.priceOff === "number") return discount.priceOff;
+  return num(payment && payment.discountAmount);
 };
 
-/** The payment's security deposit, or null if none was ever recorded. opts.unpaid = unpaid Confirmed penalties now. */
-const getDepositView = (payment, opts = {}) => {
-  const p = payment || {};
-  if (has(p.depositStatus)) return fromFlat(p, opts);
-  if (p.deposit && typeof p.deposit === "object") return fromNested(p.deposit);
-  return null;
-};
-
-module.exports = { DEPOSIT_STATUSES, settlementStatusFor, getDepositView };
+module.exports = { buildCustomerDiscount, discountPriceOff };

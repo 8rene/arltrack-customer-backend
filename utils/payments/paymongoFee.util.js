@@ -35,6 +35,15 @@ const pickPaidPayment = (payments) => {
   return list.find((p) => p && p.attributes && p.attributes.status === "paid") || list[0] || null;
 };
 
+// A PayMongo REFUND resource ({ id, attributes: { amount, status, fee?, … } }) -> the fee PayMongo reports on it, in PESOS,
+// or null when it reports none (so a refund row records nothing rather than a false 0). The charge's own fee is saved from
+// the payment resource (chargeFromPaymentResource); this is only for a fee PayMongo puts on the refund itself.
+const feeFromRefundResource = (resource) => {
+  const a = resource && resource.attributes;
+  if (!a || a.fee === undefined || a.fee === null || !Number.isFinite(Number(a.fee))) return null;
+  return centavosToPesos(a.fee);
+};
+
 const FIELD = { deposit: "depositPaymongoFee", balance: "balancePaymongoFee" };
 
 const hasFee = (payment, phase) => {
@@ -55,4 +64,4 @@ const buildFeePatch = (payment, phase, charge) => {
   };
 };
 
-module.exports = { centavosToPesos, chargeFromPaymentResource, pickPaidPayment, buildFeePatch, hasFee, round2 };
+module.exports = { centavosToPesos, feeFromRefundResource, chargeFromPaymentResource, pickPaidPayment, buildFeePatch, hasFee, round2 };

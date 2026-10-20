@@ -49,10 +49,19 @@ const Payment = {
   // refundIssuedAt are the processedBy / processedAt of the discount-refund row (phase "discount").
 
   // A staff discount is an adjustment of what is owed, not a money movement, so it lives on the payment.
+  // discountAmount is the running TOTAL of every discount given on the booking (more than one can be given).
   discountAmount: 0,
+  // LEGACY discounts only (given before the discount ledger): who and why. A new discount does not store them: who and
+  // when are on its paymentEntries row (processedBy / processedAt), and the reason is in the activity log.
   discountReason: "",
   discountBy: "",
-  discountAt: null,
+  discountAt: null,         // when the LATEST discount was given
+  // The discount's parts (see services/payments/discountLedger.js). null = a legacy discount, or none: DON'T default these
+  // to 0, their absence is how a legacy discount is told apart (hasDiscountLedger). All three are written together with
+  // the ledger row they describe, and discountAmount === discountApplied + discountCredit + discountReturned.
+  discountApplied: null,    // used: it came off the balance or paid penalties (the discount_applied_* rows tell which)
+  discountCredit: null,     // held for the customer (a discount given on a fully paid booking); the only part that drains
+  discountReturned: null,   // went back to the customer (its own discount_return payout)
 
   // Set by applyDiscount() when a discount is applied to a booking that's
   // already fully (or partially) paid past what the new discount covers —

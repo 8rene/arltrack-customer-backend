@@ -317,7 +317,7 @@ const latestOf = (rows) =>
 
 /** The row that best represents a phase: latest successful one, else latest of any status. */
 const pickEntry = (rows, phase) => {
-  const of = rows.filter((e) => e.direction !== "out" && e.phase === phase);
+  const of = rows.filter((e) => e.direction !== "out" && e.direction !== "internal" && e.phase === phase);
   return latestOf(of.filter((e) => e.status === "success")) || latestOf(of);
 };
 
@@ -347,6 +347,7 @@ const entriesToLegacyTransactions = (rows) =>
 const MOVED_PAYMENT_FIELDS = [
   "depositPaymongoPaymentID", "balancePaymongoPaymentID", "paymongoPaymentID",
   "depositPaymongoFee", "balancePaymongoFee", "paymongoFeeTotal", "paymongoChannel", "lastSettledVia",
+  "depositPaymongoChannel", "balancePaymongoChannel",   // per-phase channel (gcash | maya | qrph), derived from the rows
   "paidAt", "balancePaidAt", "confirmedBy", "confirmedAt",
   "balanceMethod", "balanceReferenceNumber", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
   // staff collected the balance in person / handed a discount spillover back: both are facts of an entry row
@@ -366,7 +367,8 @@ const MOVED_REFUND_FIELDS  = ["parts", "manualRefund", "unrefundable", "unrefund
  */
 const hydratePayment = (payment, entries, opts = {}) => {
   if (!payment) return payment;
-  const rows = (entries || []).filter((e) => e && e.direction !== "out" && e.phase !== "penalty");
+  // "internal" rows (a discount moving between buckets) are not money in: only real payments describe a payment.
+  const rows = (entries || []).filter((e) => e && e.direction !== "out" && e.direction !== "internal" && e.phase !== "penalty");
   if (!rows.length && !opts.rowsOnly) return payment;
   const out = { ...payment };
   if (opts.rowsOnly) for (const k of MOVED_PAYMENT_FIELDS) delete out[k];
@@ -381,6 +383,7 @@ const hydratePayment = (payment, entries, opts = {}) => {
       fill("depositPaymongoPaymentID", dep.referenceNumber);
       fill("depositPaymongoFee", dep.transactionFee);
       fill("paymongoChannel", LEGACY_CHANNEL[dep.method] || dep.method);
+      fill("depositPaymongoChannel", LEGACY_CHANNEL[dep.method] || dep.method);
     } else {
       fill("confirmedBy", dep.processedBy);
       fill("confirmedAt", dep.processedAt);
@@ -392,6 +395,7 @@ const hydratePayment = (payment, entries, opts = {}) => {
       fill("balancePaymongoPaymentID", bal.referenceNumber);
       fill("balancePaymongoFee", bal.transactionFee);
       fill("paymongoChannel", LEGACY_CHANNEL[bal.method] || bal.method);
+      fill("balancePaymongoChannel", LEGACY_CHANNEL[bal.method] || bal.method);
       if (bal.status === "success") fill("balancePaidAt", bal.settledAt);
     } else {
       fill("balanceMethod", BALANCE_METHOD_LABEL[bal.method] || null);

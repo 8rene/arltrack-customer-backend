@@ -1,6 +1,7 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { derivePaymentStatus, computePaymentSplit } = require("../../utils/pricing");
-const { hydratePaymentData } = require("../../utils/payments/paymentEntries.util");
+const { hydratePaymentData, getEntriesForPaymentIDs } = require("../../utils/payments/paymentEntries.util");
+const { buildCustomerDiscount } = require("../../utils/payments/discountView.util");
 const { getTermsVersionByID } = require("../../utils/terms/terms.service");
 const { plateForBooking } = require("../../utils/bookings/plateVisibility.util");
 
@@ -100,6 +101,20 @@ const getBookingDetails = async (req, res) => {
       // could not be read (h is empty) it falls back to the document, as the rest of this block does.
       const hp = Object.keys(h).length ? h : p;
       const { balance } = derivePaymentStatus(hp);
+      // The customer-facing discount summary (see utils/payments/discountView.util.js). Needs the payment's rows to split
+      // what was used on the balance from what was used on a penalty; without them the held / returned figures still
+      // come from the payment, so this never fails the page.
+      let discount = null;
+      if (Number(hp.discountAmount) > 0) {
+        let rows = [];
+        try {
+          const key = p.paymentID || p.originalId || paymentSnap.docs[0].id;
+          rows = (await getEntriesForPaymentIDs([key])).get(key) || [];
+        } catch (rowsErr) {
+          console.warn("getBookingDetails: could not read discount rows:", rowsErr.message);
+        }
+        discount = buildCustomerDiscount(hp, rows);
+      }
       payment = {
         paymentID:         p.paymentID        || paymentSnap.docs[0].id,
         amount:            p.amount           || 0,
@@ -127,6 +142,9 @@ const getBookingDetails = async (req, res) => {
         // endpoint built its own separate payment object and never copied it
         // over, so BookingDetails.jsx had no discount data to show at all.
         discountAmount:    Number(p.discountAmount) || 0,
+        // Where the discount stands for the customer (null = none): off the balance / held as credit / used for a penalty /
+        // returned, plus the payout state. `discount.priceOff` is what to subtract from the total, not discountAmount.
+        discount,
         // Lets the frontend offer a "Complete Payment" link while a
         // PayMongo checkout session is still open for this payment.
         checkoutUrl:       p.checkoutUrl      || null,

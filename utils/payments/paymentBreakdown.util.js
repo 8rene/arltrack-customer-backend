@@ -3,8 +3,10 @@
 //
 // GENERATED from arltrack-admin-backend/services/payments/paymentBreakdown.js
 // (the two apps deploy separately, so it can't be a shared import). The only
-// difference is the export line (CommonJS here, ESM there). If you change one,
-// change the other — the logic must stay identical.
+// differences are the export line (CommonJS here, ESM there) and the 2-hour
+// "booked by mistake" grace (REFUND_GRACE_HOURS / bookedAt), which exists only on
+// this side for now. If you change one, change the other — the logic must stay
+// identical.
 //
 // Pure functions only (no Firestore) so they're trivially testable.
 //
@@ -17,6 +19,8 @@
 //                     not_applicable|not_due|pending|paid|failed|cancelled
 //   balanceCollected  true when STAFF collected the balance in person
 //   discountAmount / refundIssued   staff discount (see admin applyDiscount)
+//   discountApplied                 present on a LEDGER discount (see discountLedger.js): the part that came off the
+//                                   balance reduces it; the rest is held / used for penalties and is never refundDue
 //   depositPaymongoPaymentID / balancePaymongoPaymentID  PayMongo payment ids, one
 //                     per online charge (paymongoPaymentID = legacy "latest charge")
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,7 +117,19 @@ const getPaymentBreakdown = (payment) => {
   // admin's computeAmounts so both apps always agree.
   const discountAmount = num(p.discountAmount);
   let refundDue = 0;
-  if (discountAmount > 0) {
+  if (discountAmount > 0 && p.discountApplied !== undefined && p.discountApplied !== null) {
+    // LEDGER discount (see discountLedger.js). Only the part that came off the remaining balance reduces what is
+    // owed. The rest was ALREADY PAID by the customer, so it is not rental money any more: it is held for them (and
+    // returned with the security deposit), paid a penalty, or went back. It leaves amountPaid exactly as the old
+    // spillover did, so refunds, receipts and the customer's totals read the same as before -- but it is never
+    // "refundDue": nothing is handed back on the spot, so no refund prompt, no in-store hand-back and no PayMongo refund.
+    // discountApplied also holds the part that paid penalties, which only exists once the balance is 0, so
+    // min(balance, discountApplied) is exactly the part that came off the balance.
+    const toBalance = Math.min(Math.max(0, balance), Math.max(0, num(p.discountApplied)));
+    balance -= toBalance;
+    const held = Math.max(0, discountAmount - toBalance);
+    amountPaid = Math.max(0, amountPaid - held);
+  } else if (discountAmount > 0) {
     if (balance >= discountAmount) {
       balance -= discountAmount;
     } else {
@@ -174,13 +190,38 @@ const depositWasOnline = (payment, ids) => {
 //   total        = amountPaid − forfeit      (what the customer actually gets back)
 //   grossPaid    = amountPaid                (everything they paid, before the forfeit)
 //   forfeit      = what is being kept
+// Channels PayMongo's refund API refuses ("Refunds are not allowed for payments with source type qrph"). Money paid
+// this way is NOT unrefundable -- it is in our hands, so it goes into the manual bucket: staff hand it back in person
+// (or by bank transfer) and mark it issued. Judged PER PHASE: a deposit paid by GCash and a balance paid by QR Ph
+// split correctly. The per-phase channel is derived from the entry rows (hydratePayment); older payments fall back
+// to the single paymongoChannel.
+const NO_API_REFUND_CHANNELS = ["qrph"];
+const channelOfPhase = (payment, phase) => {
+  const p = payment || {};
+  const own = phase === "balance" ? p.balancePaymongoChannel : p.depositPaymongoChannel;
+  return lower(own || p.paymongoChannel);
+};
+const refundableOnlyByHand = (payment, phase) => NO_API_REFUND_CHANNELS.includes(channelOfPhase(payment, phase));
+
+// A discount given on a FULLY PAID booking is held for the customer (discountCredit): money they already paid.
+// getPaymentBreakdown takes it out of amountPaid (it is not rental revenue), but a cancellation refunds what the
+// customer actually PAID, so it goes back with the rest -- no separate payout, and no deduction for the discount.
+// Only the still-held part counts: what already paid a penalty or went back is gone, and a discount that came off the
+// balance was never paid. A legacy discount has no credit (it was refunded on the spot).
+const heldCreditOf = (p) =>
+  p && p.discountApplied !== undefined && p.discountApplied !== null ? Math.max(0, num(p.discountCredit)) : 0;
+
 const computeRefundPlan = (payment, opts = {}) => {
   const b   = getPaymentBreakdown(payment);
   const ids = resolvePaymongoIDs(payment);
+  let qrphAmount = 0;   // the part handed back by staff only because the channel is QR Ph (included in manualAmount)
 
-  const forfeit = Math.min(Math.max(0, num(opts.forfeit)), b.amountPaid);
+  const heldCredit = heldCreditOf(payment);
+  const paid       = b.amountPaid + heldCredit;   // everything the customer paid for this booking, before the forfeit
 
-  let remaining = b.amountPaid - forfeit;
+  const forfeit = Math.min(Math.max(0, num(opts.forfeit)), paid);
+
+  let remaining = paid - forfeit;
   const parts = [];
   const unrefundable = [];
   let manualAmount = 0;
@@ -203,7 +244,8 @@ const computeRefundPlan = (payment, opts = {}) => {
   if (depositCap > 0 && remaining > 0) {
     const amt = allot(depositCap);
     if (amt > 0) {
-      if (ids.deposit)                          parts.push({ kind: "deposit", paymongoPaymentID: ids.deposit, amount: amt });
+      if (refundableOnlyByHand(payment, "deposit")) { manualAmount += amt; qrphAmount += amt; }   // QR Ph: hand back, PayMongo refuses it
+      else if (ids.deposit)                     parts.push({ kind: "deposit", paymongoPaymentID: ids.deposit, amount: amt });
       else if (depositWasOnline(payment, ids))  unrefundable.push({ kind: "deposit", amount: amt, reason: "payment_id_missing" });
       else                                      manualAmount += amt; // taken in cash / by staff
     }
@@ -212,7 +254,8 @@ const computeRefundPlan = (payment, opts = {}) => {
   if (b.balanceOnline > 0 && remaining > 0) {
     const amt = allot(b.balanceOnline);
     if (amt > 0) {
-      if (ids.balance) parts.push({ kind: "balance", paymongoPaymentID: ids.balance, amount: amt });
+      if (refundableOnlyByHand(payment, "balance")) { manualAmount += amt; qrphAmount += amt; }   // QR Ph: hand back
+      else if (ids.balance) parts.push({ kind: "balance", paymongoPaymentID: ids.balance, amount: amt });
       else             unrefundable.push({ kind: "balance", amount: amt, reason: "payment_id_missing" });
     }
   }
@@ -224,8 +267,9 @@ const computeRefundPlan = (payment, opts = {}) => {
   const unrefundableAmount = unrefundable.reduce((s, u) => s + u.amount, 0);
   // total = what can actually be returned (parts + manual). The unrefundable amount is NOT promised to the customer.
   return {
-    total: b.amountPaid - forfeit - unrefundableAmount,
-    grossPaid: b.amountPaid, forfeit, parts, manualAmount,
+    total: paid - forfeit - unrefundableAmount,
+    grossPaid: paid, heldCredit, forfeit, parts, manualAmount, qrphAmount,
+    channels: { deposit: channelOfPhase(payment, "deposit") || null, balance: channelOfPhase(payment, "balance") || null },
     unrefundable, unrefundableAmount, breakdown: b,
   };
 };

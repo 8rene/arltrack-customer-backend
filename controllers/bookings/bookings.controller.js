@@ -11,7 +11,9 @@ const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { plateForBooking } = require("../../utils/bookings/plateVisibility.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
-const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
+const { syncPaymentEntries, hydratePayments, getEntriesForPaymentIDs } = require("../../utils/payments/paymentEntries.util");
+const { buildCustomerDiscount } = require("../../utils/payments/discountView.util");
+const { STARTED_TRIP_MESSAGE } = require("../../utils/payments/refundNotices.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, driverCapacityLockRef, getFullChauffeurDays, getChauffeurDayAvailability, getChauffeurPickupTimes, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
 
@@ -1106,6 +1108,22 @@ const getUserBookings = async (req, res) => {
       console.warn("getUserBookings: could not read paymentEntries, using the payment documents:", hydrateErr.message);
     }
 
+    // What the customer sees about a staff discount (see utils/payments/discountView.util.js): how much came off the
+    // balance, how much is held as credit, what was used for a penalty, what was returned. Only payments that have a
+    // discount need their rows. A display list must never fail on this: without the rows the figures on the payment
+    // still give the held / returned amounts.
+    const discountByDocID = {};
+    {
+      const withDiscount = paymentSnaps.filter((s) => !s.empty && Number(s.docs[0].data().discountAmount) > 0);
+      const keyOf = (s) => { const d = s.docs[0].data(); return d.paymentID || d.originalId || s.docs[0].id; };
+      let rowsByKey = new Map();
+      if (withDiscount.length) {
+        try { rowsByKey = await getEntriesForPaymentIDs(withDiscount.map(keyOf)); }
+        catch (rowsErr) { console.warn("getUserBookings: could not read discount rows:", rowsErr.message); }
+      }
+      withDiscount.forEach((s) => { discountByDocID[s.docs[0].id] = buildCustomerDiscount(s.docs[0].data(), rowsByKey.get(keyOf(s)) || []); });
+    }
+
     paymentSnaps.forEach((snap, i) => {
       if (!snap.empty) {
         const p = hydratedByDocID[snap.docs[0].id] || snap.docs[0].data();
@@ -1142,6 +1160,9 @@ const getUserBookings = async (req, res) => {
           // balance/amountPaid math below but never sent to the customer, so
           // MyBookings.jsx had no way to show that a discount was applied.
           discountAmount:  Number(p.discountAmount) || 0,
+          // Where the discount stands for the customer (null = none). A discount on a fully paid booking is HELD and
+          // returned after the trip, so it is not a lower total: read `discount.priceOff`, not discountAmount, for that.
+          discount:        discountByDocID[snap.docs[0].id] || null,
           refundIssued:    !!p.refundIssued,
           // Was previously recomputed in MyBookings.jsx (getPaymentInfo) —
           // now computed once, here, so it can't drift from the admin
@@ -1322,12 +1343,15 @@ const requestCancellation = async (req, res) => {
       return res.status(403).json({ message: "You are not allowed to modify this booking." });
     }
 
-    // Only bookings currently ongoing can go through this flow — anything
-    // still "to pay" or "upcoming" uses the direct self-serve cancelBooking
-    // instead.
-    if (booking.status !== BOOKING_STATUS.ONGOING) {
-      return res.status(400).json({ message: "Only ongoing bookings can request cancellation." });
+    // A trip that has started can no longer be cancelled: the car is out and the security deposit is held, and a
+    // cancellation would move no money, leaving the deposit (and any discount credit held with it) with no way to be
+    // returned. Staff could only reject such a request, so it is no longer taken. A booking that has NOT started ("to pay" /
+    // "upcoming") is cancelled with cancelBooking (plus a refund request when it was paid).
+    // (The rest of this function is left in place, unreachable, so the flow can be switched back on in one line.)
+    if (booking.status === BOOKING_STATUS.ONGOING) {
+      return res.status(400).json({ message: STARTED_TRIP_MESSAGE });
     }
+    return res.status(400).json({ message: "This is only for a trip that has started, and a started trip can't be cancelled. To cancel a booking that hasn't started, use Cancel booking." });
 
     // Don't allow spamming multiple pending requests on the same booking.
     // A request is its own row in cancellationRequests now (the old

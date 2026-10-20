@@ -4,7 +4,7 @@ const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { generateUniqueReferralCode } = require("../../utils/referrals/referral.util");
 const { listPendingCheckouts } = require("../../utils/payments/penaltyPayment.util");
 const { getSystemSettings } = require("../../utils/pricing");
-const { planOnlinePayment, heldDepositCoverByBooking } = require("../../utils/payments/penaltyPayment.util");
+const { planOnlinePayment, heldDepositCoverByBooking, heldCreditByBooking } = require("../../utils/payments/penaltyPayment.util");
 
 // Same role IDs as editRequest.controller.js/signup.controller.js's
 // STAFF_NOTIFY_ROLE_IDS — kept as a local literal here too since each
@@ -241,9 +241,15 @@ const getFullProfile = async (req, res) => {
     // not part of outstandingPenaltyBalance. A failed lookup only drops these figures; it never blocks the profile.
     const planByBooking = {};
     try {
-      const [feeSettings, covers] = await Promise.all([getSystemSettings(), heldDepositCoverByBooking(userID)]);
+      const [feeSettings, covers, credits] = await Promise.all([getSystemSettings(), heldDepositCoverByBooking(userID), heldCreditByBooking(userID)]);
       Object.entries(unpaidDocsByBooking).forEach(([bookingID, docs]) => {
         planByBooking[bookingID] = planOnlinePayment(docs, { depositCover: covers[bookingID] || 0, fallbackPercent: feeSettings.gatewayFeePercent });
+        // The cover is the held deposit plus any discount credit held for the customer (no online payment, no fee on either).
+        // The deposit pays first, then the credit: split what the plan says is covered between the two.
+        const depositPart = Math.max(0, (covers[bookingID] || 0) - (credits[bookingID] || 0));
+        const byDeposit = Math.min(depositPart, planByBooking[bookingID].coveredByDeposit);
+        planByBooking[bookingID].depositOnly = Math.round(byDeposit * 100) / 100;
+        planByBooking[bookingID].creditOnly = Math.round((planByBooking[bookingID].coveredByDeposit - byDeposit) * 100) / 100;
       });
     } catch (e) { console.warn("profile: could not work out the online payment fee on unpaid penalties:", e.message); }
     const outstandingPenaltyBookings = Object.entries(outstandingByBooking)
@@ -251,7 +257,8 @@ const getFullProfile = async (req, res) => {
         const plan = planByBooking[bookingID];
         return {
           bookingID, amount,
-          coveredByDeposit: plan ? plan.coveredByDeposit : 0,   // a held deposit pays this part at settlement (no fee)
+          coveredByDeposit: plan ? (plan.depositOnly ?? plan.coveredByDeposit) : 0,   // a held deposit pays this part at settlement (no fee)
+          coveredByCredit: plan ? (plan.creditOnly || 0) : 0,   // held discount credit pays this part after the deposit (no fee)
           onlineDue: plan ? plan.onlineDue : amount,            // penalty money to pay online
           fee: plan ? plan.gatewayFee : 0,                      // the online payment fee on that
           total: plan ? plan.total : amount,                    // what the checkout charges

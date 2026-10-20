@@ -1,6 +1,7 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { hydratePenalties } = require("../../utils/payments/paymentEntries.util");
 const { getDepositView } = require("../../utils/payments/depositView.util");
+const { getDiscountFigures } = require("../../utils/payments/discountLedger.util");
 const { listPendingCheckouts, owedOn, planOnlinePayment } = require("../../utils/payments/penaltyPayment.util");
 const { getSystemSettings } = require("../../utils/pricing");
 
@@ -114,8 +115,15 @@ const getMyBookingPenalties = async (req, res) => {
     // Already used for penalties when they were confirmed (payments.depositSettled): that part is paid and gone.
     const appliedToDeposit = depositHeld ? (deposit.applied || 0) : 0;
     const freeDeposit = depositHeld ? Math.max(0, depositAmount - appliedToDeposit) : 0;   // still available for unpaid penalties
-    const depositCover = freeDeposit;
+    // Discount credit held for the customer (a discount given on a fully paid booking, see discountLedger.js). While the deposit is
+    // held it pays penalties the deposit cannot cover, no online payment and no fee, and the rest comes back at settlement.
+    // 0 for a legacy discount (refunded on the spot) and for no discount. Same figure createPenaltyPaymentLink charges against.
+    const creditHeld = depositHeld && payment ? getDiscountFigures(payment).credit : 0;
+    const depositCover = Math.round((freeDeposit + creditHeld) * 100) / 100;
     const unpaidMoney = Math.round(unpaidTotal * 100) / 100;
+    // Deposit pays first, then the credit.
+    const coveredByDepositOnly = Math.min(freeDeposit, unpaidMoney);
+    const coveredByCredit = Math.min(creditHeld, Math.max(0, Math.round((unpaidMoney - coveredByDepositOnly) * 100) / 100));
     let plan = {
       unpaidTotal: unpaidMoney, coveredByDeposit: Math.min(depositCover, unpaidMoney),
       onlineDue: Math.max(0, Math.round((unpaidMoney - depositCover) * 100) / 100), gatewayFee: 0, gatewayFeeRate: 0,
@@ -168,7 +176,7 @@ const getMyBookingPenalties = async (req, res) => {
         // Not settled yet — live preview of what settlement will do.
         deductedFromDeposit = appliedToDeposit + Math.min(freeDeposit, unpaidTotal);
         refundAmount = Math.max(0, freeDeposit - unpaidTotal);
-        stillOwed = Math.max(0, unpaidTotal - freeDeposit);
+        stillOwed = Math.max(0, unpaidTotal - freeDeposit - creditHeld);
       } else {
         // Refunded / Forfeited: the deposit is not held any more, so it pays nothing and every unpaid penalty is paid online.
         deductedFromDeposit = 0;
@@ -203,7 +211,10 @@ const getMyBookingPenalties = async (req, res) => {
         // The online checkout. A held deposit pays first and carries no fee; the rest is penalty money (payableNow, always
         // equal to stillOwed) plus the online payment fee on top of it (never part of the penalty itself).
         depositHeld,                                // true = a held deposit will pay penalties when staff settle
-        coveredByDeposit: plan.coveredByDeposit,    // what that deposit will pay (no fee)
+        coveredByDeposit: coveredByDepositOnly,     // what that deposit will pay (no fee)
+        creditHeld,                                 // discount credit still held for the customer (0 if none)
+        coveredByCredit,                            // what that credit will pay once the deposit is used up (no fee)
+        creditReturnPreview: Math.max(0, Math.round((creditHeld - coveredByCredit) * 100) / 100), // what comes back of it after the trip
         payableNow: plan.onlineDue,                 // penalty money left to pay online
         payableFee: plan.gatewayFee,                // the online payment fee the checkout adds on top of payableNow
         payableTotal: plan.total,                   // payableNow + payableFee: what PayMongo actually charges
