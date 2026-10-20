@@ -3,6 +3,7 @@ const router  = express.Router();
 
 const { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea, getDriverAvailability, getDriverFullDays, getDriverPickupTimes } = require("../controllers/bookings/bookings.controller");
 const { getBookingDetails } = require("../controllers/bookings/bookingSessions.controller");
+const { getBookingInspection } = require("../controllers/bookings/inspection.controller");
 const { getStatement, getStatementPdf, emailStatement, getReceipt, getReceiptPdf, emailReceipt } = require("../controllers/bookings/receipt.controller");
 const verifyToken = require("../middlewares/auth.middleware");
 const rateLimit = require("../middlewares/rateLimit.middleware");
@@ -20,6 +21,8 @@ router.post("/driver-availability/days", rateLimit({ windowMs: 60 * 1000, max: 6
 router.post("/driver-availability/times", rateLimit({ windowMs: 60 * 1000, max: 120, keyPrefix: "driver-pickup-times" }), getDriverPickupTimes); // no auth -- pickup times on a day that still have a driver; returns only "HH:MM" strings
 router.post("/quote",               getBookingQuote);   // no auth needed — pricing preview only, writes nothing
 router.get("/:bookingID/details",   verifyToken, getBookingDetails);
+// The vehicle inspection (before-pickup / after-return photos, videos, parts condition) — own self-drive booking only; the server decides.
+router.get("/:bookingID/inspection", verifyToken, rateLimit({ windowMs: 60 * 1000, max: 30, keyPrefix: "booking-inspection" }), getBookingInspection);
 
 // Receipts + booking statement (same documents as the admin side). Owner-only; PDFs and emails are rate limited on top of
 // the shared 5-minute email limit, since a PDF costs CPU.
