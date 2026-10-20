@@ -289,7 +289,11 @@ const computePenaltyCheckoutFees = (items = [], fallbackPercent = 0) => {
 // every fee amount from the admin-panel-controlled systemSettings doc.
 const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, durationType, destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, extraDestinations, driveType }) => {
   const settings = await getSystemSettings();
-  const areaFlags = computeAreaFlags({ destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, extraDestinations }, settings.baseAreaKeywords);
+  // Without Driver (self-drive) can go anywhere, so the base-area check only applies to With Driver.
+  // Self-drive bookings never get the outside-area flags or an extra fee; only number coding is checked.
+  const areaFlags = driveType === "chauffeur"
+    ? computeAreaFlags({ destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, extraDestinations }, settings.baseAreaKeywords)
+    : { pickupOutside: false, destinationOutside: false, outsideArea: false, outsideDestinationIds: [] };
   const { days, diffHrs } = calcBillableDays(startDateTime, endDateTime, durationType);
 
   // No valid date range selected yet — nothing should be charged at all,
@@ -307,7 +311,10 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   //   self-drive    -> it is the separate extra fee
   const isChauffeur = driveType === "chauffeur";
   const extraFee   = (areaFlags.outsideArea && !isChauffeur) ? settings.extraFeeOutsideArea : 0;
-  const driversFee = isChauffeur ? (areaFlags.outsideArea ? settings.driversFeeOutsideArea : settings.driversFeeBaseArea) : 0;
+  // The driver is paid PER DAY: each billable day costs the base-area rate (e.g. 1,000) or the outside-area rate
+  // (e.g. 1,500), and the days add up (3 days x 1,000 = 3,000). The outside-area flag is still one yes/no for the booking.
+  const driversFeePerDay = isChauffeur ? (areaFlags.outsideArea ? settings.driversFeeOutsideArea : settings.driversFeeBaseArea) : 0;
+  const driversFee = driversFeePerDay * days;
 
   // Refundable security deposit, charged up front with everything else.
   const securityDeposit = Math.max(0, Number(settings.securityDepositAmount) || 0);
@@ -321,7 +328,7 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   });
 
   return {
-    days, diffHrs, rentalFee, extraFee, driversFee,
+    days, diffHrs, rentalFee, extraFee, driversFee, driversFeePerDay,
     // Where the "outside the base area" charge came from — the booking page uses
     // these to say WHICH location is outside (pickup and/or destination).
     ...areaFlags,

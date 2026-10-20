@@ -56,16 +56,21 @@ const getCarBookings = async (req, res) => {
       // bookings.controller.js, which enforces this straight from the
       // booking's own dates — no maintenance record needed). Only the last
       // 2 days are worth fetching: anything older can't possibly still be
-      // inside a 1-day buffer window. Needs a composite index on
-      // (carID ASC, status ASC, updatedAt ASC) — Firestore will prompt for
-      // it on first run if missing.
+      // inside a 1-day buffer window. The range filter is on updatedAt ALONE
+      // (Firestore's automatic single-field index serves it, so no composite
+      // index is needed); the car and "completed" are matched in memory. Only
+      // bookings touched in the last 2 days come back, so the set stays small.
       db.collection("bookings")
-        .where("carID", "==", carID)
-        .where("status", "==", BOOKING_STATUS.COMPLETED)
         .where("updatedAt", ">=", new Date(Date.now() - 2 * 24 * 60 * 60 * 1000))
         .get()
+        .then((snap) => ({
+          docs: snap.docs.filter((doc) => {
+            const d = doc.data();
+            return d.carID === carID && d.status === BOOKING_STATUS.COMPLETED;
+          }),
+        }))
         .catch((err) => {
-          console.warn("[getCarBookings] completed-bookings buffer query failed (missing index?):", err.message);
+          console.error("[getCarBookings] completed-bookings buffer query failed:", err.message);
           return { docs: [] };
         }),
     ]);

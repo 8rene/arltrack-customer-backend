@@ -90,6 +90,44 @@ const countEligibleDrivers = async (tripEnd) => {
   return drivers.filter((d) => !d.expiry || d.expiry >= end).length;
 };
 
+// Why is the driver headcount what it is? Same query the admin dispatch board uses (user where roleID == Driver),
+// broken down so a "0 drivers" answer can be explained: how many Driver accounts exist, how many are skipped
+// because they are inactive/locked, and (for the active ones) how many have an expired / missing / valid license.
+// Logged to the server console only, never returned to the customer.
+const getDriverHeadcountReport = async (at = new Date()) => {
+  const snap = await db.collection("user").where("roleID", "==", ROLE_IDS.DRIVER).get();
+  const byStatus = {};
+  snap.docs.forEach((d) => {
+    const k = String(d.data().status || "(no status)").toLowerCase();
+    byStatus[k] = (byStatus[k] || 0) + 1;
+  });
+  const drivers = await loadEligibleDrivers();
+  const at0 = asDate(at);
+  return {
+    driverRoleID: ROLE_IDS.DRIVER,
+    driverAccounts: snap.size,                       // every user with the Driver role (what the admin board lists)
+    byStatus,                                        // e.g. { active: 2, locked: 1 }
+    activeDrivers: drivers.length,                   // not inactive / locked
+    licenseExpiredAtDate: drivers.filter((d) => d.expiry && d.expiry < at0).length,
+    noLicenseDateOnFile: drivers.filter((d) => !d.expiry).length,
+    countedAtDate: drivers.filter((d) => !d.expiry || d.expiry >= at0).length,
+    checkedAt: at0 ? at0.toISOString() : null,
+  };
+};
+
+// When the headcount is 0 EVERY day looks full and EVERY chauffeur booking is refused, so say why in the
+// server log (at most once a minute, so a busy calendar does not flood it).
+let lastZeroLogAt = 0;
+const logZeroCapacity = async (where, at) => {
+  if (Date.now() - lastZeroLogAt < 60 * 1000) return;
+  lastZeroLogAt = Date.now();
+  try {
+    console.warn(`[driverCapacity] 0 drivers counted (${where}).`, JSON.stringify(await getDriverHeadcountReport(at)));
+  } catch (err) {
+    console.warn("[driverCapacity] 0 drivers counted and the diagnostic report failed:", err.message);
+  }
+};
+
 // Pure: the highest number of existing chauffeur trips that run at the same moment anywhere inside
 // the requested window (all windows padded by the buffer). Exported for testing.
 //   existing: [{ startDateTime, endDateTime, status }]
@@ -152,7 +190,10 @@ const checkChauffeurCapacity = async ({ startDateTime, endDateTime, tx = null, e
     eligibleDrivers != null ? eligibleDrivers : countEligibleDrivers(end),
     bufferMs != null ? bufferMs : getDriverBufferMs(),
   ]);
-  if (capacity <= 0) return { available: false, capacity: 0, peak: 0 };
+  if (capacity <= 0) {
+    await logZeroCapacity("trip check", end);
+    return { available: false, capacity: 0, peak: 0 };
+  }
 
   if (tx) await tx.get(driverCapacityLockRef()); // joins the lock into this transaction's read set
   const bookings = await readChauffeurBookings(tx);
@@ -213,6 +254,77 @@ const computeFullDays = (existing, days, capacityAt, bufferMs, now = new Date())
   return full;
 };
 
+// Pure. For each Manila day: the stretches of that day (minutes from 00:00, 0..1440) in which EVERY driver is
+// busy, i.e. the number of busy trips (each padded by the buffer, assigned or not) is already at the number of
+// eligible drivers. A trip is a RANGE: one that runs Oct 23 -> Oct 26 keeps its driver busy across all of those
+// days, so two such trips block every day in between, and the first and last day only from the start / until
+// the end plus the buffer.
+//   -> { [day]: { full: boolean, blocked: [[fromMin, toMin], ...] } }
+//   full    = blocked covers the whole day (no driver at any moment)
+//   partial = blocked.length > 0 and not full (a driver is free at some times of that day)
+const MIN_MS = 60 * 1000;
+const computeDayBlocks = (existing, days, capacityAt, bufferMs, now = new Date()) => {
+  const spans = [];
+  for (const b of existing) {
+    const bStart = asDate(b.startDateTime);
+    let bEnd = asDate(b.endDateTime);
+    if (!bStart || !bEnd) continue;
+    if (b.status === BOOKING_STATUS.ONGOING && now > bEnd) bEnd = now;
+    spans.push([bStart.getTime(), bEnd.getTime() + bufferMs]);
+  }
+
+  const out = {};
+  for (const day of days) {
+    const dayStart = manilaDayStart(day);
+    if (Number.isNaN(dayStart.getTime())) continue;
+    const from = dayStart.getTime();
+    const to = from + DAY_MS;
+
+    const capacity = capacityAt(dayStart);
+    if (capacity <= 0) { out[day] = { full: true, blocked: [[0, 1440]] }; continue; } // nobody can drive that day
+
+    const inDay = spans.filter(([s, e]) => s < to && e > from);
+    if (inDay.length < capacity) { out[day] = { full: false, blocked: [] }; continue; }
+
+    const points = new Set([from, to]);
+    for (const [s, e] of inDay) {
+      if (s > from && s < to) points.add(s);
+      if (e > from && e < to) points.add(e);
+    }
+    const sorted = [...points].sort((a, b) => a - b);
+    const blocked = [];
+    for (let i = 0; i < sorted.length - 1; i += 1) {
+      const a = sorted[i], z = sorted[i + 1];
+      let count = 0;
+      for (const [s, e] of inDay) if (s <= a && a < e) count += 1;
+      if (count < capacity) continue;
+      const last = blocked[blocked.length - 1];
+      const fromMin = Math.round((a - from) / MIN_MS), toMin = Math.round((z - from) / MIN_MS);
+      if (last && last[1] === fromMin) last[1] = toMin; else blocked.push([fromMin, toMin]);
+    }
+    out[day] = { full: blocked.length === 1 && blocked[0][0] === 0 && blocked[0][1] === 1440, blocked };
+  }
+  return out;
+};
+
+// Pure. The pickup times (every 15 minutes, "HH:MM", Manila) on `day` from which a trip of `hours` can start with a
+// driver: the same test checkChauffeurCapacity runs, so what the clock offers and what the booking accepts agree.
+// A driver who finished at 7:00 with a 2-hour buffer is free again from 9:00, so 9:00 is offered and 8:45 is not.
+const computePickupTimes = (existing, day, hours, capacityAtEnd, bufferMs, now = new Date()) => {
+  const dayStart = manilaDayStart(day);
+  if (Number.isNaN(dayStart.getTime())) return [];
+  const times = [];
+  for (let m = 0; m < 1440; m += 15) {
+    const start = new Date(dayStart.getTime() + m * MIN_MS);
+    const end = new Date(start.getTime() + hours * 60 * MIN_MS);
+    const capacity = capacityAtEnd(end);
+    if (capacity <= 0) continue;
+    if (computePeakOverlap(existing, start, end, bufferMs, now) >= capacity) continue;
+    times.push(`${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`);
+  }
+  return times;
+};
+
 // "YYYY-MM-DD" .. "YYYY-MM-DD" inclusive (calendar arithmetic only, no timezone involved).
 const enumerateDays = (fromDay, toDay) => {
   const out = [];
@@ -229,12 +341,43 @@ const getFullChauffeurDays = async ({ fromDay, toDay, now = new Date() }) => {
   const [drivers, bufferMs, bookings] = await Promise.all([loadEligibleDrivers(), getDriverBufferMs(), readChauffeurBookings()]);
   // Lenient on purpose: a driver whose license is still valid at the start of the day counts for that day.
   const capacityAt = (dayStart) => drivers.filter((d) => !d.expiry || d.expiry >= dayStart).length;
+  if (days.length && capacityAt(manilaDayStart(days[0])) <= 0) await logZeroCapacity("calendar", manilaDayStart(days[0]));
   return computeFullDays(bookings, days, capacityAt, bufferMs, now);
+};
+
+/** For the calendar: { fullDays, partialDays } in [fromDay, toDay]. Partial = a driver is free at some times only. */
+const getChauffeurDayAvailability = async ({ fromDay, toDay, now = new Date() }) => {
+  if (!DRIVER_CAP_ENABLED) return { fullDays: [], partialDays: [] }; // cap temporarily disabled
+  const days = enumerateDays(fromDay, toDay);
+  const [drivers, bufferMs, bookings] = await Promise.all([loadEligibleDrivers(), getDriverBufferMs(), readChauffeurBookings()]);
+  const capacityAt = (dayStart) => drivers.filter((d) => !d.expiry || d.expiry >= dayStart).length;
+  if (days.length && capacityAt(manilaDayStart(days[0])) <= 0) await logZeroCapacity("calendar", manilaDayStart(days[0]));
+  const blocks = computeDayBlocks(bookings, days, capacityAt, bufferMs, now);
+  const fullDays = [], partialDays = [];
+  for (const day of days) {
+    if (!blocks[day]) continue;
+    if (blocks[day].full) fullDays.push(day);
+    else if (blocks[day].blocked.length) partialDays.push(day);
+  }
+  return { fullDays, partialDays };
+};
+
+/** For the clock: the "HH:MM" pickup times on `day` that still have a driver for a trip of `hours`. null = no limit. */
+const getChauffeurPickupTimes = async ({ day, hours, now = new Date() }) => {
+  if (!DRIVER_CAP_ENABLED) return null; // cap temporarily disabled: every time is fine
+  const [drivers, bufferMs, bookings] = await Promise.all([loadEligibleDrivers(), getDriverBufferMs(), readChauffeurBookings()]);
+  const capacityAtEnd = (end) => drivers.filter((d) => !d.expiry || d.expiry >= end).length;
+  return computePickupTimes(bookings, day, hours, capacityAtEnd, bufferMs, now);
 };
 
 module.exports = {
   checkChauffeurCapacity,
+  getChauffeurDayAvailability,
+  getChauffeurPickupTimes,
+  computeDayBlocks,
+  computePickupTimes,
   countEligibleDrivers,
+  getDriverHeadcountReport,
   computePeakOverlap,
   computeFullDays,
   getFullChauffeurDays,

@@ -13,7 +13,7 @@ const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/b
 const { notifyStaff } = require("../../services/notification/notification.service");
 const { syncPaymentEntries, hydratePayments } = require("../../utils/payments/paymentEntries.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
-const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, driverCapacityLockRef, getFullChauffeurDays, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
+const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, driverCapacityLockRef, getFullChauffeurDays, getChauffeurDayAvailability, getChauffeurPickupTimes, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
 
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
@@ -1604,14 +1604,46 @@ const getDriverFullDays = async (req, res) => {
   try {
     const key = `${from}|${to}`;
     const hit = fullDaysCache.get(key);
-    if (hit && Date.now() - hit.at < FULL_DAYS_TTL_MS) return res.status(200).json({ fullDays: hit.fullDays });
+    if (hit && Date.now() - hit.at < FULL_DAYS_TTL_MS) return res.status(200).json({ fullDays: hit.fullDays, partialDays: hit.partialDays || [] });
 
-    const fullDays = await getFullChauffeurDays({ fromDay: from, toDay: to });
+    const { fullDays, partialDays } = await getChauffeurDayAvailability({ fromDay: from, toDay: to });
     if (fullDaysCache.size > 200) fullDaysCache.clear(); // keep it small
-    fullDaysCache.set(key, { at: Date.now(), fullDays });
-    return res.status(200).json({ fullDays });
+    fullDaysCache.set(key, { at: Date.now(), fullDays, partialDays });
+    return res.status(200).json({ fullDays, partialDays });
   } catch (error) {
     console.error("getDriverFullDays error:", error);
+    return res.status(500).json({ message: "Failed to load driver availability." });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/bookings/driver-availability/times   (no auth, writes nothing)
+// Body: { date: "YYYY-MM-DD" (Manila), hours: 12 | 22 }  -- the shortest trip the customer's duration allows.
+// Returns { times: ["07:00", "07:15", ...] } = the pickup times (15-minute steps) on that day from which a driver is
+// still free for the whole trip, or { times: null } when there is no limit. A driver who finishes a trip at 7:00
+// is free again from 9:00 (the buffer), so 9:00 is listed and 8:45 is not. Only times come back: no drivers, no
+// counts, no other customers' bookings. The booking itself is still re-checked inside its transaction.
+// ─────────────────────────────────────────────────────────────────────────────
+const PICKUP_TIMES_TTL_MS = 30 * 1000;
+const pickupTimesCache = new Map(); // "date|hours" -> { at, times }
+
+const getDriverPickupTimes = async (req, res) => {
+  const { date } = req.body || {};
+  const hours = Number(req.body?.hours);
+  const okDay = typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(new Date(`${date}T00:00:00+08:00`).getTime());
+  if (!okDay || !Number.isFinite(hours) || hours < 1 || hours > 72) {
+    return res.status(400).json({ message: "date must be YYYY-MM-DD and hours a number between 1 and 72." });
+  }
+  try {
+    const key = `${date}|${hours}`;
+    const hit = pickupTimesCache.get(key);
+    if (hit && Date.now() - hit.at < PICKUP_TIMES_TTL_MS) return res.status(200).json({ times: hit.times });
+    const times = await getChauffeurPickupTimes({ day: date, hours });
+    if (pickupTimesCache.size > 200) pickupTimesCache.clear();
+    pickupTimesCache.set(key, { at: Date.now(), times });
+    return res.status(200).json({ times });
+  } catch (error) {
+    console.error("getDriverPickupTimes error:", error);
     return res.status(500).json({ message: "Failed to load driver availability." });
   }
 };
@@ -1631,4 +1663,4 @@ const getBaseArea = async (req, res) => {
   }
 };
 
-module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea, getDriverAvailability, getDriverFullDays };
+module.exports = { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea, getDriverAvailability, getDriverFullDays, getDriverPickupTimes };
