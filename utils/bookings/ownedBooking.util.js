@@ -1,4 +1,4 @@
-// Shared helpers for the customer-side violation + handover endpoints.
+// Shared helpers for the customer-side handover + inspection endpoints.
 const { db } = require("../../config/firebaseConnection/firebase");
 const { resolvePickupAt } = require("../payments/paymentBreakdown.util");
 
