@@ -11,18 +11,22 @@ const { ROLE_IDS } = require("../../utils/roles/role.util");
  * (e.g. a slow webhook retry, or the payment-status poll racing the
  * webhook, should never leave two "Payment Successful" cards in the bell).
  */
-const createNotification = async ({ type, userID, refID, title, message, refCollection = "bookings" }) => {
+// dedupeKey (same as the admin backend): for events that repeat on the SAME refID but are each their own thing, e.g. the
+// security deposit and the discount credit both coming back on one booking. Without it the 2nd would be swallowed by the
+// 1st one's still-active notification. With it, only a notification carrying the same key counts as a duplicate.
+const createNotification = async ({ type, userID, refID, title, message, refCollection = "bookings", dedupeKey = null }) => {
   if (!userID || !type) return null;
 
-  const existing = await db.collection("notifications")
+  let base = db.collection("notifications")
     .where("type", "==", type)
     .where("refID", "==", refID)
     .where("userID", "==", userID)
-    .where("status", "==", "active")
-    .limit(1)
-    .get();
+    .where("status", "==", "active");
+  if (!dedupeKey) base = base.limit(1);
+  const found = await base.get();
+  const matches = dedupeKey ? found.docs.filter((d) => d.data().dedupeKey === dedupeKey) : found.docs;
 
-  if (!existing.empty) return existing.docs[0].id;
+  if (matches.length) return matches[0].id;
 
   const ref = await db.collection("notifications").add({
     type,
@@ -31,6 +35,7 @@ const createNotification = async ({ type, userID, refID, title, message, refColl
     userID,
     title,
     message,
+    ...(dedupeKey ? { dedupeKey } : {}),
     isRead: false,
     status: "active",
     createdAt: admin.firestore.FieldValue.serverTimestamp(),

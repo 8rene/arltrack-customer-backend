@@ -451,6 +451,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus, refundFee = null,
         await createNotification({
           type: "refund_completed",
           userID: row.userID,
+          dedupeKey: `${payoutPhase}:${refundID}`,   // the deposit and the discount can both come back on one booking
           refID: row.bookingID || null,
           title: isCredit ? "Discount Returned" : "Deposit Returned",
           message: isCredit
@@ -471,6 +472,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus, refundFee = null,
         await createNotification({
           type: "refund_failed",
           userID: row.userID,
+          dedupeKey: `${payoutPhase}:${refundID}`,
           refID: row.bookingID || null,
           title: isCredit ? "Discount return delayed" : "Deposit return delayed",
           message: `We couldn't send your \u20b1${amt.toLocaleString()} ${word} back to your original payment method. Our team will follow up to return it another way.`,
