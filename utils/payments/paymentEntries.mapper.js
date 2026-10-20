@@ -1,5 +1,3 @@
-// GENERATED from arltrack-admin-backend/services/paymentEntries/paymentEntries.mapper.js -- DO NOT EDIT BY HAND.
-// Change the admin file, then run: node scripts/build-customer-payment-entries.mjs <this repo>
 // paymentEntries mapper -- PURE functions only (no Firestore), so they are testable.
 //
 // KEEP IN SYNC with arltrack-customer-backend/utils/payments/paymentEntries.mapper.js
@@ -346,7 +344,7 @@ const entriesToLegacyTransactions = (rows) =>
  */
 const MOVED_PAYMENT_FIELDS = [
   "depositPaymongoPaymentID", "balancePaymongoPaymentID", "paymongoPaymentID",
-  "depositPaymongoFee", "balancePaymongoFee", "paymongoFeeTotal", "paymongoChannel", "lastSettledVia",
+  "depositPaymongoFee", "balancePaymongoFee", "paymongoFeeTotal", "paymongoFeeOnRefunds", "paymongoChannel", "lastSettledVia",
   "depositPaymongoChannel", "balancePaymongoChannel",   // per-phase channel (gcash | maya | qrph), derived from the rows
   "paidAt", "balancePaidAt", "confirmedBy", "confirmedAt",
   "balanceMethod", "balanceReferenceNumber", "balanceCollectedBy", "balanceCollectedAt", "paymongoTransactions",
@@ -418,6 +416,10 @@ const hydratePayment = (payment, entries, opts = {}) => {
   // PayMongo's total fee across the successful online charges (was stored as payments.paymongoFeeTotal).
   const feeRows = rows.filter((e) => e.source === "online" && e.status === "success" && e.transactionFee !== undefined && e.transactionFee !== null);
   if (feeRows.length) fill("paymongoFeeTotal", Math.round(feeRows.reduce((a, e) => a + num(e.transactionFee), 0) * 100) / 100);
+  // PayMongo keeps its fee on a charge that is refunded. Each successful online refund row records its share of that fee
+  // (row.transactionFee); summed here as its own figure so paymongoFeeTotal stays "charges only".
+  const refundFeeRows = (entries || []).filter((e) => e && e.direction === "out" && e.source === "online" && e.status === "success" && e.transactionFee !== undefined && e.transactionFee !== null);
+  if (refundFeeRows.length) fill("paymongoFeeOnRefunds", Math.round(refundFeeRows.reduce((a, e) => a + num(e.transactionFee), 0) * 100) / 100);
   // Penalties paid ONLINE, from their entries. `rows` above leaves penalty rows out on purpose, so paymongoFeeTotal is
   // deposit + balance only; this is the penalty side, kept apart so the Gateway Breakdown can show it as its own line:
   //   paymongoFee  what PayMongo kept on those charges (row.transactionFee); null when none was recorded

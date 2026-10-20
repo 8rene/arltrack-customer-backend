@@ -14,7 +14,7 @@ const { notifyStaff } = require("../../services/notification/notification.servic
 const { syncPaymentEntries, hydratePayments, getEntriesForPaymentIDs } = require("../../utils/payments/paymentEntries.util");
 const { buildCustomerDiscount } = require("../../utils/payments/discountView.util");
 const { STARTED_TRIP_MESSAGE } = require("../../utils/payments/refundNotice.util");
-const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
+const { recordDirectCancellation, getCancellationReasons, getCancellationInfo } = require("../../utils/bookings/cancellationRequests.util");
 const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, driverCapacityLockRef, getFullChauffeurDays, getChauffeurDayAvailability, getChauffeurPickupTimes, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
 
 // Look up a car's price-per-day for a given durationType straight from
@@ -997,7 +997,7 @@ const getUserBookings = async (req, res) => {
     );
 
     // Why each cancelled booking was cancelled lives in cancellationRequests.
-    const cancelReasons = await getCancellationReasons(
+    const cancelInfo = await getCancellationInfo(
       bookings.filter((b) => (b.status || "").toLowerCase() === "cancelled").map((b) => b.bookingID || b.id)
     );
 
@@ -1059,7 +1059,9 @@ const getUserBookings = async (req, res) => {
         totalFee:      0,
         rentalFee:     0,
         status:               (b.status || "upcoming").toLowerCase(),
-        cancellationReason:   cancelReasons[b.bookingID || b.id] || "",
+        cancellationReason:   cancelInfo[b.bookingID || b.id]?.reason || "",
+        cancelledAt:          cancelInfo[b.bookingID || b.id]?.cancelledAt || null,
+        cancelledBy:          cancelInfo[b.bookingID || b.id]?.cancelledBy || null,
         modeOfDriving:        b.modeOfDriving             || "",
         location:             b.location                  || "",
         destination:          b.destination               || "",

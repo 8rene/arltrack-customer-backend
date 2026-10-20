@@ -35,6 +35,16 @@ const plateForBooking = (booking, plateNumber, now = Date.now()) => {
   const start = toDate(booking && booking.startDateTime);
   if (!plate || !start || !SHOWN_STATUSES.has(status)) return { plateNumber: "", plateRevealsAt: null };
 
+  // With a chauffeur the DRIVER decides: the plate stays hidden while the booking is upcoming and shows once the driver taps
+  // "On my way" (booking.enRouteAt). `plateWithDriver` lets the page say so. Ongoing / completed bookings fall through to the
+  // normal rule below, so older chauffeur trips that never had "On my way" still show their plate in the history.
+  const chauffeur = String((booking && booking.modeOfDriving) || "").toLowerCase().includes("chauffeur");
+  if (chauffeur && status === "upcoming") {
+    return booking.enRouteAt
+      ? { plateNumber: plate, plateRevealsAt: null, plateWithDriver: false }
+      : { plateNumber: "", plateRevealsAt: null, plateWithDriver: true };
+  }
+
   const revealsAt = start.getTime() - PLATE_REVEAL_HOURS_BEFORE * 3600 * 1000;
   if (now >= revealsAt) return { plateNumber: plate, plateRevealsAt: null };
   return { plateNumber: "", plateRevealsAt: new Date(revealsAt).toISOString() };

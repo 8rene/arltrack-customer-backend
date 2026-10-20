@@ -63,7 +63,9 @@ const runBookingReminders = async () => {
         // Also tells the customer the plate number is now visible (server-side rule:
         // utils/bookings/plateVisibility.util.js reveals it from 2h before start). The plate
         // itself is NOT put in the text — the booking details page is the single place it is shown.
-        message: `Your booking starts at ${fmtDateTime(start)}. The plate number of the car you're renting is now available — open your booking details to see it.`,
+        message: String(b.modeOfDriving || "").toLowerCase().includes("chauffeur")
+          ? `Your booking starts at ${fmtDateTime(start)}. Your driver will let you know when they're on the way and share the car's plate number then.`
+          : `Your booking starts at ${fmtDateTime(start)}. The plate number of the car you're renting is now available — open your booking details to see it.`,
       });
       if (id) reminderCount++;
 

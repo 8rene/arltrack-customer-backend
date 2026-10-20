@@ -2,7 +2,7 @@ const express = require("express");
 const router  = express.Router();
 
 const { createBooking, getUserBookings, cancelBooking, requestCancellation, checkCodingRule, getCodingNotice, getCodingCities, getBookingQuote, getBaseArea, getDriverAvailability, getDriverFullDays, getDriverPickupTimes } = require("../controllers/bookings/bookings.controller");
-const { getBookingDetails } = require("../controllers/bookings/bookingSessions.controller");
+const { getBookingDetails, getArrival } = require("../controllers/bookings/bookingSessions.controller");
 const { getBookingInspection } = require("../controllers/bookings/inspection.controller");
 const { getStatement, getStatementPdf, emailStatement, getReceipt, getReceiptPdf, emailReceipt } = require("../controllers/bookings/receipt.controller");
 const verifyToken = require("../middlewares/auth.middleware");
@@ -21,6 +21,9 @@ router.post("/driver-availability/days", rateLimit({ windowMs: 60 * 1000, max: 6
 router.post("/driver-availability/times", rateLimit({ windowMs: 60 * 1000, max: 120, keyPrefix: "driver-pickup-times" }), getDriverPickupTimes); // no auth -- pickup times on a day that still have a driver; returns only "HH:MM" strings
 router.post("/quote",               getBookingQuote);   // no auth needed — pricing preview only, writes nothing
 router.get("/:bookingID/details",   verifyToken, getBookingDetails);
+// Temporary "driver is on the way" page: owner-only, chauffeur bookings only, and only while the driver is en route
+// (see getArrival). Polled by the page every ~12s, so it gets its own limiter.
+router.get("/:bookingID/arrival",   verifyToken, rateLimit({ windowMs: 60 * 1000, max: 30, keyPrefix: "booking-arrival" }), getArrival);
 // The vehicle inspection (before-pickup / after-return photos, videos, parts condition) — own self-drive booking only; the server decides.
 router.get("/:bookingID/inspection", verifyToken, rateLimit({ windowMs: 60 * 1000, max: 30, keyPrefix: "booking-inspection" }), getBookingInspection);
 

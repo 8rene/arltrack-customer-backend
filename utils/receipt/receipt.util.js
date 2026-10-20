@@ -65,6 +65,9 @@ const KIND_TITLES = {
   refund: "Refund Slip",
   deposit_return: "Security Deposit Return Slip",
 };
+// The held discount credit paid back to the customer is a "refund" row (it counts as money refunded) but is not a refund of a
+// payment, so its slip says what it is.
+const titleFor = (e, kind) => (e && e.phase === "discount_return" ? "Discount Credit Return Slip" : KIND_TITLES[kind]);
 const KIND_PREFIX = { payment: "RC", penalty: "PN", refund: "RF", deposit_return: "DR" };
 const PHASE_LABEL = { deposit: "Deposit", balance: "Balance", penalty: "Penalty", deposit_return: "Security deposit" };
 
@@ -297,7 +300,7 @@ const makeReceiptBuilder = ({ db, resolveName = async (id) => id, getSettings = 
     ]);
 
     return {
-      entryID: entry.id, receiptNo, kind, title: KIND_TITLES[kind], isCopy,
+      entryID: entry.id, receiptNo, kind, title: titleFor(entry, kind), isCopy,
       direction: entry.direction, date: when,
       business: {
         name: settings?.storeName || "ARL Car Rental",
@@ -458,7 +461,7 @@ const makeStatementBuilder = ({ db, resolveName = async (id) => id, getSettings 
       const kind = kindOf(e);
       const when = whenOf(e) || null;
       const m = {
-        entryID: e.id, receiptNo: receiptNumberFor(e, kind, when), kind, title: KIND_TITLES[kind],
+        entryID: e.id, receiptNo: receiptNumberFor(e, kind, when), kind, title: titleFor(e, kind),
         label: labelOf(e), direction: e.direction, date: when, amount: num(e.amount), count: 1,
         method: e.method || null, source: e.source || null, referenceNumber: e.referenceNumber || null,
         // online payment fee on top of `amount` (penalty payments paid online only; 0 otherwise)

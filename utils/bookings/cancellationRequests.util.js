@@ -66,6 +66,26 @@ const getCancellationReasons = async (bookingKeys) => {
   return out;
 };
 
+// { [bookingKey]: { reason, cancelledAt, cancelledBy } } for the given bookings: the direct row, else an approved
+// request. cancelledAt is when that row was written (the moment the customer asked / the booking was cancelled).
+const getCancellationInfo = async (bookingKeys) => {
+  const keys = [...new Set((bookingKeys || []).filter(Boolean))];
+  const out = {};
+  for (let i = 0; i < keys.length; i += 30) {
+    const snap = await db.collection(COL).where("bookingID", "in", keys.slice(i, i + 30)).get();
+    snap.forEach((d) => {
+      const r = d.data();
+      const direct = !!r.cancelledBy;
+      const approvedRequest = !r.cancelledBy && !r.refundRequestID && r.status === "approved";
+      if (!direct && !approvedRequest) return;
+      if (direct || !out[r.bookingID]) {
+        out[r.bookingID] = { reason: r.reason || "", cancelledAt: r.createdAt || r.requestedAt || null, cancelledBy: r.cancelledBy || "customer" };
+      }
+    });
+  }
+  return out;
+};
+
 // Refund docs no longer carry userID / the customer's reason / notes: they live on the booking's cancellation row.
 // Same reading rules as the admin backend (withCancellationInfo): on a refund doc the field `reason` is the STAFF's
 // reason for the decision (why it was rejected, or the note given on approve); the customer's own words are the cancellation
@@ -109,4 +129,4 @@ const attachRefundRowInfo = async (requests) => {
   });
 };
 
-module.exports = { recordDirectCancellation, createPendingRefundRow, getCancellationReasons, attachRefundRowInfo };
+module.exports = { recordDirectCancellation, createPendingRefundRow, getCancellationReasons, getCancellationInfo, attachRefundRowInfo };

@@ -221,4 +221,78 @@ const getBookingDetails = async (req, res) => {
 
 };
 
-module.exports = { getBookingDetails };
+// GET /api/bookings/:bookingID/arrival
+//
+// The temporary "your driver is on the way" page. Owner-only, chauffeur bookings only, and served ONLY while the driver is
+// en route: the driver tapped "On my way" (booking.enRouteAt is set, by the admin app) and the booking is still "upcoming".
+// Start Pickup turns the booking "ongoing", which closes the window by itself.
+// It returns the car, its plate number and the driver's first name. NO position: customers never see live position (see
+// getBookingDetails above), and the car is not tracked before pickup anyway.
+const getArrival = async (req, res) => {
+  const { bookingID } = req.params;
+  try {
+    const booking = await loadOwnedBooking(req, res, bookingID);
+    if (!booking) return; // response already sent
+
+    if (!String(booking.modeOfDriving || "").toLowerCase().includes("chauffeur")) {
+      return res.status(404).json({ message: "This booking has no driver.", reason: "no_driver" });
+    }
+    if (String(booking.status || "").toLowerCase() !== "upcoming") {
+      return res.status(410).json({ message: "This page is only available while your driver is on the way.", reason: "closed" });
+    }
+    if (!booking.enRouteAt) {
+      return res.status(404).json({ message: "Your driver hasn't left yet. You'll get a notification when they do.", reason: "not_on_the_way" });
+    }
+
+    let carName = "Unknown Vehicle", carImage = "", carPlate = "";
+    if (booking.carID) {
+      const carDoc = await db.collection("cars").doc(booking.carID).get();
+      if (carDoc.exists) {
+        const car = carDoc.data();
+        const [brandDoc, modelDoc] = await Promise.all([
+          car.brandID ? db.collection("brand").doc(car.brandID).get() : null,
+          car.modelID ? db.collection("model").doc(car.modelID).get() : null,
+        ]);
+        const brand = brandDoc?.exists ? (brandDoc.data().brandName || "") : "";
+        const model = modelDoc?.exists ? (modelDoc.data().modelName || "") : "";
+        carName = `${brand} ${model}`.trim() || "Unknown Vehicle";
+        carPlate = car.plateNumber || "";
+      }
+      const imgSnap = await db.collection("carImages")
+        .where("carID", "==", booking.carID)
+        .where("isPrimary", "==", true)
+        .limit(1)
+        .get();
+      if (!imgSnap.empty) carImage = imgSnap.docs[0].data().imageURL || "";
+    }
+
+    // Where the car is heading: the customer's own pickup pin, as text only.
+    let pickupAddress = null;
+    try {
+      const sessionSnap = await db.collection("bookingSessions").where("bookingID", "==", bookingID).limit(1).get();
+      const pin = sessionSnap.empty ? null : sessionSnap.docs[0].data().pickupLocation;
+      pickupAddress = (pin && (pin.address || pin.name || pin.label)) || null;
+    } catch (e) {
+      console.warn("getArrival: could not read the pickup pin:", e.message);
+    }
+
+    // Plate through the same rule as everywhere else: with enRouteAt set it is shown.
+    const { plateNumber } = plateForBooking(booking, carPlate);
+
+    return res.status(200).json({
+      bookingID,
+      carName,
+      carImage,
+      plateNumber,
+      driverFirstName: booking.enRouteDriverFirstName || "",
+      enRouteAt:       toISO(booking.enRouteAt),
+      startDateTime:   booking.startDateTime || null,
+      pickupAddress,
+    });
+  } catch (error) {
+    console.error("getArrival error:", error);
+    return res.status(500).json({ message: "Failed to load the arrival page." });
+  }
+};
+
+module.exports = { getBookingDetails, getArrival };
