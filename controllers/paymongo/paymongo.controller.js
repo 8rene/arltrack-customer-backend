@@ -7,10 +7,10 @@ const { createNotification, notifyStaff, resolveNotification } = require("../../
 const { axios, PAYMONGO_V1, paymongoHeaders, channelLabel } = require("../../utils/payments/paymongoClient.util");
 const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = require("../../utils/payments/settlePayment.util");
 const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
-const { chargeFromPaymentResource, pickPaidPayment, feeFromRefundResource } = require("../../utils/payments/paymongoFee.util");
+const { chargeFromPaymentResource, pickPaidPayment, feeFromRefundResource, retainedFeeShare } = require("../../utils/payments/paymongoFee.util");
 const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefundRequests } = require("../../utils/payments/paymentEntries.util");
 const { createPendingRefundRow, attachRefundRowInfo } = require("../../utils/bookings/cancellationRequests.util");
-const { QRPH_BOOKING_NOTICE, qrphRefundNotice } = require("../../utils/payments/refundNotices.util");
+const { QRPH_BOOKING_NOTICE, qrphRefundNotice } = require("../../utils/payments/refundNotice.util");
 const { sessionIDForPayment, findPaymentSnapBySessionID } = require("../../utils/payments/paymentSession.util");
 
 const { handlePenaltyWebhookPaid } = require("./penaltyPayment.controller");
@@ -292,7 +292,38 @@ const feeOnSuccess = (rowStatus, current, refundFee) =>
   rowStatus === "success" && refundFee !== null && refundFee !== undefined && (current === undefined || current === null)
     ? { transactionFee: refundFee } : {};
 
-const applyRefundPartResult = async ({ refundID, refundStatus, refundFee = null }) => {
+// PayMongo's refund object has no fee field, so when it reports none the fee is taken from the charge being refunded: the charge's
+// "in" row (matched by the pay_... id on the refund) already holds PayMongo's real fee for it (saved when it was paid). The refund
+// gets its share of that fee (see retainedFeeShare). null when the charge row / fee is not there. Never guessed.
+const retainedFeeForRefund = async ({ paymongoPaymentID, refundAmount }) => {
+  if (!paymongoPaymentID) return null;
+  const snap = await db.collection("paymentEntries").where("referenceNumber", "==", paymongoPaymentID).where("direction", "==", "in").limit(1).get();
+  if (snap.empty) return null;
+  const c = snap.docs[0].data();
+  return retainedFeeShare({ chargeAmount: c.amount, chargeFee: c.transactionFee, refundAmount });
+};
+
+// A refund request no longer stores userID (it is on the cancellation row that carries refundRequestID). Old docs still do.
+const resolveRefundUserID = async (r) => {
+  if (r.userID) return r.userID;
+  try {
+    const row = await db.collection("cancellationRequests").where("refundRequestID", "==", r.refundRequestID).limit(1).get();
+    if (!row.empty && row.docs[0].data().userID) return row.docs[0].data().userID;
+    if (r.paymentID) {
+      const pay = await db.collection("payments").where("paymentID", "==", r.paymentID).limit(1).get();
+      if (!pay.empty) return pay.docs[0].data().userID || null;
+    }
+  } catch (e) {
+    console.error("[PayMongo Webhook] could not resolve the customer for refund", r.refundRequestID, e.message);
+  }
+  return null;
+};
+
+const applyRefundPartResult = async ({ refundID, refundStatus, refundFee = null, paymongoPaymentID = null, refundAmount = null }) => {
+  if (refundStatus === "succeeded" && (refundFee === null || refundFee === undefined)) {
+    try { refundFee = await retainedFeeForRefund({ paymongoPaymentID, refundAmount }); }
+    catch (e) { console.error("[PayMongo Webhook] could not work out the fee for refund", refundID, e.message); refundFee = null; }
+  }
   // The re_... id is the referenceNumber of the refund's "out" row in paymentEntries; that row points at the request.
   let snap = { empty: true };
   const entrySnap = await db.collection("paymentEntries").where("referenceNumber", "==", refundID).where("direction", "==", "out").limit(1).get();
@@ -435,6 +466,16 @@ const applyRefundPartResult = async ({ refundID, refundStatus, refundFee = null 
         title: isCredit ? "Discount return needs follow-up" : "Deposit return needs follow-up",
         message: `PayMongo could not complete the online return of the \u20b1${amt.toLocaleString()} ${word} for booking ${row.bookingID}. Retry it or hand it back in store from the Refunds page.`,
       }).catch((e) => console.error(`[PayMongo Webhook] failed to notify staff about a failed ${word} return:`, e.message));
+      // The customer is told too, once (the row only moves to failed once). Staff retry it or hand it back in store.
+      if (row.userID) {
+        await createNotification({
+          type: "refund_failed",
+          userID: row.userID,
+          refID: row.bookingID || null,
+          title: isCredit ? "Discount return delayed" : "Deposit return delayed",
+          message: `We couldn't send your \u20b1${amt.toLocaleString()} ${word} back to your original payment method. Our team will follow up to return it another way.`,
+        }).catch((e) => console.error(`[PayMongo Webhook] failed to write the ${word}-return-failed notification:`, e.message));
+      }
     }
     recordAudit({
       action: "update",
@@ -521,16 +562,28 @@ const applyRefundPartResult = async ({ refundID, refundStatus, refundFee = null 
   });
 
   if (outcome.skip) return { found: true, skipped: true };
-  if (outcome.legacy) await syncRefundEntries(reqRef.id); // un-migrated request: derive its "out" rows now. Never throws.
+  if (outcome.legacy) {
+    await syncRefundEntries(reqRef.id); // un-migrated request: derive its "out" rows now. Never throws.
+    // The derived row has no fee yet: save this refund's fee on it (same rule as feeOnSuccess: success only, never over a saved fee).
+    if (partStatus === "succeeded" && refundFee !== null && refundFee !== undefined) {
+      try {
+        const rs = await db.collection("paymentEntries").where("referenceNumber", "==", refundID).where("direction", "==", "out").limit(1).get();
+        if (!rs.empty && (rs.docs[0].data().transactionFee === undefined || rs.docs[0].data().transactionFee === null)) {
+          await rs.docs[0].ref.update({ transactionFee: refundFee, updatedAt: new Date() });
+        }
+      } catch (e) { console.error("[PayMongo Webhook] could not save the fee on the migrated refund row:", e.message); }
+    }
+  }
   const { request: r, part } = outcome;
   const now = new Date();
+  const customerID = await resolveRefundUserID(r);
 
   recordTransactionLog({
     logID: `${r.refundRequestID}_refund_${refundID}`,
     bookingID: r.bookingID,
     paymentID: r.paymentID,
     refundReqID: r.refundRequestID,
-    userID: r.userID || null,
+    userID: customerID || null,
     type: "Refund",
     amount: part.amount || 0,
     status: partStatus === "succeeded" ? "Refunded" : "Failed",
@@ -553,15 +606,15 @@ const applyRefundPartResult = async ({ refundID, refundStatus, refundFee = null 
     recordAudit({
       action: "update",
       description: `Refund ${r.refundRequestID} completed — ₱${Number(r.toRefundAmount ?? r.amount ?? 0).toLocaleString()} returned for payment ${r.paymentID}.`,
-      userID: r.userID || null,
+      userID: customerID || null,
       bookingID: r.bookingID || null,
       paymentID: r.paymentID,
       refundRequestID: r.refundRequestID,
     });
-    if (r.userID) {
+    if (customerID) {
       await createNotification({
         type: "refund_completed",
-        userID: r.userID,
+        userID: customerID,
         refID: r.bookingID || null,
         title: "Refund Completed",
         message: `Your refund of ₱${Number(r.toRefundAmount ?? r.amount ?? 0).toLocaleString()} has been returned.`,
@@ -571,15 +624,15 @@ const applyRefundPartResult = async ({ refundID, refundStatus, refundFee = null 
     recordAudit({
       action: "update",
       description: `Refund ${r.refundRequestID}: PayMongo reported the ${part.kind || ""} refund as failed.`,
-      userID: r.userID || null,
+      userID: customerID || null,
       bookingID: r.bookingID || null,
       paymentID: r.paymentID,
       refundRequestID: r.refundRequestID,
     });
-    if (outcome.failedNow && r.userID) {
+    if (outcome.failedNow && customerID) {
       await createNotification({
         type: "refund_failed",
-        userID: r.userID,
+        userID: customerID,
         refID: r.bookingID || null,
         title: "Refund Failed",
         message: `Your approved refund of ₱${Number(r.toRefundAmount ?? r.amount ?? 0).toLocaleString()} could not be completed by PayMongo. Please contact support.`,
@@ -802,7 +855,12 @@ const handleWebhook = async (req, res) => {
       if (refundStatus !== "succeeded" && refundStatus !== "failed") {
         return res.status(200).json({ received: true });
       }
-      await applyRefundPartResult({ refundID, refundStatus, refundFee: feeFromRefundResource(refund) });
+      await applyRefundPartResult({
+        refundID, refundStatus,
+        refundFee: feeFromRefundResource(refund),                                    // null: PayMongo puts no fee on a refund
+        paymongoPaymentID: refund?.attributes?.payment_id || null,                   // the charge this refund returns money from
+        refundAmount: Number.isFinite(Number(refund?.attributes?.amount)) ? Number(refund.attributes.amount) / 100 : null,
+      });
       return res.status(200).json({ received: true });
     }
 

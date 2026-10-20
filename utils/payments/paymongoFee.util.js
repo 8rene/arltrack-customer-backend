@@ -44,6 +44,18 @@ const feeFromRefundResource = (resource) => {
   return centavosToPesos(a.fee);
 };
 
+// PayMongo's refund resource carries NO fee of its own (it has balance_transaction_id, not fee), and PayMongo keeps the
+// processing fee of the ORIGINAL charge when that charge is refunded. So the cost a refund row records is the share of the
+// refunded charge's fee that this refund accounts for: chargeFee * refundAmount / chargeAmount (all in pesos, capped at the
+// whole fee). Several refunds of one charge (deposit return + discount return, or a part refund) therefore add up to at
+// most that one fee, never more. null when the fee or either amount is unknown: nothing is guessed, nothing is recorded.
+const retainedFeeShare = ({ chargeAmount, chargeFee, refundAmount }) => {
+  if (chargeFee === undefined || chargeFee === null || !Number.isFinite(Number(chargeFee))) return null;
+  const charge = Number(chargeAmount), refund = Number(refundAmount), fee = Number(chargeFee);
+  if (!(charge > 0) || !(refund > 0) || fee < 0) return null;
+  return round2(fee * Math.min(1, refund / charge));
+};
+
 const FIELD = { deposit: "depositPaymongoFee", balance: "balancePaymongoFee" };
 
 const hasFee = (payment, phase) => {
@@ -64,4 +76,4 @@ const buildFeePatch = (payment, phase, charge) => {
   };
 };
 
-module.exports = { centavosToPesos, feeFromRefundResource, chargeFromPaymentResource, pickPaidPayment, buildFeePatch, hasFee, round2 };
+module.exports = { centavosToPesos, feeFromRefundResource, retainedFeeShare, chargeFromPaymentResource, pickPaidPayment, buildFeePatch, hasFee, round2 };

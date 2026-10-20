@@ -13,7 +13,7 @@ const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/b
 const { notifyStaff } = require("../../services/notification/notification.service");
 const { syncPaymentEntries, hydratePayments, getEntriesForPaymentIDs } = require("../../utils/payments/paymentEntries.util");
 const { buildCustomerDiscount } = require("../../utils/payments/discountView.util");
-const { STARTED_TRIP_MESSAGE } = require("../../utils/payments/refundNotices.util");
+const { STARTED_TRIP_MESSAGE } = require("../../utils/payments/refundNotice.util");
 const { recordDirectCancellation, getCancellationReasons } = require("../../utils/bookings/cancellationRequests.util");
 const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, driverCapacityLockRef, getFullChauffeurDays, getChauffeurDayAvailability, getChauffeurPickupTimes, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
 
