@@ -14,6 +14,12 @@
 // buffer overlap in that model, which also covers trips that merely touch (end == next start).
 // The buffer comes from systemSettings.driverBufferMinutes (admin System Settings), default 120.
 //
+// Who counts as a driver follows the ADMIN backend (driverDispatch.service.js): every user with the Driver role,
+// except accounts that are inactive / locked (they cannot log in). An EXPIRED LICENSE does NOT remove a driver
+// from the headcount: admin only warns about it when assigning ("Assign Anyway") and no longer auto-locks the
+// account, so the customer side must not shade days as full for a driver admin can still assign.
+// The expiry is still read and shown in the logs so an expired license is visible.
+//
 // The same buffer must be used by the admin dispatch check (admin-backend driverDispatch.service.js)
 // so the customer-side check and the assignment check agree.
 
@@ -56,12 +62,16 @@ const driverCapacityLockRef = () => db.collection("driverLocks").doc("chauffeur"
 // Drivers who could take a chauffeur trip at all: role Driver and not inactive/locked, each with the
 // latest license expiry on file (null = no date on file). A person can have several userDocument records
 // (re-uploads): the LATEST expiry wins.
-const loadEligibleDrivers = async () => {
+// loadDriverRoster returns EVERY Driver account (blocked ones flagged) so the logs can show who was left out and why.
+const loadDriverRoster = async () => {
   const driverSnap = await db.collection("user").where("roleID", "==", ROLE_IDS.DRIVER).get();
-  const active = driverSnap.docs.filter((d) => !BLOCKED_DRIVER_STATUSES.has(String(d.data().status || "").toLowerCase()));
-  if (!active.length) return [];
+  const all = driverSnap.docs.map((d) => {
+    const status = String(d.data().status || "").toLowerCase();
+    return { id: d.id, status: status || "(no status)", blocked: BLOCKED_DRIVER_STATUSES.has(status) };
+  });
+  const ids = all.filter((d) => !d.blocked).map((d) => d.id);
+  if (!ids.length) return all.map((d) => ({ ...d, expiry: null }));
 
-  const ids = active.map((d) => d.id);
   const expiry = new Map();
   for (let i = 0; i < ids.length; i += 30) { // Firestore "in" allows 30 values
     const snap = await db.collection("userDocument").where("userID", "in", ids.slice(i, i + 30)).get();
@@ -73,17 +83,49 @@ const loadEligibleDrivers = async () => {
       if (!prev || e > prev) expiry.set(data.userID, e);
     });
   }
-  return ids.map((id) => ({ id, expiry: expiry.get(id) || null }));
+  return all.map((d) => ({ ...d, expiry: expiry.get(d.id) || null }));
 };
 
-// Drivers who could take a trip ending at `tripEnd`: a license that is still valid at the end of the
-// trip. A driver with NO license date on file is counted (the admin assignment check also only warns
-// when a license is actually expired).
+const loadEligibleDrivers = async () =>
+  (await loadDriverRoster()).filter((d) => !d.blocked).map(({ id, expiry }) => ({ id, expiry }));
+
+// ── Debug log ─────────────────────────────────────────────────────────────────
+// One readable block per calendar / clock request: which Driver accounts exist, which of them count on the
+// first day and why (blocked status, license expired before that day, ...), and every chauffeur booking that
+// is using up a driver (assigned or not). Server console only, never returned to the customer.
+// Throttled to once every 10 s per label so a busy calendar does not flood the log.
+const lastSnapshotAt = {};
+const iso = (d) => (d ? asDate(d).toISOString().slice(0, 16).replace("T", " ") + "Z" : "-");
+const logSnapshot = (label, { roster, bookings, bufferMs, at, result }) => {
+  if (Date.now() - (lastSnapshotAt[label] || 0) < 10 * 1000) return;
+  lastSnapshotAt[label] = Date.now();
+  try {
+    const counted = (d) => !d.blocked;
+    const reason = (d) => {
+      if (d.blocked) return `NOT counted (status ${d.status})`;
+      if (d.expiry && d.expiry < at) return `counted (WARNING: license expired ${iso(d.expiry)}; admin only warns, so still counted)`;
+      return d.expiry ? `counted (license valid until ${iso(d.expiry)})` : "counted (no license date on file)";
+    };
+    const lines = [
+      `[driverCapacity] ${label} | checked for ${iso(at)} | buffer ${Math.round(bufferMs / MINUTE_MS)} min`,
+      `  Driver accounts: ${roster.length} | counted: ${roster.filter(counted).length}`,
+      ...roster.map((d) => `    - ${d.id} status=${d.status} -> ${reason(d)}`),
+      `  Chauffeur bookings using a driver (to pay / upcoming / ongoing): ${bookings.length}`,
+      ...bookings.map((b) => `    - ${b.bookingID || "?"} car=${b.carID || "?"} ${b.status} ${iso(b.startDateTime)} -> ${iso(b.endDateTime)}`),
+    ];
+    if (result) lines.push(`  Result: ${result}`);
+    console.log(lines.join("\n"));
+  } catch (err) {
+    console.warn("[driverCapacity] snapshot log failed:", err.message);
+  }
+};
+
+// Drivers who could take a trip ending at `tripEnd`. Same rule as the admin dispatch board: every Driver
+// account that is not inactive / locked. License expiry is a warning on the admin side, not a block, so it
+// is not used here (see the note at the top of this file).
 const countEligibleDrivers = async (tripEnd) => {
-  const end = asDate(tripEnd);
-  if (!end) return 0;
-  const drivers = await loadEligibleDrivers();
-  return drivers.filter((d) => !d.expiry || d.expiry >= end).length;
+  if (!asDate(tripEnd)) return 0;
+  return (await loadEligibleDrivers()).length;
 };
 
 // Why is the driver headcount what it is? Same query the admin dispatch board uses (user where roleID == Driver),
@@ -106,7 +148,7 @@ const getDriverHeadcountReport = async (at = new Date()) => {
     activeDrivers: drivers.length,                   // not inactive / locked
     licenseExpiredAtDate: drivers.filter((d) => d.expiry && d.expiry < at0).length,
     noLicenseDateOnFile: drivers.filter((d) => !d.expiry).length,
-    countedAtDate: drivers.filter((d) => !d.expiry || d.expiry >= at0).length,
+    countedAtDate: drivers.length,                  // expired licenses are still counted (admin only warns)
     checkedAt: at0 ? at0.toISOString() : null,
   };
 };
@@ -193,6 +235,7 @@ const checkChauffeurCapacity = async ({ startDateTime, endDateTime, tx = null, e
   if (tx) await tx.get(driverCapacityLockRef()); // joins the lock into this transaction's read set
   const bookings = await readChauffeurBookings(tx);
   const peak = computePeakOverlap(bookings, start, end, buffer, now);
+  console.log(`[driverCapacity] trip check ${iso(start)} -> ${iso(end)}${tx ? " (booking transaction)" : ""}: drivers counted=${capacity}, busiest overlap=${peak}, bookings with driver=${bookings.length} -> ${peak < capacity ? "AVAILABLE" : "FULL"}`);
   return { available: peak < capacity, capacity, peak };
 };
 
@@ -332,19 +375,20 @@ const enumerateDays = (fromDay, toDay) => {
 /** The days in [fromDay, toDay] (Manila, "YYYY-MM-DD") with no chauffeur available the whole day. */
 const getFullChauffeurDays = async ({ fromDay, toDay, now = new Date() }) => {
   const days = enumerateDays(fromDay, toDay);
-  const [drivers, bufferMs, bookings] = await Promise.all([loadEligibleDrivers(), getDriverBufferMs(), readChauffeurBookings()]);
-  // Lenient on purpose: a driver whose license is still valid at the start of the day counts for that day.
-  const capacityAt = (dayStart) => drivers.filter((d) => !d.expiry || d.expiry >= dayStart).length;
-  if (days.length && capacityAt(manilaDayStart(days[0])) <= 0) await logZeroCapacity("calendar", manilaDayStart(days[0]));
-  return computeFullDays(bookings, days, capacityAt, bufferMs, now);
+  const [roster, bufferMs, bookings] = await Promise.all([loadDriverRoster(), getDriverBufferMs(), readChauffeurBookings()]);
+  const drivers = roster.filter((d) => !d.blocked);
+  const capacityAt = () => drivers.length; // license expiry does not reduce capacity (admin only warns)
+  const fullDays = computeFullDays(bookings, days, capacityAt, bufferMs, now);
+  if (days.length) logSnapshot(`calendar(full) ${fromDay}..${toDay}`, { roster, bookings, bufferMs, at: manilaDayStart(days[0]), result: `full days = ${fullDays.length ? fullDays.join(", ") : "none"}` });
+  return fullDays;
 };
 
 /** For the calendar: { fullDays, partialDays } in [fromDay, toDay]. Partial = a driver is free at some times only. */
 const getChauffeurDayAvailability = async ({ fromDay, toDay, now = new Date() }) => {
   const days = enumerateDays(fromDay, toDay);
-  const [drivers, bufferMs, bookings] = await Promise.all([loadEligibleDrivers(), getDriverBufferMs(), readChauffeurBookings()]);
-  const capacityAt = (dayStart) => drivers.filter((d) => !d.expiry || d.expiry >= dayStart).length;
-  if (days.length && capacityAt(manilaDayStart(days[0])) <= 0) await logZeroCapacity("calendar", manilaDayStart(days[0]));
+  const [roster, bufferMs, bookings] = await Promise.all([loadDriverRoster(), getDriverBufferMs(), readChauffeurBookings()]);
+  const drivers = roster.filter((d) => !d.blocked);
+  const capacityAt = () => drivers.length; // license expiry does not reduce capacity (admin only warns)
   const blocks = computeDayBlocks(bookings, days, capacityAt, bufferMs, now);
   const fullDays = [], partialDays = [];
   for (const day of days) {
@@ -352,14 +396,26 @@ const getChauffeurDayAvailability = async ({ fromDay, toDay, now = new Date() })
     if (blocks[day].full) fullDays.push(day);
     else if (blocks[day].blocked.length) partialDays.push(day);
   }
+  if (days.length) {
+    // A day with 0 drivers counted is shaded full even with no bookings -- say so, it is the usual "whole month orange" cause.
+    const noDriverDays = days.filter((d) => capacityAt(manilaDayStart(d)) <= 0);
+    logSnapshot(`calendar ${fromDay}..${toDay}`, {
+      roster, bookings, bufferMs, at: manilaDayStart(days[0]),
+      result: `full=${fullDays.length} partial=${partialDays.length}` +
+        (noDriverDays.length ? ` | ${noDriverDays.length} day(s) have ZERO drivers counted (${noDriverDays[0]}..${noDriverDays[noDriverDays.length - 1]}), so they show full with no bookings needed` : ""),
+    });
+  }
   return { fullDays, partialDays };
 };
 
-/** For the clock: the "HH:MM" pickup times on `day` that still have a driver for a trip of `hours`. */
+/** For the clock: the "HH:MM" pickup times on `day` that still have a driver for a trip of `hours`. null = no limit. */
 const getChauffeurPickupTimes = async ({ day, hours, now = new Date() }) => {
-  const [drivers, bufferMs, bookings] = await Promise.all([loadEligibleDrivers(), getDriverBufferMs(), readChauffeurBookings()]);
-  const capacityAtEnd = (end) => drivers.filter((d) => !d.expiry || d.expiry >= end).length;
-  return computePickupTimes(bookings, day, hours, capacityAtEnd, bufferMs, now);
+  const [roster, bufferMs, bookings] = await Promise.all([loadDriverRoster(), getDriverBufferMs(), readChauffeurBookings()]);
+  const drivers = roster.filter((d) => !d.blocked);
+  const capacityAtEnd = () => drivers.length; // license expiry does not reduce capacity (admin only warns)
+  const times = computePickupTimes(bookings, day, hours, capacityAtEnd, bufferMs, now);
+  logSnapshot(`pickup times ${day} (${hours}h)`, { roster, bookings, bufferMs, at: manilaDayStart(day), result: `${times.length} pickup time(s) offered` });
+  return times;
 };
 
 module.exports = {
