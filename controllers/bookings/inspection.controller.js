@@ -6,16 +6,20 @@
 //
 // WHO SEES IT
 //   • Only the booking's own customer (a missing booking and someone else's look identical: 404).
-//   • Only a SELF-DRIVE booking. With a chauffeur the driver does the handover, so the customer app
-//     shows nothing — the server decides, so a chauffeur booking's inspection never leaves the server.
+//   • Only when NO DRIVER handles the trip: a self-drive booking, or a chauffeur booking that has no driver
+//     assigned. With a driver the driver does the handover and sees the inspection in the driver app, so the
+//     customer app shows nothing. (This is the same rule the admin app uses to decide who gets the "inspection
+//     confirmed" notification: the driver if there is one, otherwise the customer.) The server decides, so an
+//     inspection that is not for this customer never leaves the server.
 //   • Only for a paid booking (upcoming / ongoing / completed), and only from the same moment the car's
 //     plate is revealed (see plateVisibility.util.js) — the exterior photos can show the plate.
 //
 // WHAT THEY SEE — an explicit whitelist, built field by field (never a copy of the stored documents, so a
 // field added to the admin records later is NOT exposed by accident):
-//   per phase (before / after):  when it was recorded, the overall condition, the parts noted as not-Good
-//   (name + status + that part's photo), the 3 exterior photos, the videos and the additional photos.
-//   NOT included: car / part ids, serial numbers, who recorded it, edit history, file sizes.
+//   per phase (before / after):  when it was recorded, the 3 exterior photos, the videos and the additional
+//   photos (each with its caption).
+//   NOT included: the parts condition (which parts are Good / damaged), the per-part photos (a close-up of a part
+//   can show its serial number), car / part ids, serial numbers, prices, who recorded it, edit history, file sizes.
 //
 // PHOTOS & VIDEOS — each file is returned as a short-lived (1 hour) signed link, not the permanent
 // download-token link stored in the admin records, so a link copied out of the page stops working.
@@ -25,15 +29,25 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { loadOwnedBooking, toISO } = require("../../utils/bookings/ownedBooking.util");
 const { plateForBooking } = require("../../utils/bookings/plateVisibility.util");
 
-const PHOTO_COLLECTION     = { before: "vehicleDocumentationBeforeTrip", after: "vehicleDocumentationAfterTrip" };
-const INVENTORY_COLLECTION = { before: "inventoryBeforeTrip",            after: "inventoryAfterTrip" };
+const PHOTO_COLLECTION = { before: "vehicleDocumentationBeforeTrip", after: "vehicleDocumentationAfterTrip" };
 
 // cancellation_request = an ONGOING trip with a pending cancel request, so it counts as ongoing here.
 const SHOWN_STATUSES = new Set(["upcoming", "ongoing", "cancellation_request", "completed"]);
 const SIGNED_URL_TTL_MS = 60 * 60 * 1000; // 1 hour
-const MAX_DAMAGED_PARTS = 40;
+const EXTERIOR_FIELDS = [["frontViewUrl", "Front"], ["sideViewUrl", "Side"], ["backViewUrl", "Back"]];
 
 const isSelfDrive = (booking) => /self/i.test(String(booking?.modeOfDriving || ""));
+
+// Is a driver handling this trip? The current driver is the booking's "assigned" row in driverAssignments
+// (a legacy booking.driverID is only a fallback) — the same lookup the booking reminders use.
+const hasAssignedDriver = async (booking) => {
+  const snap = await db.collection("driverAssignments")
+    .where("bookingID", "==", booking.bookingID)
+    .where("status", "==", "assigned")
+    .limit(1)
+    .get();
+  return !snap.empty || !!booking.driverID;
+};
 
 // ── Storage links ────────────────────────────────────────────────────────────
 // https://firebasestorage.googleapis.com/v0/b/<bucket>/o/<encoded path>?alt=media&token=…
@@ -91,75 +105,27 @@ const mergePhotoDocs = (snap) => {
   return merged;
 };
 
-const latestInventory = (snap) => {
-  if (!snap || snap.empty) return null;
-  return snap.docs.map((d) => d.data()).sort((a, b) => secs(b.recordedAt) - secs(a.recordedAt))[0];
-};
-
-// "Brake Disc" + type "Brake Parts" -> "brakePartsBrakeDiscUrl" — how the admin app names a part's photo field.
-const partNameToFieldKey = (str = "") => {
-  const camel = String(str)
-    .replace(/[^a-zA-Z0-9 ]/g, "")
-    .trim()
-    .split(/\s+/)
-    .map((w, i) => (i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()))
-    .join("");
-  return camel ? `${camel}Url` : "";
-};
-
-// carPartID -> { name, photoKeys[] }, read once per request (the before and after records share parts).
-const loadPartInfo = async (partIDs) => {
-  const info = new Map();
-  const ids = [...new Set(partIDs.filter(Boolean))].slice(0, MAX_DAMAGED_PARTS);
-  const partDocs = await Promise.all(ids.map((id) => db.collection("carParts").doc(String(id)).get().catch(() => null)));
-  const typeIDs = [...new Set(partDocs.map((d) => d?.exists && d.data().carPartTypeID).filter(Boolean))];
-  const typeDocs = await Promise.all(typeIDs.map((id) => db.collection("carPartTypes").doc(String(id)).get().catch(() => null)));
-  const typeName = new Map(typeIDs.map((id, i) => [id, typeDocs[i]?.exists ? (typeDocs[i].data().carPartName || "") : ""]));
-  ids.forEach((id, i) => {
-    const p = partDocs[i]?.exists ? partDocs[i].data() : null;
-    if (!p) { info.set(id, { name: "", photoKeys: [] }); return; }
-    const combined = `${typeName.get(p.carPartTypeID) || ""} ${p.carPartName || ""}`.trim();
-    info.set(id, { name: p.carPartName || "", photoKeys: [partNameToFieldKey(combined), partNameToFieldKey(p.carPartName || id)].filter(Boolean) });
-  });
-  return info;
-};
-
 // ── Building what the customer sees ──────────────────────────────────────────
-const buildPhase = async ({ photo, inventory, otherInventory, partInfo, isAfter }) => {
+const buildPhase = async (photo) => {
   const videosIn = Array.isArray(photo?.videos) ? photo.videos : [];
   const extraIn  = Array.isArray(photo?.extraPhotos) ? photo.extraPhotos : [];
-  const hasMedia = !!(photo && (photo.frontViewUrl || photo.sideViewUrl || photo.backViewUrl || videosIn.length || extraIn.length));
-  if (!inventory && !hasMedia) return null;
 
-  const damagedIn = (Array.isArray(inventory?.damageParts) ? inventory.damageParts : [])
-    .filter((d) => d && d.status && d.status !== "Good" && d.status !== "New")
-    .slice(0, MAX_DAMAGED_PARTS);
-  const notedBefore = new Set((Array.isArray(otherInventory?.damageParts) ? otherInventory.damageParts : []).map((d) => d?.carPartID));
-
-  const [front, side, back, videos, extraPhotos, damagedParts] = await Promise.all([
-    signUrl(photo?.frontViewUrl), signUrl(photo?.sideViewUrl), signUrl(photo?.backViewUrl),
+  const [exteriorRaw, videos, extraPhotos] = await Promise.all([
+    Promise.all(EXTERIOR_FIELDS.map(async ([k, label]) => ({ label, url: await signUrl(photo?.[k]) }))),
     Promise.all(videosIn.filter((v) => v && v.url).map(async (v) => ({ id: String(v.id || ""), url: await signUrl(v.url), durationSec: Number(v.durationSec) || null }))),
-    Promise.all(extraIn.filter((p) => p && p.url).map(async (p) => ({ id: String(p.id || ""), url: await signUrl(p.url) }))),
-    Promise.all(damagedIn.map(async (d) => {
-      const info = partInfo.get(d.carPartID) || { name: "", photoKeys: [] };
-      const key = info.photoKeys.find((k) => photo?.[k]);
-      return {
-        name: d.carPartName || info.name || "Part",
-        status: String(d.status),
-        photoUrl: key ? await signUrl(photo[key]) : null,
-        ...(isAfter ? { notedAtPickup: notedBefore.has(d.carPartID) } : {}),
-      };
-    })),
+    Promise.all(extraIn.filter((p) => p && p.url).map(async (p) => ({ id: String(p.id || ""), url: await signUrl(p.url), caption: p.caption ? String(p.caption).slice(0, 60) : "" }))),
   ]);
 
+  const exterior    = exteriorRaw.filter((e) => e.url);
+  const videosOut   = videos.filter((v) => v.url);
+  const extraOut    = extraPhotos.filter((p) => p.url);
+  if (!exterior.length && !videosOut.length && !extraOut.length) return null;
+
   return {
-    recordedAt: toISO(inventory?.recordedAt) || toISO(photo?.__updatedAt),
-    // null = the parts condition was never recorded for this phase (don't say "no damage" about it)
-    condition: inventory ? (inventory.inventoryOverallStatus === "has damage" ? "has damage" : "good") : null,
-    damagedParts,
-    exterior: { front, side, back },
-    videos: videos.filter((v) => v.url),
-    extraPhotos: extraPhotos.filter((p) => p.url),
+    recordedAt: toISO(photo?.inspectionConfirmed?.at) || toISO(photo?.__updatedAt),
+    exterior,
+    videos: videosOut,
+    extraPhotos: extraOut,
   };
 };
 
@@ -171,30 +137,25 @@ const getBookingInspection = async (req, res) => {
     const status = String(booking.status || "").toLowerCase();
     res.set("Cache-Control", "no-store"); // the signed links expire
 
-    if (!isSelfDrive(booking) || !SHOWN_STATUSES.has(status)) return res.json({ applicable: false });
+    if (!SHOWN_STATUSES.has(status)) return res.json({ applicable: false });
+    // With a driver on the trip, the driver handles the handover and sees the inspection in the driver app.
+    if (!isSelfDrive(booking) && await hasAssignedDriver(booking)) return res.json({ applicable: false });
 
-    // Same reveal rule as the plate number (2 hours before pickup): the photos can show it.
-    const reveal = plateForBooking({ ...booking, status: status === "cancellation_request" ? "ongoing" : status }, "X");
+    // Same reveal rule as the plate number (2 hours before pickup): the photos can show it. A booking with no driver is
+    // treated like a self-drive one here — the chauffeur "plate shows when the driver is on the way" rule can never
+    // be met without a driver.
+    const reveal = plateForBooking({ ...booking, modeOfDriving: "Self Drive", status: status === "cancellation_request" ? "ongoing" : status }, "X");
     if (!reveal.plateNumber) return res.json({ applicable: false, availableFrom: reveal.plateRevealsAt });
 
     const id = booking.bookingID;
-    const [bPhoto, aPhoto, bInv, aInv] = await Promise.all([
+    const [bPhoto, aPhoto] = await Promise.all([
       db.collection(PHOTO_COLLECTION.before).where("bookingID", "==", id).get(),
       db.collection(PHOTO_COLLECTION.after).where("bookingID", "==", id).get(),
-      db.collection(INVENTORY_COLLECTION.before).where("bookingID", "==", id).get(),
-      db.collection(INVENTORY_COLLECTION.after).where("bookingID", "==", id).get(),
-    ]);
-    const beforePhoto = mergePhotoDocs(bPhoto), afterPhoto = mergePhotoDocs(aPhoto);
-    const beforeInv = latestInventory(bInv),   afterInv = latestInventory(aInv);
-
-    const partInfo = await loadPartInfo([
-      ...(beforeInv?.damageParts || []).map((d) => d?.carPartID),
-      ...(afterInv?.damageParts  || []).map((d) => d?.carPartID),
     ]);
 
     const [before, after] = await Promise.all([
-      buildPhase({ photo: beforePhoto, inventory: beforeInv, otherInventory: null,      partInfo, isAfter: false }),
-      buildPhase({ photo: afterPhoto,  inventory: afterInv,  otherInventory: beforeInv, partInfo, isAfter: true }),
+      buildPhase(mergePhotoDocs(bPhoto)),
+      buildPhase(mergePhotoDocs(aPhoto)),
     ]);
 
     return res.json({ applicable: true, before, after, linksExpireInMinutes: SIGNED_URL_TTL_MS / 60000 });
@@ -204,4 +165,4 @@ const getBookingInspection = async (req, res) => {
   }
 };
 
-module.exports = { getBookingInspection, _test: { parseStorageUrl, mergePhotoDocs, partNameToFieldKey, isSelfDrive } };
+module.exports = { getBookingInspection, _test: { parseStorageUrl, mergePhotoDocs, isSelfDrive } };
