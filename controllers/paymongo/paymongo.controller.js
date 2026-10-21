@@ -393,7 +393,7 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
         status: rowStatus,
         settledAt: rowStatus === "success" ? (d.settledAt || at) : null,
         transactionErrorNote: rowStatus === "failed" ? `PayMongo reported the ${word} refund as failed.` : null,
-        ...feeOnSuccess(rowStatus, d.transactionFee, refundFee),
+        transactionFee: null,   // a deposit / discount return is money going back: it never carries a PayMongo fee (only charges and penalties do)
         updatedAt: at,
       });
       return { row: d, wasFailed: d.status === "failed" };

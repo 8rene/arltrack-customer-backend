@@ -247,6 +247,9 @@ const computeFeeBreakdown = ({
 };
 
 // ── Online payment (gateway) fee on a PENALTY ───────────────────────────────
+// DISABLED: paying a penalty online no longer adds a gateway fee. Flip this to false to charge it again.
+const PENALTY_GATEWAY_FEE_DISABLED = true;
+
 // A penalty paid through PayMongo costs the business PayMongo's cut, so the customer is charged the same
 // gatewayFeePercent as the booking (one setting for the owner to manage). Same rounding as computeFeeBreakdown:
 // a whole peso. The fee is NOT part of the penalty: the penalty's amount stays what was charged for the
@@ -254,7 +257,7 @@ const computeFeeBreakdown = ({
 //   gatewayFee = round(penaltyAmount x gatewayFeePercent / 100)      total = penaltyAmount + gatewayFee
 const computePenaltyGatewayFee = (penaltyAmount = 0, gatewayFeePercent = 0) => {
   const base = Math.max(0, Math.round((Number(penaltyAmount) || 0) * 100) / 100);
-  const rate = pct(gatewayFeePercent);
+  const rate = PENALTY_GATEWAY_FEE_DISABLED ? 0 : pct(gatewayFeePercent);
   const gatewayFee = Math.round(base * rate / 100);
   return { penaltyAmount: base, gatewayFeeRate: rate, gatewayFee, total: Math.round((base + gatewayFee) * 100) / 100 };
 };
