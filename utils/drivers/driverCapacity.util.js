@@ -24,10 +24,6 @@ const { BOOKING_STATUS } = require("../bookings/bookingStatus.util");
 
 const DEFAULT_BUFFER_MINUTES = 120; // 2 hours
 
-// TEMPORARY: the chauffeur headcount cap is switched OFF. While off, a chauffeur booking is never
-// refused for "no drivers available" and the calendar never shades days as full. To turn the cap
-// back on, set the env var DRIVER_CAP_ENABLED=true (and redeploy), or change this to `true`.
-const DRIVER_CAP_ENABLED = process.env.DRIVER_CAP_ENABLED === "true";
 const MINUTE_MS = 60 * 1000;
 const CHAUFFEUR_MODE = "With Chauffeur";
 const COUNTED_STATUSES = [BOOKING_STATUS.TO_PAY, BOOKING_STATUS.UPCOMING, BOOKING_STATUS.ONGOING];
@@ -181,7 +177,6 @@ const readChauffeurBookings = async (tx = null) => {
  * endpoint must not return them.
  */
 const checkChauffeurCapacity = async ({ startDateTime, endDateTime, tx = null, eligibleDrivers = null, bufferMs = null, now = new Date() }) => {
-  if (!DRIVER_CAP_ENABLED) return { available: true, capacity: 0, peak: 0 }; // cap temporarily disabled
   const start = asDate(startDateTime);
   const end = asDate(endDateTime) || start;
   if (!start || !end) return { available: true, capacity: 0, peak: 0 }; // malformed dates are rejected elsewhere
@@ -336,7 +331,6 @@ const enumerateDays = (fromDay, toDay) => {
 
 /** The days in [fromDay, toDay] (Manila, "YYYY-MM-DD") with no chauffeur available the whole day. */
 const getFullChauffeurDays = async ({ fromDay, toDay, now = new Date() }) => {
-  if (!DRIVER_CAP_ENABLED) return []; // cap temporarily disabled: no day is ever "full"
   const days = enumerateDays(fromDay, toDay);
   const [drivers, bufferMs, bookings] = await Promise.all([loadEligibleDrivers(), getDriverBufferMs(), readChauffeurBookings()]);
   // Lenient on purpose: a driver whose license is still valid at the start of the day counts for that day.
@@ -347,7 +341,6 @@ const getFullChauffeurDays = async ({ fromDay, toDay, now = new Date() }) => {
 
 /** For the calendar: { fullDays, partialDays } in [fromDay, toDay]. Partial = a driver is free at some times only. */
 const getChauffeurDayAvailability = async ({ fromDay, toDay, now = new Date() }) => {
-  if (!DRIVER_CAP_ENABLED) return { fullDays: [], partialDays: [] }; // cap temporarily disabled
   const days = enumerateDays(fromDay, toDay);
   const [drivers, bufferMs, bookings] = await Promise.all([loadEligibleDrivers(), getDriverBufferMs(), readChauffeurBookings()]);
   const capacityAt = (dayStart) => drivers.filter((d) => !d.expiry || d.expiry >= dayStart).length;
@@ -362,9 +355,8 @@ const getChauffeurDayAvailability = async ({ fromDay, toDay, now = new Date() })
   return { fullDays, partialDays };
 };
 
-/** For the clock: the "HH:MM" pickup times on `day` that still have a driver for a trip of `hours`. null = no limit. */
+/** For the clock: the "HH:MM" pickup times on `day` that still have a driver for a trip of `hours`. */
 const getChauffeurPickupTimes = async ({ day, hours, now = new Date() }) => {
-  if (!DRIVER_CAP_ENABLED) return null; // cap temporarily disabled: every time is fine
   const [drivers, bufferMs, bookings] = await Promise.all([loadEligibleDrivers(), getDriverBufferMs(), readChauffeurBookings()]);
   const capacityAtEnd = (end) => drivers.filter((d) => !d.expiry || d.expiry >= end).length;
   return computePickupTimes(bookings, day, hours, capacityAtEnd, bufferMs, now);
