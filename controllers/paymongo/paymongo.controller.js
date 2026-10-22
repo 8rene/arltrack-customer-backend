@@ -307,11 +307,112 @@ const resolveRefundUserID = async (r) => {
   return null;
 };
 
+// One deposit_return / discount_return row, settled on its own (see the note where it is called).
+const settlePayoutRow = async (entryDoc, { refundID, refundStatus }) => {
+  const refundFee = null;
+  const payoutPhase = entryDoc.data().phase;
+  const isCredit = payoutPhase === "discount_return";
+  const word = isCredit ? "discount" : "deposit";
+  const rowRef = entryDoc.ref;
+  const rowStatus = refundStatus === "succeeded" ? "success" : "failed";
+  const out = await db.runTransaction(async (t) => {
+    const cur = await t.get(rowRef);
+    const d = cur.data();
+    if (d.status === rowStatus || d.status === "success") return { skip: true };
+    const at = new Date();
+    t.update(rowRef, {
+      status: rowStatus,
+      settledAt: rowStatus === "success" ? (d.settledAt || at) : null,
+      transactionErrorNote: rowStatus === "failed" ? `PayMongo reported the ${word} refund as failed.` : null,
+      transactionFee: null,   // a deposit / discount return is money going back: it never carries a PayMongo fee (only charges and penalties do)
+      updatedAt: at,
+    });
+    return { row: d, wasFailed: d.status === "failed" };
+  });
+  if (out.skip) return { found: true, skipped: true };
+  const row = out.row;
+  const amt = Number(row.amount) || 0;
+  recordTransactionLog({
+    // Same logID the in-store path uses, so a payout is only ever logged as returned once. A failure gets its own id
+    // so it can never block the success that follows a retry.
+    logID: rowStatus === "success"
+      ? (isCredit ? `${row.paymentID}_discount_returned` : `${row.paymentID}_deposit_settled`)
+      : `${row.paymentID}_${payoutPhase}_failed_${refundID}`,
+    bookingID: row.bookingID, paymentID: row.paymentID, userID: row.userID || null,
+    type: isCredit ? "Discount" : "DepositReturn", amount: amt,
+    status: rowStatus === "success" ? "Success" : "Failed",
+    paymentMethod: "PayMongo", referenceNumber: refundID,
+    description: rowStatus === "success"
+      ? (isCredit ? "Discount credit return confirmed by PayMongo." : "Security deposit return confirmed by PayMongo.")
+      : (isCredit ? "PayMongo reported the discount credit return as failed." : "PayMongo reported the security deposit return as failed."),
+  });
+  if (rowStatus === "success") {
+    // The "refund due" alert is per booking. Only clear it when the booking's OTHER payout (the deposit when this is the
+    // discount, or the discount when this is the deposit) is not still failed, or its alert would be lost.
+    let otherStillFailed = false;
+    try {
+      const sib = await db.collection("paymentEntries").where("paymentID", "==", row.paymentID).where("direction", "==", "out").get();
+      const millis = (v) => { const dt = v && v.toDate ? v.toDate() : v ? new Date(v) : null; return dt && !isNaN(dt) ? dt.getTime() : 0; };
+      const newest = {};
+      sib.docs.forEach((doc) => {
+        const e = doc.data();
+        if (e.phase !== "deposit_return" && e.phase !== "discount_return") return;
+        const at = millis(e.createdAt || e.processedAt);
+        if (!newest[e.phase] || at >= newest[e.phase].at) newest[e.phase] = { at, status: e.status };
+      });
+      otherStillFailed = Object.entries(newest).some(([phase, v]) => phase !== payoutPhase && v.status === "failed");
+    } catch (e) { /* best-effort: worst case the alert stays up until staff clear it */ otherStillFailed = true; }
+    if (!otherStillFailed) await resolveNotification("refund_due", row.bookingID).catch(() => {});
+    if (row.userID) {
+      await createNotification({
+        type: "refund_completed",
+        userID: row.userID,
+        dedupeKey: `${payoutPhase}:${refundID}`,   // the deposit and the discount can both come back on one booking
+        refID: row.bookingID || null,
+        title: isCredit ? "Discount Returned" : "Deposit Returned",
+        message: isCredit
+          ? `Your discount of \u20b1${amt.toLocaleString()} has been returned to your original payment method.`
+          : `Your security deposit of \u20b1${amt.toLocaleString()} has been returned to your original payment method.`,
+      }).catch((e) => console.error(`[PayMongo Webhook] failed to write the ${word}-returned notification:`, e.message));
+    }
+  } else {
+    await notifyStaff({
+      type: "refund_due",
+      refID: row.bookingID,
+      refCollection: "bookings",
+      title: isCredit ? "Discount return needs follow-up" : "Deposit return needs follow-up",
+      message: `PayMongo could not complete the online return of the \u20b1${amt.toLocaleString()} ${word} for booking ${row.bookingID}. Retry it or hand it back in store from the Refunds page.`,
+    }).catch((e) => console.error(`[PayMongo Webhook] failed to notify staff about a failed ${word} return:`, e.message));
+    // The customer is told too, once (the row only moves to failed once). Staff retry it or hand it back in store.
+    if (row.userID) {
+      await createNotification({
+        type: "refund_failed",
+        userID: row.userID,
+        dedupeKey: `${payoutPhase}:${refundID}`,
+        refID: row.bookingID || null,
+        title: isCredit ? "Discount return delayed" : "Deposit return delayed",
+        message: `We couldn't send your \u20b1${amt.toLocaleString()} ${word} back to your original payment method. Our team will follow up to return it another way.`,
+      }).catch((e) => console.error(`[PayMongo Webhook] failed to write the ${word}-return-failed notification:`, e.message));
+    }
+  }
+  recordAudit({
+    action: "update",
+    description: rowStatus === "success"
+      ? `${isCredit ? "Discount" : "Deposit"} return of \u20b1${amt.toLocaleString()} confirmed by PayMongo for booking ${row.bookingID}.`
+      : `PayMongo reported the ${word} return of \u20b1${amt.toLocaleString()} as failed for booking ${row.bookingID}.`,
+    userID: row.userID || null,
+    bookingID: row.bookingID || null,
+    paymentID: row.paymentID || null,
+  });
+  return isCredit ? { found: true, discountReturn: true } : { found: true, depositReturn: true };
+};
+
 const applyRefundPartResult = async ({ refundID, refundStatus }) => {
   const refundFee = null; // refunds carry no PayMongo fee (see feeOnSuccess)
   // The re_... id is the referenceNumber of the refund's "out" row in paymentEntries; that row points at the request.
   let snap = { empty: true };
-  const entrySnap = await db.collection("paymentEntries").where("referenceNumber", "==", refundID).where("direction", "==", "out").limit(1).get();
+  // No limit(1): a deposit + discount return goes to PayMongo as ONE refund, so two payout rows share this refund id.
+  const entrySnap = await db.collection("paymentEntries").where("referenceNumber", "==", refundID).where("direction", "==", "out").get();
   const entryReqID = entrySnap.empty ? null : entrySnap.docs[0].data().refundReqID;
 
   // A staff-discount spillover refunded online is an "out" row with phase "discount" and NO refund request
@@ -378,102 +479,13 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
   // held for the customer (phase "discount_return", see discountLedger.js). The admin writes each as its own "out" row, so
   // each is settled on its own. Same idea as the discount branch above: settle the row itself, never downgrade a
   // success. Failed -> staff are told to retry it or hand it back in store (the Refunds page has both buttons).
-  const payoutPhase = !entrySnap.empty ? entrySnap.docs[0].data().phase : null;
-  if (payoutPhase === "deposit_return" || payoutPhase === "discount_return") {
-    const isCredit = payoutPhase === "discount_return";
-    const word = isCredit ? "discount" : "deposit";
-    const rowRef = entrySnap.docs[0].ref;
-    const rowStatus = refundStatus === "succeeded" ? "success" : "failed";
-    const out = await db.runTransaction(async (t) => {
-      const cur = await t.get(rowRef);
-      const d = cur.data();
-      if (d.status === rowStatus || d.status === "success") return { skip: true };
-      const at = new Date();
-      t.update(rowRef, {
-        status: rowStatus,
-        settledAt: rowStatus === "success" ? (d.settledAt || at) : null,
-        transactionErrorNote: rowStatus === "failed" ? `PayMongo reported the ${word} refund as failed.` : null,
-        transactionFee: null,   // a deposit / discount return is money going back: it never carries a PayMongo fee (only charges and penalties do)
-        updatedAt: at,
-      });
-      return { row: d, wasFailed: d.status === "failed" };
-    });
-    if (out.skip) return { found: true, skipped: true };
-    const row = out.row;
-    const amt = Number(row.amount) || 0;
-    recordTransactionLog({
-      // Same logID the in-store path uses, so a payout is only ever logged as returned once. A failure gets its own id
-      // so it can never block the success that follows a retry.
-      logID: rowStatus === "success"
-        ? (isCredit ? `${row.paymentID}_discount_returned` : `${row.paymentID}_deposit_settled`)
-        : `${row.paymentID}_${payoutPhase}_failed_${refundID}`,
-      bookingID: row.bookingID, paymentID: row.paymentID, userID: row.userID || null,
-      type: isCredit ? "Discount" : "DepositReturn", amount: amt,
-      status: rowStatus === "success" ? "Success" : "Failed",
-      paymentMethod: "PayMongo", referenceNumber: refundID,
-      description: rowStatus === "success"
-        ? (isCredit ? "Discount credit return confirmed by PayMongo." : "Security deposit return confirmed by PayMongo.")
-        : (isCredit ? "PayMongo reported the discount credit return as failed." : "PayMongo reported the security deposit return as failed."),
-    });
-    if (rowStatus === "success") {
-      // The "refund due" alert is per booking. Only clear it when the booking's OTHER payout (the deposit when this is the
-      // discount, or the discount when this is the deposit) is not still failed, or its alert would be lost.
-      let otherStillFailed = false;
-      try {
-        const sib = await db.collection("paymentEntries").where("paymentID", "==", row.paymentID).where("direction", "==", "out").get();
-        const millis = (v) => { const dt = v && v.toDate ? v.toDate() : v ? new Date(v) : null; return dt && !isNaN(dt) ? dt.getTime() : 0; };
-        const newest = {};
-        sib.docs.forEach((doc) => {
-          const e = doc.data();
-          if (e.phase !== "deposit_return" && e.phase !== "discount_return") return;
-          const at = millis(e.createdAt || e.processedAt);
-          if (!newest[e.phase] || at >= newest[e.phase].at) newest[e.phase] = { at, status: e.status };
-        });
-        otherStillFailed = Object.entries(newest).some(([phase, v]) => phase !== payoutPhase && v.status === "failed");
-      } catch (e) { /* best-effort: worst case the alert stays up until staff clear it */ otherStillFailed = true; }
-      if (!otherStillFailed) await resolveNotification("refund_due", row.bookingID).catch(() => {});
-      if (row.userID) {
-        await createNotification({
-          type: "refund_completed",
-          userID: row.userID,
-          dedupeKey: `${payoutPhase}:${refundID}`,   // the deposit and the discount can both come back on one booking
-          refID: row.bookingID || null,
-          title: isCredit ? "Discount Returned" : "Deposit Returned",
-          message: isCredit
-            ? `Your discount of \u20b1${amt.toLocaleString()} has been returned to your original payment method.`
-            : `Your security deposit of \u20b1${amt.toLocaleString()} has been returned to your original payment method.`,
-        }).catch((e) => console.error(`[PayMongo Webhook] failed to write the ${word}-returned notification:`, e.message));
-      }
-    } else {
-      await notifyStaff({
-        type: "refund_due",
-        refID: row.bookingID,
-        refCollection: "bookings",
-        title: isCredit ? "Discount return needs follow-up" : "Deposit return needs follow-up",
-        message: `PayMongo could not complete the online return of the \u20b1${amt.toLocaleString()} ${word} for booking ${row.bookingID}. Retry it or hand it back in store from the Refunds page.`,
-      }).catch((e) => console.error(`[PayMongo Webhook] failed to notify staff about a failed ${word} return:`, e.message));
-      // The customer is told too, once (the row only moves to failed once). Staff retry it or hand it back in store.
-      if (row.userID) {
-        await createNotification({
-          type: "refund_failed",
-          userID: row.userID,
-          dedupeKey: `${payoutPhase}:${refundID}`,
-          refID: row.bookingID || null,
-          title: isCredit ? "Discount return delayed" : "Deposit return delayed",
-          message: `We couldn't send your \u20b1${amt.toLocaleString()} ${word} back to your original payment method. Our team will follow up to return it another way.`,
-        }).catch((e) => console.error(`[PayMongo Webhook] failed to write the ${word}-return-failed notification:`, e.message));
-      }
-    }
-    recordAudit({
-      action: "update",
-      description: rowStatus === "success"
-        ? `${isCredit ? "Discount" : "Deposit"} return of \u20b1${amt.toLocaleString()} confirmed by PayMongo for booking ${row.bookingID}.`
-        : `PayMongo reported the ${word} return of \u20b1${amt.toLocaleString()} as failed for booking ${row.bookingID}.`,
-      userID: row.userID || null,
-      bookingID: row.bookingID || null,
-      paymentID: row.paymentID || null,
-    });
-    return isCredit ? { found: true, discountReturn: true } : { found: true, depositReturn: true };
+  // A deposit + discount return can share ONE PayMongo refund id (two rows, one refund), so EVERY matching payout row is
+  // settled, not just the first one the query returns.
+  const payoutDocs = entrySnap.empty ? [] : entrySnap.docs.filter((d) => d.data().phase === "deposit_return" || d.data().phase === "discount_return");
+  if (payoutDocs.length) {
+    let last = { found: true };
+    for (const entryDoc of payoutDocs) last = await settlePayoutRow(entryDoc, { refundID, refundStatus });
+    return last;
   }
   if (entryReqID) {
     const byEntry = await db.collection("refundRequests").doc(entryReqID).get();
