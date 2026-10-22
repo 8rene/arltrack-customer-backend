@@ -57,10 +57,14 @@ const getMyBookingPenalties = async (req, res) => {
 
     const paymentDoc = paymentSnap.empty ? null : paymentSnap.docs[0];
 
+    // An allowlist on purpose: "UnderReview" and "Discarded" (rejected in review) were never shown to the customer,
+    // so they must never appear here, not even as "removed".
     const SHOWN = ["Confirmed", "Waived", "Voided"];
     // paymentMethod / referenceNumber / paidAt are paymentEntries rows now: hydrate from them.
     // A display field must never fail this card, so fall back to the documents if the rows can't be read.
-    const shownDocs = penaltiesSnap.docs.map((d) => d.data()).filter((p) => SHOWN.includes(p.status));
+    // discardedFromReview: old rows discarded in review before the "Discarded" status existed were saved as Voided + this flag;
+    // the customer never saw them, so they stay hidden even if the migration hasn't been run yet.
+    const shownDocs = penaltiesSnap.docs.map((d) => d.data()).filter((p) => SHOWN.includes(p.status) && !p.discardedFromReview);
     let shownPenalties = shownDocs;
     try {
       shownPenalties = await hydratePenalties(shownDocs);
