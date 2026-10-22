@@ -508,7 +508,10 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
     const rowsSnap = await t.get(db.collection("paymentEntries").where("refundReqID", "==", r.refundRequestID || reqRef.id));
     const outRows  = rowsSnap.docs.filter((d) => d.data().direction === "out");
     const partRows  = outRows.filter((d) => d.data().source === "online" && d.data().status !== "unrefundable");
-    const manualRow = outRows.find((d) => d.data().source === "in_person");
+    // A row with handBackFor is staff paying back, themselves, a part PayMongo refused (admin: markFailedRefundHandedBack). It is
+    // not the planned in-person portion, and it COVERS the failed part it points at.
+    const manualRow = outRows.find((d) => d.data().source === "in_person" && !d.data().handBackFor);
+    const coveredIDs = new Set(outRows.filter((d) => d.data().handBackFor && d.data().status === "success").map((d) => d.data().handBackFor));
     const target    = partRows.find((d) => d.data().referenceNumber === refundID);
 
     if (target) {
@@ -516,7 +519,11 @@ const applyRefundPartResult = async ({ refundID, refundStatus }) => {
       const td = target.data();
       if (td.status === rowStatus) return { skip: true }; // duplicate delivery
 
-      const statuses          = partRows.map((d) => (d.id === target.id ? rowStatus : d.data().status));
+      // A failed part that staff already handed back counts as settled, so it no longer keeps the request Failed.
+      const statuses          = partRows.map((d) => {
+        const s = d.id === target.id ? rowStatus : d.data().status;
+        return s === "failed" && coveredIDs.has(d.id) ? "success" : s;
+      });
       const anyFailed         = statuses.some((s) => s === "failed");
       const allSucceeded      = statuses.every((s) => s === "success");
       const manualOutstanding = !!(manualRow && manualRow.data().status !== "success");

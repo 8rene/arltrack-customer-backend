@@ -592,18 +592,27 @@ const hydrateRefundRequest = (request, entries, opts = {}) => {
   // unrefundable the document may still carry (they go stale -- nothing writes them any more).
   const seq = (e) => Number(String(e.paymentEntryID || "").match(/(\d+)$/)?.[1] || 0);
 
+  // A row with handBackFor is staff paying back, themselves, a part PayMongo refused (markFailedRefundHandedBack). It is
+  // not a second manual portion: it COVERS that failed part, so the part is shown as settled (handedBack) instead of failed.
+  const handBacks = new Map(rows.filter((e) => e.handBackFor && e.status === "success").map((e) => [e.handBackFor, e]));
+  const rowKey = (e) => e.paymentEntryID || e.id;
+
   const online = rows.filter((e) => e.source === "online" && e.status !== "unrefundable").sort((a, b) => seq(a) - seq(b));
   if (online.length) {
-    out.parts = online.map((e) => ({
-      kind: e.phase === "balance" ? "balance" : "deposit", paymongoPaymentID: null, amount: e.amount,
-      paymongoRefundID: e.referenceNumber, status: e.status === "success" ? "succeeded" : e.status === "failed" ? "failed" : "pending",
-      ...(e.transactionErrorNote ? { error: e.transactionErrorNote } : {}),
-    }));
+    out.parts = online.map((e) => {
+      const hb = e.status === "failed" ? handBacks.get(rowKey(e)) : null;
+      return {
+        kind: e.phase === "balance" ? "balance" : "deposit", paymongoPaymentID: null, amount: e.amount,
+        paymongoRefundID: e.referenceNumber, status: hb || e.status === "success" ? "succeeded" : e.status === "failed" ? "failed" : "pending",
+        ...(e.transactionErrorNote ? { error: e.transactionErrorNote } : {}),
+        ...(hb ? { handedBack: { method: BALANCE_METHOD_LABEL[hb.method] || null, referenceNumber: hb.referenceNumber || null, issuedBy: hb.processedBy || null, issuedAt: hb.processedAt || null } } : {}),
+      };
+    });
   }
   if (online.length) out.paymongoRefundIDs = online.map((e) => e.referenceNumber).filter(Boolean);
   if (online.length) out.paymongoRefundID = online[0].referenceNumber || null;
 
-  const manual = rows.find((e) => e.source === "in_person");
+  const manual = rows.find((e) => e.source === "in_person" && !e.handBackFor);
   if (manual) {
     out.manualRefund = {
       amount: manual.amount, issued: manual.status === "success", issuedBy: manual.processedBy || null,
@@ -623,7 +632,9 @@ const hydrateRefundRequest = (request, entries, opts = {}) => {
   // are left out; a pending PayMongo part counts (it is on its way).
   const missing = (k) => out[k] === undefined || out[k] === null;
   if (missing("onlineAmount")) out.onlineAmount = online.filter((e) => e.status !== "failed").reduce((s, e) => s + num(e.amount), 0);
-  if (missing("manualAmount")) out.manualAmount = rows.filter((e) => e.source === "in_person").reduce((s, e) => s + num(e.amount), 0);
+  if (missing("manualAmount")) out.manualAmount = rows.filter((e) => e.source === "in_person" && !e.handBackFor).reduce((s, e) => s + num(e.amount), 0);
+  // Money staff paid back by hand because PayMongo refused it: kept apart from the planned in-person portion above.
+  out.handedBackAmount = rows.filter((e) => e.handBackFor && e.status === "success").reduce((s, e) => s + num(e.amount), 0);
   // A waived forfeit stores only the boolean; the amount it waived is the deposit that was not kept.
   if (out.forfeitWaived === true && missing("forfeitWaivedAmount") && num(out.depositAmount) > 0) out.forfeitWaivedAmount = num(out.depositAmount);
   // refundedAt is stored when the admin side completes the request. One the customer backend's webhook completed has
