@@ -63,6 +63,9 @@
 //                                           separate from the deposit's deposit_return row: same way of returning (in
 //                                           store -> success now; online -> pending until PayMongo confirms, with its own
 //                                           refund id), same retry and in-store hand-back, a newer row supersedes a failed one.
+//     (deterministic ID)  deposit_forfeited  the security deposit was KEPT by the business (a late / no-show refund, or a
+//                                           cancellation with no refund). direction "internal": nothing moves, the business just
+//                                           keeps what it already holds. ID = "<paymentID>_deposit_forfeited"; reason = why.
 // "internal" rows are never counted in paid-in / refunded-out totals: those filter on "in" and "out" only.
 // discount_return counts in refundedOut like the legacy "discount" refund did (the money did leave).
 // Legacy discounts (phase "discount", direction "out") are untouched: they were refunded on the spot.
@@ -71,7 +74,7 @@ const ENTRY_COLLECTION = "paymentEntries";
 
 const ENTRY_DIRECTIONS = ["in", "out", "internal"];   // "internal" = no cash moved (a discount changing buckets)
 const ENTRY_PHASES     = ["deposit", "balance", "penalty", "deposit_return", "discount",
-                                 "discount_credit", "discount_applied_balance", "discount_applied_penalty", "discount_return", "discount_in_refund"];
+                                 "discount_credit", "discount_applied_balance", "discount_applied_penalty", "discount_return", "discount_in_refund", "deposit_forfeited"];
 const ENTRY_SOURCES    = ["online", "in_person"];            // PayMongo | staff collected / handed back
 const ENTRY_METHODS    = ["gcash", "maya", "qrph", "cash", "bank_transfer"];   // customers can only pay online via gcash / maya / qrph
 // "unrefundable" is only used by direction "out" rows (an amount with no PayMongo payment id).
@@ -100,6 +103,7 @@ const PaymentEntry = {
   processedAt: null,
   settledAt:   null,        // when the money actually moved
   groupID:     null,        // rows created by ONE payment that covered several penalties share this
+  reason: null,               // why: the reason staff gave for a discount (required) or for a forfeited deposit; null on other rows
   transactionErrorNote: null, // why a movement failed / could not happen (a failed refund part's error,
                             // "Payment ID does not exist"). null when nothing went wrong.
   createdAt:   null,
