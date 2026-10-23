@@ -15,7 +15,7 @@ const { syncPaymentEntries, hydratePayments, getEntriesForPaymentIDs } = require
 const { buildCustomerDiscount } = require("../../utils/payments/discountView.util");
 const { STARTED_TRIP_MESSAGE } = require("../../utils/payments/refundNotice.util");
 const { recordDirectCancellation, getCancellationReasons, getCancellationInfo } = require("../../utils/bookings/cancellationRequests.util");
-const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, driverCapacityLockRef, getFullChauffeurDays, getChauffeurDayAvailability, getChauffeurPickupTimes, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
+const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, getFullChauffeurDays, getChauffeurDayAvailability, getChauffeurPickupTimes, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
 
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
@@ -776,12 +776,8 @@ const createBooking = async (req, res) => {
 
     // ── Atomic availability check + write ──
     // The overlap/maintenance checks and the bookings / payments / bookingSessions
-    // writes now happen in ONE Firestore transaction that also reads + writes a
-    // per-car lock doc (carLocks/{carID}). Every booking for the same car touches
-    // that doc, so concurrent bookings for the SAME car are serialised: the second
-    // one retries, sees the first booking, and gets the 409. Different cars use
-    // different lock docs and never wait on each other. The three docs are also
-    // written together, so a failure can't leave a booking without its payment.
+    // writes happen in ONE Firestore transaction. The three docs are written
+    // together, so a failure can't leave a booking without its payment.
     //
     // NOTE: Firestore may run this callback more than once (retry on contention), so
     // it must not send responses or have side effects. Conflicts are thrown as
@@ -799,8 +795,6 @@ const createBooking = async (req, res) => {
 
     try {
       await db.runTransaction(async (tx) => {
-        const lockRef = db.collection("carLocks").doc(String(carID));
-
         // ---- all reads first ----
         // Only bookings that can possibly clash are read: every check below
         // needs  booking.end + 1-day buffer > requested start, so anything that
@@ -826,8 +820,7 @@ const createBooking = async (req, res) => {
             throw e;
           }
         };
-        const [, carBookingsSnap, maintSnap] = await Promise.all([
-          tx.get(lockRef),
+        const [carBookingsSnap, maintSnap] = await Promise.all([
           readCarBookings(),
           tx.get(
             db.collection("maintenance")
@@ -916,8 +909,6 @@ const createBooking = async (req, res) => {
         }
 
         // ---- then all writes ----
-        tx.set(lockRef, { carID, lastBookingID: bookingID, updatedAt: now }, { merge: true });
-        if (needsDriver) tx.set(driverCapacityLockRef(), { lastBookingID: bookingID, updatedAt: now }, { merge: true });
         tx.set(bookingRef, bookingData);
         tx.set(paymentRef, paymentData);
         tx.set(bookingSessionRef, bookingSessionData);

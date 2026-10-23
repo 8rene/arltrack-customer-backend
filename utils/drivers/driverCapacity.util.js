@@ -54,11 +54,6 @@ const getDriverBufferMs = async () => {
   return (Number.isFinite(mins) && mins >= 0 ? mins : DEFAULT_BUFFER_MINUTES) * MINUTE_MS;
 };
 
-// Fixed doc every chauffeur booking reads + writes inside its transaction. Capacity is fleet-wide (not
-// per car), so unlike carLocks/{carID} there is ONE lock: concurrent chauffeur bookings are serialised
-// and the second sees the first. Self-drive bookings never touch it.
-const driverCapacityLockRef = () => db.collection("driverLocks").doc("chauffeur");
-
 // Drivers who could take a chauffeur trip at all: role Driver and not inactive/locked, each with the
 // latest license expiry on file (null = no date on file). A person can have several userDocument records
 // (re-uploads): the LATEST expiry wins.
@@ -232,7 +227,6 @@ const checkChauffeurCapacity = async ({ startDateTime, endDateTime, tx = null, e
     return { available: false, capacity: 0, peak: 0 };
   }
 
-  if (tx) await tx.get(driverCapacityLockRef()); // joins the lock into this transaction's read set
   const bookings = await readChauffeurBookings(tx);
   const peak = computePeakOverlap(bookings, start, end, buffer, now);
   console.log(`[driverCapacity] trip check ${iso(start)} -> ${iso(end)}${tx ? " (booking transaction)" : ""}: drivers counted=${capacity}, busiest overlap=${peak}, bookings with driver=${bookings.length} -> ${peak < capacity ? "AVAILABLE" : "FULL"}`);
@@ -430,7 +424,6 @@ module.exports = {
   computeFullDays,
   getFullChauffeurDays,
   getDriverBufferMs,
-  driverCapacityLockRef,
   NO_DRIVER_MESSAGE,
   DEFAULT_BUFFER_MINUTES,
 };

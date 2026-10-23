@@ -12,6 +12,7 @@ const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefund
 const { createPendingRefundRow, attachRefundRowInfo } = require("../../utils/bookings/cancellationRequests.util");
 const { QRPH_BOOKING_NOTICE, qrphRefundNotice } = require("../../utils/payments/refundNotice.util");
 const { sessionIDForPayment, phaseForSession, findPaymentSnapBySessionID } = require("../../utils/payments/paymentSession.util");
+const { checkPayTimeConflict } = require("../../utils/bookings/payTimeConflict.util");
 
 const { handlePenaltyWebhookPaid } = require("./penaltyPayment.controller");
 
@@ -115,6 +116,16 @@ const createPaymentLink = async (req, res) => {
       // Not "to pay" and not already "upcoming" (e.g. cancelled/completed) —
       // there's nothing left here to pay for.
       return res.status(400).json({ message: "This booking can no longer be paid for." });
+    }
+
+    // Last-line availability check before ANY checkout (new or reused link) is handed out for a deposit.
+    // If someone else already holds the car for these dates (paid, or an earlier unpaid booking), stop
+    // here, before money is taken. See payTimeConflict.util.js.
+    if (booking.status === BOOKING_STATUS.TO_PAY && req.body.phase !== "balance") {
+      const pt = await checkPayTimeConflict(booking);
+      if (pt.conflict) {
+        return res.status(409).json({ message: pt.reason, code: "CAR_NO_LONGER_AVAILABLE", bookingID });
+      }
     }
 
     // Server-computed charge amount — the only amount PayMongo ever sees.
