@@ -12,9 +12,23 @@
 // GPS pings are NOT stored on this doc — they go to Google Sheets (one tab per
 // PHT date), matched back to this session by sessionId + carID + startedAt.
 //
+// GEOFENCE ZONES live ONLY on this doc (geofenceZones). The car doc keeps no zones
+// of its own — there is no per-car default list any more. The session is the one
+// place zones are stored and edited:
+//   - created HERE at booking: [Pickup, <destination>, ...extra stops], one zone per
+//     point that has coordinates. The booking is rejected without pickup coordinates,
+//     so a new session always has at least the Pickup zone; a destination or extra
+//     stop without lat/lng is simply skipped. (Older sessions may have none.)
+//   - edited LATER by staff from the admin Car Tracking page, for an upcoming or an
+//     active trip alike (the admin backend overwrites the whole list on each save),
+//     and moved by the admin when a booking's destination changes.
+//   - read by the live GPS check (admin) to raise a geofence alert when the car leaves
+//     every zone, and returned to the customer by getBookingDetails.
+// Zone shape: { label, lat, lng, radius } — radius in METERS (not km).
+//
 // NOTE: geofence radius below is a placeholder (500m) — the real fixed
 // radius value hasn't been decided yet. Change GEOFENCE_RADIUS_METERS
-// once that's picked.
+// once that's picked. Staff can resize each zone per trip after creation.
 const GEOFENCE_RADIUS_METERS = 500;
 
 const createBookingSession = (bookingSessionID, bookingID, data = {}) => ({
@@ -29,6 +43,8 @@ const createBookingSession = (bookingSessionID, bookingID, data = {}) => ({
   status: data.status || "upcoming",
   pickupLocation:  data.pickupLocation  || null, // { address, lat, lng } — raw pin, not a geofence zone
   dropoffLocation: data.dropoffLocation || null, // { address, lat, lng }
+  // [{ label, lat, lng, radius(m) }] — the ONLY place this trip's zones are kept (see header). Built at booking
+  // by makeZone below; staff may add, remove or resize zones afterwards from the admin side.
   geofenceZones:   Array.isArray(data.geofenceZones) ? data.geofenceZones : [],
   geofenceAlerts:  [],
   codingAlerts:    [],
@@ -51,7 +67,7 @@ const createBookingSession = (bookingSessionID, bookingID, data = {}) => ({
   updatedAt:       new Date(),
 });
 
-// Helper: build a geofence_zones entry from a raw {lat,lng} point.
+// Helper: build one geofenceZones entry { label, lat, lng, radius } from a raw {lat,lng} point.
 // Returns null if the point is missing coords (caller should skip it).
 const makeZone = (label, point) => {
   if (!point || typeof point.lat !== "number" || typeof point.lng !== "number") return null;
