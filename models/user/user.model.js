@@ -7,8 +7,7 @@ const createUser = (userID, data) => ({
   // them / who they referred lives in the "referrals" collection, not here.
   referralCode:    data.referralCode    || null,
   // Terms & Conditions accepted at signup: termsVersionID points at the exact text in the
-  // admin's termsVersions collection. (Accounts created before this change carry
-  // termsVersion + termsHash instead.)
+  // admin's termsVersions collection.
   termsVersionID:  data.termsVersionID  || null,
   termsAcceptedAt: data.termsAcceptedAt || null,
   status:       "locked",          // always locked on signup — admin unlocks after review

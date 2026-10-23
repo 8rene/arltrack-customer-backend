@@ -161,26 +161,22 @@ const getBookingDetails = async (req, res) => {
       };
     }
 
-    // The Terms & Conditions accepted for this booking. New bookings carry termsVersionID (the
-    // version number is read from that termsVersions doc); bookings made before that change carry
-    // termsVersion + termsHash instead. viewID is what /terms?v=<viewID> opens either way.
+    // The Terms & Conditions accepted for this booking: termsVersionID (the version number is
+    // read from that termsVersions doc). viewID is what /terms?v=<viewID> opens.
     let terms = null;
-    if (booking.termsVersionID || booking.termsHash) {
-      let version = booking.termsVersion || null;
-      if (booking.termsVersionID) {
-        try {
-          const tv = await getTermsVersionByID(booking.termsVersionID);
-          version = tv ? tv.version : null;
-        } catch (e) {
-          console.warn("getBookingDetails terms lookup failed:", e.message);
-          version = null;
-        }
+    if (booking.termsVersionID) {
+      let version = null;
+      try {
+        const tv = await getTermsVersionByID(booking.termsVersionID);
+        version = tv ? tv.version : null;
+      } catch (e) {
+        console.warn("getBookingDetails terms lookup failed:", e.message);
       }
       terms = {
         acceptedAt:     toISO(booking.termsAcceptedAt),
-        termsVersionID: booking.termsVersionID || null,
+        termsVersionID: booking.termsVersionID,
         version,
-        viewID:         booking.termsVersionID || booking.termsHash,
+        viewID:         booking.termsVersionID,
       };
     }
 

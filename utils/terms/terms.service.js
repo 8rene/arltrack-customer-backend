@@ -8,15 +8,11 @@
 //
 // What a customer accepted is recorded on the document that was created:
 //   bookings/{id}.termsVersionID + termsAcceptedAt   (and user/{id} for the signup box)
-// termsVersionID points at the exact, immutable text. There is no hash and no snapshot
-// any more.
+// termsVersionID points at the exact, immutable text.
 //
 //  • getActiveTerms()        the newest version (cached ~30 s for page loads; pass
 //                            { fresh: true } to always read the database).
 //  • getTermsVersionByID()   one specific version by its doc ID.
-//  • getLegacyTermsByHash()  OLD bookings/signups (before this change) were accepted
-//                            against a hash in `termsSnapshots`. Read-only, so those old
-//                            acceptances can still be opened; converted to Markdown.
 //  • checkTermsAcceptance()  compares the termsVersionID the customer's browser showed
 //                            them with the current one (always read fresh).
 //
@@ -59,27 +55,6 @@ const getTermsVersionByID = async (id) => {
   return doc.exists ? shape(doc.id, doc.data()) : null;
 };
 
-// Old acceptances: { version, hash, sections:[{ num, title, highlight?, body?, list?, footer? }] }
-// stored in `termsSnapshots/{hash}`. Rendered to the same Markdown shape the admin uses.
-const sectionsToMarkdown = (sections = []) => {
-  const out = ["# ARL Car Rental — Terms & Conditions", ""];
-  sections.forEach((s, i) => {
-    out.push(`## ${i + 1}. ${s.title}`, "");
-    if (s.highlight) out.push(`**${s.highlight}**`, "");
-    if (s.body) out.push(s.body, "");
-    if (Array.isArray(s.list)) { s.list.forEach((it) => out.push(`- **${it.label}:** ${it.value}`)); out.push(""); }
-    if (s.footer) out.push(s.footer, "");
-  });
-  return out.join("\n").replace(/\n+$/, "\n");
-};
-
-const getLegacyTermsByHash = async (hash) => {
-  const doc = await db.collection("termsSnapshots").doc(String(hash)).get();
-  if (!doc.exists) return null;
-  const snap = doc.data();
-  return { termsVersionID: null, version: snap.version, content: sectionsToMarkdown(snap.sections), legacy: true };
-};
-
 // Resolves { ok:true, accepted, terms } or { ok:false, status, body } — never throws for a
 // bad/missing ID. (A Firestore failure does throw; callers decide how to handle that.)
 const checkTermsAcceptance = async (clientTermsVersionID) => {
@@ -104,4 +79,4 @@ const checkTermsAcceptance = async (clientTermsVersionID) => {
   return { ok: true, accepted: true, terms };
 };
 
-module.exports = { getActiveTerms, getTermsVersionByID, getLegacyTermsByHash, checkTermsAcceptance, termsRequired };
+module.exports = { getActiveTerms, getTermsVersionByID, checkTermsAcceptance, termsRequired };

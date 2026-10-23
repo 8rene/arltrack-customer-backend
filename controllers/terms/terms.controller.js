@@ -1,7 +1,7 @@
 // GET /api/terms/active       (public) the current Terms & Conditions (the admin's newest version)
 // GET /api/terms/version/:id  (public) the exact text behind an earlier acceptance — :id is a
-//                             termsVersionID, or (old acceptances only) a 64-character hash
-const { getActiveTerms, getTermsVersionByID, getLegacyTermsByHash } = require("../../utils/terms/terms.service");
+//                             termsVersionID
+const { getActiveTerms, getTermsVersionByID } = require("../../utils/terms/terms.service");
 
 const getActive = async (req, res) => {
   try {
@@ -17,10 +17,8 @@ const getActive = async (req, res) => {
 const getVersion = async (req, res) => {
   try {
     const id = String(req.params.id || "");
-    let terms;
-    if (/^[a-f0-9]{64}$/.test(id)) terms = await getLegacyTermsByHash(id);
-    else if (/^[A-Za-z0-9_-]{1,128}$/.test(id)) terms = await getTermsVersionByID(id);
-    else return res.status(400).json({ message: "Invalid version." });
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return res.status(400).json({ message: "Invalid version." });
+    const terms = await getTermsVersionByID(id);
     if (!terms) return res.status(404).json({ message: "That version of the Terms & Conditions was not found." });
     return res.json(terms);
   } catch (error) {
