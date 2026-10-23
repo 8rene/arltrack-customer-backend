@@ -6,7 +6,7 @@ const admin  = require("firebase-admin");
 //   { sessionLogsID, uID, username, platform, loginDateTime, logoutDateTime,
 //     sessionDuration, status, closedReason, attemptedAt, blockedReason }
 //
-// Renamed from 'userLogs' to match the admin-side rename. This is the
+// This is the customer-facing app, so every session this file opens is hardcoded to
 // customer-facing app, so every session this file opens is hardcoded to
 // platform: "customer_web" — never trust a client-supplied platform value.
 const PLATFORM = "customer_web";
