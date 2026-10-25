@@ -69,15 +69,17 @@ const RefundRequest = {
   processedBy: null,    // staff userID who approved / rejected it (processedAt is not stored: the entry rows and the audit log carry the time)
   reason: null,         // the STAFF's reason for the decision: why it was rejected, or the note / waive reason given on approve.
                         // The customer's own reason is on the cancellation row (the API returns it as customerReason).
-  // rejectReason is the old name of `reason` for a rejection. It is no longer written, but old documents still carry it
-  // (and an old document whose `reason` holds the customer's words keeps the staff's reason there), so readers accept both.
+  // rejectReason is the old name of `reason` for a rejection. It is still written in ONE case: rejecting an OLD document
+  // whose `reason` holds the customer's words. Those words stay in `reason` and the staff's reason goes to rejectReason
+  // instead (canWriteDecisionReason() decides, in services/refundRequest/refundRequest.service.js). Every other rejection
+  // writes `reason` and deletes rejectReason, so a new document never carries it. Readers accept both.
+  rejectReason: null,   // legacy rejections only, see above
   refundedAt: null,     // when the refund completed. Written when staff mark the in-person part handed back; a request the
                         // customer backend's webhook completed has none stored, readers derive it from the latest settledAt
                         // of its successful "out" rows (this replaces payments.refundedAt)
   approvalLockedAt: null, // TEMPORARY 2-minute lock: set while an admin approves, so two admins can't approve the same refund and
                         // send duplicate PayMongo refunds (reject is blocked meanwhile). Deleted when the approval ends, so a finished
                         // request carries no such field
-  restoredAt: null,     // only on a request that was restored from refundArchives
   createdAt: null,
   updatedAt: null,
 };

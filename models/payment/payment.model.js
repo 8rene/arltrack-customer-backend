@@ -42,7 +42,7 @@ const Payment = {
   // Live state of a Partial payment's balance. The customer backend's settle-once guard reads these inside a
   // Firestore transaction, so they stay until that guard reads the entries instead.
   currentPhase: "",     // "deposit" | "balance": which phase the open checkout is for
-  balanceStatus: "",    // "" | "not_due" | "pending" | "paid" | "failed" | "cancelled"
+  balanceStatus: "",    // "not_applicable" (a Full payment: there is no balance, written by the customer backend) | "not_due" | "pending" | "paid" | "failed" | "cancelled" | "" (very old rows)
   balanceAmount: 0,     // what the open balance checkout charges
   // NOT stored here: balanceCollected / balanceCollectedAmount. "Staff collected the balance in person" is a settled
   // in-person balance row in paymentEntries, and hydratePayment() derives both from it. Likewise refundIssuedBy /
@@ -93,9 +93,13 @@ const Payment = {
   // here is the amount. A DepositReturn transaction log (id <paymentID>_deposit_settled) is written as well. Who waived a
   // deposit is in the audit log.
 
+  // When staff last sent the customer a "please pay the remaining balance" reminder (in-app notification + email).
+  // It is the shared cooldown for that button: once any staff member sends one, nobody can send another for 6 hours
+  // (BALANCE_REMINDER_COOLDOWN_MS in services/payments/payments.service.js). Who sent it is in the audit log, not here.
+  balanceReminderAt: null,
+
   createdAt: null,
   updatedAt: null,
-  restoredAt: null,   // only on a payment that was restored from paymentsArchives
   // NOT stored here: refundedAt. When a refund completed is on its refundRequest (refundedAt); the payment only
   // carries status "Refunded".
 };

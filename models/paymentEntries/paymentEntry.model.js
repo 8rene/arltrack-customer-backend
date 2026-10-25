@@ -28,6 +28,10 @@
 //     <refundRequestID>_unrefundable<n>  paid online but NO PayMongo payment id: status "unrefundable", with
 //                                        transactionErrorNote "Payment ID does not exist". It is reported, never
 //                                        handed back.
+//     <partRowID>_handback               staff paid back, themselves, an online part PayMongo refused (that part's row stays
+//                                        "failed"): ONE new success row (source "in_person", method cash / gcash / maya /
+//                                        bank_transfer) with handBackFor = the failed row's id. A part counts as covered once
+//                                        its hand-back row exists. Written by markFailedRefundHandedBack().
 //     (auto ID)                          money handed back for a staff discount that exceeded what was owed:
 //                                        phase "discount", refundReqID null (no refund request exists for it).
 //                                        In person: written by markRefundIssued() in the same batch as
@@ -63,11 +67,11 @@
 //                                           separate from the deposit's deposit_return row: same way of returning (in
 //                                           store -> success now; online -> pending until PayMongo confirms, with its own
 //                                           refund id), same retry and in-store hand-back, a newer row supersedes a failed one.
+// "internal" rows are never counted in paid-in / refunded-out totals: those filter on "in" and "out" only.
+// discount_return counts in refundedOut like the legacy "discount" refund did (the money did leave).
 //     (deterministic ID)  deposit_forfeited  the security deposit was KEPT by the business (a late / no-show refund, or a
 //                                           cancellation with no refund). direction "internal": nothing moves, the business just
 //                                           keeps what it already holds. ID = "<paymentID>_deposit_forfeited"; reason = why.
-// "internal" rows are never counted in paid-in / refunded-out totals: those filter on "in" and "out" only.
-// discount_return counts in refundedOut like the legacy "discount" refund did (the money did leave).
 // Legacy discounts (phase "discount", direction "out") are untouched: they were refunded on the spot.
 
 const ENTRY_COLLECTION = "paymentEntries";
@@ -103,6 +107,8 @@ const PaymentEntry = {
   processedAt: null,
   settledAt:   null,        // when the money actually moved
   groupID:     null,        // rows created by ONE payment that covered several penalties share this
+  handBackFor: null,        // "<partRowID>_handback" rows ONLY: the id of the failed PayMongo part row this in-person row pays back.
+                            // Not stored on any other row. A manual in-person row WITHOUT it is the request's own hand-back (_manual).
   reason: null,               // why: the reason staff gave for a discount (required) or for a forfeited deposit; null on other rows
   transactionErrorNote: null, // why a movement failed / could not happen (a failed refund part's error,
                             // "Payment ID does not exist"). null when nothing went wrong.

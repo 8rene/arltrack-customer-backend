@@ -8,7 +8,15 @@
 // pickup/return dates are NOT copied here — they live on the booking.
 // Fields added LATER by the admin backend (not present on a new doc):
 // carID and startedAt (set at pickup by markSessionActive), droppedOffTime,
-// archiveUrl and lastArchivedAt (set by the history flush).
+// archiveUrl and lastArchivedAt (set by the history flush), plus the live-tracking
+// bookkeeping fields below. The customer backend never writes or reads these; they
+// are documented in the admin's models/booking/bookingSession.model.js:
+//   startedAtSource     only set by the admin's date-migration script
+//   geofenceFlipCount   consecutive pings that disagree with the logged geofence state
+//   lastPingReceivedAt  last time the server heard from the tracker (ISO string)
+//   stolenAt            when the car was flagged stolen (a marker, not an end)
+//   needsFinalFlush     true until the trip's final history file is saved
+//   pointCount          GPS points in the flushed trail (may be absent)
 // GPS pings are NOT stored on this doc — they go to Google Sheets (one tab per
 // PHT date), matched back to this session by sessionId + carID + startedAt.
 //

@@ -36,6 +36,9 @@ export const CustomerNotification = {
   //                          reads enRouteAt from the booking's driverAssignments row, not from the booking.
   //   "balance_reminder"   — written by the ADMIN app when the driver taps "Remind customer" on an unpaid balance
   //                          (10-minute cooldown on the admin side). refID is the bookingID.
+  //   "inspection_confirmed" — written by the ADMIN app when staff finish a before / after inspection; goes to the
+  //                          booking's driver, or to YOU (the customer) when no driver is assigned. refID is the
+  //                          bookingID; carID and phase are stored alongside, and phase is also the dedupeKey.
   //   (type values are snake_case by convention; only the old penalty notices are PascalCase)
 
   userID: "",            // which customer account this notification belongs to
@@ -49,6 +52,17 @@ export const CustomerNotification = {
   status: "active",      // "active" | "resolved" — resolved ones are cleared
                           // out of the bell automatically (e.g. payment_pending
                           // gets resolved the moment payment_successful fires)
+
+  // ---- optional fields: only some notification types carry them (absent on every other type). Kept the same as the
+  //      admin backend's models/notification/notification.model.js ----
+  dedupeKey: null,   // makes events that share one refID separate notifications. Without it, an active doc with the same
+                     // type + refID + userID counts as a duplicate and the new one is dropped. With it, only a doc carrying
+                     // the SAME key counts. Written by this backend's paymongo.controller.js for the refund / payout
+                     // notices as "<payoutPhase>:<refundID>" (the deposit and the discount can both come back on one booking).
+  carID: null,       // inspection_* / maintenance_created: lets the admin bell open that car's page
+  phase: null,       // inspection_*: "before" | "after"
+  bookingKey: null,  // inspection_pickup_needed / inspection_return_needed (admin-written): the booking's key
+  version: null,     // terms_updated: the Terms & Conditions version number
 
   createdAt: null,
   resolvedAt: null,
