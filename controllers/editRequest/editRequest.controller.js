@@ -59,7 +59,7 @@ const getCurrentValues = async (userID) => {
 
 // ─────────────────────────────────────────────────────────────
 // POST /api/user/edit-requests
-// body: { changes: [{ field, requestedValue }], reason }
+// body: { changes: [{ field, requestedValue }] }
 // One pending bundle per user at a time — mirrors editRequests exactly
 // as written by the admin app's own EditProfileModal (Account.jsx),
 // just issued server-side (Admin SDK) since the customer app doesn't
@@ -67,7 +67,7 @@ const getCurrentValues = async (userID) => {
 // ─────────────────────────────────────────────────────────────
 const createEditRequest = async (req, res) => {
   const userID = req.user.userID;
-  const { changes, reason } = req.body;
+  const { changes } = req.body;
 
   if (!Array.isArray(changes) || changes.length === 0) {
     return res.status(400).json({ message: "No changes were submitted." });
@@ -105,7 +105,6 @@ const createEditRequest = async (req, res) => {
       role:        "Customer",
       status:      "pending",
       changes:     cleanChanges,
-      reason:      (reason || "").trim(),
       requestedBy: userID,
       reviewedBy:  null,
       reviewedAt:  null,

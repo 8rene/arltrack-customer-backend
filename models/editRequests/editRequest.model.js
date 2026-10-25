@@ -8,7 +8,6 @@ const EditRequest = {
   // One entry per changed field:
   //   { field, label, collection, oldValue, newValue }   (collection = which user collection the field lives in)
   changes: [],
-  reason: "",          // the customer's explanation
   requestedBy: "",     // same as userID
   reviewedBy: null,    // staff uid, set on review
   reviewedAt: null,
