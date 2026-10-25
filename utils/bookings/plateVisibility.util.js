@@ -23,7 +23,7 @@ const toDate = (val) => {
 };
 
 /**
- * @param {object} booking   needs { status, startDateTime }
+ * @param {object} booking   needs { status, startDateTime }; for a chauffeur booking also { modeOfDriving, enRouteAt } (enRouteAt from enRoute.util)
  * @param {string} plateNumber  the car's plate (from the cars doc)
  * @returns {{ plateNumber: string, plateRevealsAt: string|null }}
  *   plateNumber is "" until allowed. plateRevealsAt (ISO) is set only for a paid
@@ -36,7 +36,8 @@ const plateForBooking = (booking, plateNumber, now = Date.now()) => {
   if (!plate || !start || !SHOWN_STATUSES.has(status)) return { plateNumber: "", plateRevealsAt: null };
 
   // With a chauffeur the DRIVER decides: the plate stays hidden while the booking is upcoming and shows once the driver taps
-  // "On my way" (booking.enRouteAt). `plateWithDriver` lets the page say so. Ongoing / completed bookings fall through to the
+  // "On my way". `enRouteAt` is NOT on the booking doc: it is stamped on the driver's assignment row, so the caller passes it in
+  // as `{ ...booking, enRouteAt }` (see utils/bookings/enRoute.util.js). `plateWithDriver` lets the page say so. Ongoing / completed bookings fall through to the
   // normal rule below, so older chauffeur trips that never had "On my way" still show their plate in the history.
   const chauffeur = String((booking && booking.modeOfDriving) || "").toLowerCase().includes("chauffeur");
   if (chauffeur && status === "upcoming") {

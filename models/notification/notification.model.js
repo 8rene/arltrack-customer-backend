@@ -30,6 +30,13 @@ export const CustomerNotification = {
   //                          Conditions version is published. refCollection "terms", refID is
   //                          the new termsVersionID (NOT a bookingID); `version` is stored
   //                          alongside. The bell opens /terms for it, not a booking.
+  //   "driver_en_route"    — written by the ADMIN app when the assigned driver taps "On my way" (chauffeur
+  //                          bookings only). refID is the bookingID. The message names the driver's first name; the
+  //                          bell opens the temporary arrival page (GET /api/bookings/:bookingID/arrival), which
+  //                          reads enRouteAt from the booking's driverAssignments row, not from the booking.
+  //   "balance_reminder"   — written by the ADMIN app when the driver taps "Remind customer" on an unpaid balance
+  //                          (10-minute cooldown on the admin side). refID is the bookingID.
+  //   (type values are snake_case by convention; only the old penalty notices are PascalCase)
 
   userID: "",            // which customer account this notification belongs to
   refID: "",              // bookingID this notification is about

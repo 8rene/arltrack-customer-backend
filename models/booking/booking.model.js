@@ -38,7 +38,8 @@ const Booking = {
   // driver is its "assigned" row in driverAssignments (see
   // models/driverAssignment/driverAssignment.model.js); a booking with no such
   // row is still in the dispatch queue. (driverID / driverAssignedAt /
-  // driverAssignedBy used to live here.)
+  // driverAssignedBy used to live here.) The "On my way" state (enRouteAt) lives on
+  // that same row too, NOT on the booking; read it with utils/bookings/enRoute.util.js.
   //
   // Likewise a customer's request to cancel an ongoing trip is a row in
   // cancellationRequests, not fields on the booking. The reason a booking was

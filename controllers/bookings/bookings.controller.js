@@ -9,6 +9,7 @@ const {
 } = require("../../utils/bookings/codingRange.util");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { plateForBooking } = require("../../utils/bookings/plateVisibility.util");
+const { getEnRouteMap, bookingKeyOf } = require("../../utils/bookings/enRoute.util");
 const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
 const { syncPaymentEntries, hydratePayments, getEntriesForPaymentIDs } = require("../../utils/payments/paymentEntries.util");
@@ -1030,6 +1031,9 @@ const getUserBookings = async (req, res) => {
       if (!snap.empty) imageMap[carIDs[i]] = snap.docs[0].data().imageURL || "";
     });
 
+    // "On my way" is read from each upcoming chauffeur booking's assignment row (one batched query).
+    const enRouteMap = await getEnRouteMap(bookings);
+
     const result = bookings.map((b) => {
       const car    = carMap[b.carID] || {};
       const brand  = brandMap[car.brandID] || "";
@@ -1041,7 +1045,7 @@ const getUserBookings = async (req, res) => {
         carImage:      imageMap[b.carID]           || "",
         carBodyType:   car.bodyType                || "",
         // Plate number: only once the booking is paid and within 24h of pickup (then kept in history).
-        ...plateForBooking(b, car.plateNumber),
+        ...plateForBooking({ ...b, enRouteAt: enRouteMap.get(bookingKeyOf(b.id, b)) || null }, car.plateNumber),
         serviceType:   b.serviceType               || "",
         duration:      b.duration                  || "",
         startDateTime: b.startDateTime             || null,

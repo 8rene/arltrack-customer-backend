@@ -4,6 +4,7 @@ const { hydratePaymentData, getEntriesForPaymentIDs } = require("../../utils/pay
 const { buildCustomerDiscount } = require("../../utils/payments/discountView.util");
 const { getTermsVersionByID } = require("../../utils/terms/terms.service");
 const { plateForBooking } = require("../../utils/bookings/plateVisibility.util");
+const { getEnRouteInfo, getDriverFirstName } = require("../../utils/bookings/enRoute.util");
 
 // Shared ownership check — same pattern as cancelBooking in bookings.controller.js.
 // Returns the booking data if the requester owns it, or null and writes the
@@ -180,6 +181,13 @@ const getBookingDetails = async (req, res) => {
       };
     }
 
+    // "On my way" lives on the driver's assignment row; only a chauffeur booking that is still upcoming can have it.
+    let enRouteAt = null;
+    if (String(booking.modeOfDriving || "").toLowerCase().includes("chauffeur") && String(booking.status || "").toLowerCase() === "upcoming") {
+      try { enRouteAt = (await getEnRouteInfo(bookingID, booking)).enRouteAt; }
+      catch (e) { console.warn("getBookingDetails en-route lookup failed:", e.message); }
+    }
+
     return res.status(200).json({
       booking: {
         bookingID,
@@ -187,7 +195,7 @@ const getBookingDetails = async (req, res) => {
         carName,
         carImage,
         // Plate number is only included once paid and within 24h of pickup (kept for history).
-        ...plateForBooking(booking, carPlate),
+        ...plateForBooking({ ...booking, enRouteAt }, carPlate),
         serviceType:    booking.serviceType    || "",
         status:         booking.status         || "pending",
         modeOfDriving:  booking.modeOfDriving  || "",
@@ -220,7 +228,7 @@ const getBookingDetails = async (req, res) => {
 // GET /api/bookings/:bookingID/arrival
 //
 // The temporary "your driver is on the way" page. Owner-only, chauffeur bookings only, and served ONLY while the driver is
-// en route: the driver tapped "On my way" (booking.enRouteAt is set, by the admin app) and the booking is still "upcoming".
+// en route: the driver tapped "On my way" (the driver's assignment row has enRouteAt, set by the admin app) and the booking is still "upcoming".
 // Start Pickup turns the booking "ongoing", which closes the window by itself.
 // It returns the car, its plate number and the driver's first name. NO position: customers never see live position (see
 // getBookingDetails above), and the car is not tracked before pickup anyway.
@@ -236,7 +244,9 @@ const getArrival = async (req, res) => {
     if (String(booking.status || "").toLowerCase() !== "upcoming") {
       return res.status(410).json({ message: "This page is only available while your driver is on the way.", reason: "closed" });
     }
-    if (!booking.enRouteAt) {
+    // enRouteAt and the driver now live on the booking's current assignment row, not on the booking.
+    const { enRouteAt, driverID } = await getEnRouteInfo(bookingID, booking);
+    if (!enRouteAt) {
       return res.status(404).json({ message: "Your driver hasn't left yet. You'll get a notification when they do.", reason: "not_on_the_way" });
     }
 
@@ -273,15 +283,16 @@ const getArrival = async (req, res) => {
     }
 
     // Plate through the same rule as everywhere else: with enRouteAt set it is shown.
-    const { plateNumber } = plateForBooking(booking, carPlate);
+    const { plateNumber } = plateForBooking({ ...booking, enRouteAt }, carPlate);
+    const driverFirstName = await getDriverFirstName(driverID);
 
     return res.status(200).json({
       bookingID,
       carName,
       carImage,
       plateNumber,
-      driverFirstName: booking.enRouteDriverFirstName || "",
-      enRouteAt:       toISO(booking.enRouteAt),
+      driverFirstName,
+      enRouteAt:       toISO(enRouteAt),
       startDateTime:   booking.startDateTime || null,
       pickupAddress,
     });
