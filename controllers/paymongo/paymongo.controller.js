@@ -6,7 +6,7 @@ const { BOOKING_STATUS, enforceToPayValidity, promoteBookingToUpcoming, cancelBo
 const { createNotification, notifyStaff, resolveNotification } = require("../../services/notification/notification.service");
 const { axios, PAYMONGO_V1, paymongoHeaders, channelLabel } = require("../../utils/payments/paymongoClient.util");
 const { settlePhasePayment, verifyAndSettlePayment, phaseOf, isPhasePaid } = require("../../utils/payments/settlePayment.util");
-const { computeRefundQuote, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
+const { computeRefundQuote, getRefundSchedule, resolvePickupAt, getPaymentBreakdown } = require("../../utils/payments/paymentBreakdown.util");
 const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
 const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefundRequests } = require("../../utils/payments/paymentEntries.util");
 const { createPendingRefundRow, attachRefundRowInfo } = require("../../utils/bookings/cancellationRequests.util");
@@ -1091,6 +1091,8 @@ const previewRefund = async (req, res) => {
 
     const requestedAt = new Date();
     const { policy, plan, pickupAt } = quoteCustomerRefund(ctx.payment, ctx.booking, requestedAt);
+    // Same-day rule: a partial online refund of a payment made today can't be sent by PayMongo until the next day.
+    const schedule = plan.total > 0 ? getRefundSchedule(ctx.payment, plan, requestedAt) : { deferred: false, sendAfter: null };
 
     return res.status(200).json({
       eligible: plan.total > 0,
@@ -1098,7 +1100,10 @@ const previewRefund = async (req, res) => {
       tier: policy.tier,                           // "full" | "late" | "no_show"
       graceApplied: !!policy.graceApplied,         // asked within graceHours of booking: deposit goes back even though it's "late"
       graceHours: policy.graceHours,
-      graceFeeWaived: policy.gatewayFeeWaivedByGrace || 0, // gateway fee NOT deducted because the request is inside the grace window
+      graceFeeWaived: 0,                           // the grace window no longer waives the gateway fee (kept so old app versions don't break)
+      autoApprove: !!policy.inGraceWindow,         // asked within graceHours of paying: approved automatically, no staff review
+      sendAfter: schedule.sendAfter,               // partial refund of a payment made today: sent after this moment (next Manila midnight)
+      scheduled: schedule.deferred,
       windowHours: policy.windowHours,             // 48
       hoursBeforePickup: policy.hoursBeforePickup, // null when the pickup time is unknown
       pickupAt,
@@ -1121,6 +1126,34 @@ const previewRefund = async (req, res) => {
   } catch (error) {
     console.error("previewRefund error:", error.message);
     return res.status(500).json({ message: "Failed to calculate the refund." });
+  }
+};
+
+// Asks the admin backend to approve a grace-window request now. The admin backend owns PayMongo, the approval lock and the
+// booking cancellation, so this backend never creates a PayMongo refund itself. Needs two env vars (same value on both
+// backends for the secret): ADMIN_API_URL (e.g. https://admin-api.example.com) and INTERNAL_API_SECRET.
+// Never throws: on any failure the request stays Pending + autoApprove and the admin cron approves it on its next run.
+const triggerAutoApprove = async (refundRequestID) => {
+  const base = process.env.ADMIN_API_URL;
+  const secret = process.env.INTERNAL_API_SECRET;
+  if (!base || !secret) {
+    console.error("[REFUND] auto-approve not triggered: ADMIN_API_URL / INTERNAL_API_SECRET not set. The admin cron will pick it up.");
+    return false;
+  }
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    const r = await fetch(`${base.replace(/\/$/, "")}/api/internal/refund-requests/${encodeURIComponent(refundRequestID)}/auto-approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-internal-secret": secret },
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!r.ok) console.error("[REFUND] auto-approve call failed:", r.status, await r.text().catch(() => ""));
+    return r.ok;
+  } catch (e) {
+    console.error("[REFUND] auto-approve call error:", e.message);
+    return false;
   }
 };
 
@@ -1151,6 +1184,8 @@ const requestRefund = async (req, res) => {
     if (plan.total <= 0) {
       return res.status(400).json({ message: nothingToRefundMessage(policy, plan) });
     }
+    const schedule = getRefundSchedule(payment, plan, now);
+    const autoApprove = !!policy.inGraceWindow;   // asked within the grace window: the admin backend approves it by itself
     const refundRef = db.collection("refundRequests").doc();
     // Who asked and why (userID / reason / notes) live on the pending cancellation row, not on the refund doc.
     // parts[] / manualRefund / unrefundable[] are written as "out" rows in paymentEntries on staff approval, and
@@ -1163,6 +1198,7 @@ const requestRefund = async (req, res) => {
       bookingPaid: plan.grossPaid,               // everything the customer had paid
       returnDeposit: !(policy.forfeit > 0),      // the 48-hour verdict, locked at the moment of the request: false = the deposit is kept
       depositGraceApplied: !!policy.graceApplied, // true = under 48h, but asked within the grace window so the deposit goes back
+      autoApprove,                               // true = inside the grace window: the admin backend approves it without staff review (see triggerAutoApprove below)
       depositForfeited: policy.forfeit,          // kept from the refund (0 when the deposit goes back)
       gatewayFeeKept: plan.gatewayFeeKept,       // online payment (gateway) fee kept: only when the deposit goes back. Locked here so approving later never changes it
       status: "Pending",
@@ -1208,15 +1244,28 @@ const requestRefund = async (req, res) => {
       refID: refundRef.id,
       refCollection: "refundRequests",
       title: "Refund Request",
-      message: `A refund request for ${peso(plan.total)} is awaiting review${tierNote}.`,
+      message: autoApprove
+        ? `A refund request for ${peso(plan.total)} was made within ${policy.graceHours} hours of booking and is being approved automatically${tierNote}.`
+        : `A refund request for ${peso(plan.total)} is awaiting review${tierNote}.`,
     });
 
+    // Inside the grace window: ask the admin backend to approve it now (it cancels the booking and, for a payment made
+    // today, schedules the money for the next day). If the call fails, the admin cron picks the request up on its next run.
+    if (autoApprove) await triggerAutoApprove(refundRef.id);
+
+    const sendAfterNote = schedule.deferred
+      ? ` Because the payment was made today, the refund will be sent on ${schedule.sendAfter.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric" })}.`
+      : "";
     return res.status(201).json({
-      message: policy.forfeit > 0
+      message: autoApprove
+        ? `Refund approved automatically because you asked within ${policy.graceHours} hours of booking. ${peso(plan.total)} will be returned to you${plan.gatewayFeeKept > 0 ? `; the ${peso(plan.gatewayFeeKept)} online payment (gateway) fee is non-refundable` : ""}.${sendAfterNote}`
+      : policy.forfeit > 0
         ? `Refund request sent. Because it was made ${policy.tier === "no_show" ? "after your pickup time" : `less than ${policy.windowHours} hours before pickup`}, your ${peso(policy.forfeit)} deposit is non-refundable. ${peso(plan.total)} will be returned once it's reviewed.`
         : plan.gatewayFeeKept > 0
           ? `Refund request sent. The ${peso(plan.gatewayFeeKept)} online payment (gateway) fee is non-refundable. ${peso(plan.total)} will be returned once it's reviewed.`
           : "Refund request sent. We'll notify you once it's reviewed.",
+      autoApprove,
+      sendAfter: schedule.sendAfter,
       ...(plan.qrphAmount > 0 ? { notice: qrphRefundNotice(plan.qrphAmount), inStoreOnly: true, qrphAmount: plan.qrphAmount } : {}),
       ...(plan.unrefundableAmount > 0 ? { warning: `${peso(plan.unrefundableAmount)} of this payment has no payment reference on record and can't be refunded automatically — our staff will review it.` } : {}),
       // The stored doc is slimmer now; the response still carries what the customer app showed before.

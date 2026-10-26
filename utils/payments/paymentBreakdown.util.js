@@ -383,25 +383,25 @@ const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false,
   // made) and the pickup hasn't passed. Unknown bookedAt means no grace.
   const booked = toDate(bookedAt);
   const hoursSinceBooked = booked ? (requested.getTime() - booked.getTime()) / HOUR_MS : null;
-  // inGraceWindow: asked within REFUND_GRACE_HOURS of paying, pickup not passed. Whatever the tier, the gateway fee is
-  // NOT kept inside this window. graceApplied is the narrower case that also rescues the deposit (under 48h).
+  // inGraceWindow: asked within REFUND_GRACE_HOURS of paying, pickup not passed. Such a request is AUTO-APPROVED
+  // (no staff review). graceApplied is the narrower case that also rescues the deposit (under 48h).
   const inGraceWindow = tier !== "no_show" && hoursSinceBooked !== null && hoursSinceBooked >= 0 && hoursSinceBooked < REFUND_GRACE_HOURS;
   const graceApplied = tier === "late" && inGraceWindow;
 
   const wouldForfeit = (tier === "full" || graceApplied) ? 0 : Math.min(depositAmount, amountPaid);
   const forfeit = waiveForfeit ? 0 : wouldForfeit;
 
-  // The deposit goes back (full tier, or the 2-hour grace) -> the gateway fee is kept, EXCEPT inside the 2-hour grace
-  // window, where nothing is deducted. A staff waiver keeps neither.
+  // The deposit goes back (full tier, or the 2-hour grace) -> the gateway fee is KEPT. The grace window does NOT waive it
+  // (PayMongo keeps its fee on the original charge, so a free waiver would cost the business every time).
+  // A kept deposit (late / no-show) -> the gateway fee is refunded. A staff waiver keeps neither.
   const depositReturned = (tier === "full" || graceApplied) && !waiveForfeit;
-  const gatewayFeeKept = depositReturned && !inGraceWindow ? getGatewayFeeShare(payment) : 0;
-  const gatewayFeeWaivedByGrace = depositReturned && inGraceWindow ? getGatewayFeeShare(payment) : 0; // fee that would have been kept
+  const gatewayFeeKept = depositReturned ? getGatewayFeeShare(payment) : 0;
 
   return {
     graceApplied,
     inGraceWindow,
     gatewayFeeKept,
-    gatewayFeeWaivedByGrace,
+    gatewayFeeWaivedByGrace: 0,   // kept for old readers: the grace window no longer waives the fee
     graceHours: REFUND_GRACE_HOURS,
     tier,
     hoursBeforePickup: Math.round(hoursBeforePickup * 100) / 100,
@@ -440,6 +440,31 @@ const getRefundPolicyFromFlag = (payment, { returnDeposit, waiveForfeit = false,
   };
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Same-day rule. PayMongo can't PARTIALLY refund a payment on the day it was made, so a partial online refund of a
+// charge paid today is not sent right away: it is scheduled for the next Manila midnight (the admin cron sends it).
+// A full refund of a charge is not affected. Mirror of computeRefundSchedule() in the admin backend
+// (services/refundRequest/refundRequest.service.js) -- keep them identical.
+//   returns { deferred: bool, sendAfter: Date|null }
+// ─────────────────────────────────────────────────────────────────────────────
+const MANILA_DAY_MS = 24 * HOUR_MS;
+const manilaDayStart = (d) => new Date(Math.floor((d.getTime() + MANILA_OFFSET_MS) / MANILA_DAY_MS) * MANILA_DAY_MS - MANILA_OFFSET_MS);
+const nextManilaMidnight = (d) => new Date(manilaDayStart(d).getTime() + MANILA_DAY_MS);
+
+const getRefundSchedule = (payment, plan, now = new Date()) => {
+  const p = payment || {};
+  const b = (plan && plan.breakdown) || {};
+  let deferred = false;
+  for (const part of (plan && plan.parts) || []) {
+    const chargeAmt = part.kind === "balance" ? num(b.balanceOnline) : num(b.depositCollected);
+    const paidAt = toDate(part.kind === "balance" ? p.balancePaidAt : p.paidAt);
+    if (!paidAt || !(chargeAmt > 0)) continue;
+    const sameDay = manilaDayStart(paidAt).getTime() === manilaDayStart(now).getTime();
+    if (sameDay && num(part.amount) < chargeAmt - 0.005) { deferred = true; break; }
+  }
+  return { deferred, sendAfter: deferred ? nextManilaMidnight(now) : null };
+};
+
 // Policy + plan in one call: what a refund requested at `requestedAt` is worth.
 const computeRefundQuote = (payment, { pickupAt, requestedAt, waiveForfeit = false, bookedAt = null } = {}) => {
   const policy = getRefundPolicy(payment, { pickupAt, requestedAt, waiveForfeit, bookedAt });
@@ -447,4 +472,4 @@ const computeRefundQuote = (payment, { pickupAt, requestedAt, waiveForfeit = fal
   return { policy, plan };
 };
 
-module.exports = { PAYMENT_ID_MISSING_NOTE, depositWasOnline, getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getGatewayFeeShare, getRefundPolicy, getRefundPolicyFromFlag, computeRefundQuote, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS, REFUND_GRACE_HOURS };
+module.exports = { PAYMENT_ID_MISSING_NOTE, depositWasOnline, getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getGatewayFeeShare, getRefundPolicy, getRefundPolicyFromFlag, computeRefundQuote, getRefundSchedule, nextManilaMidnight, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS, REFUND_GRACE_HOURS };
