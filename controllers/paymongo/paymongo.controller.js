@@ -1133,28 +1133,42 @@ const previewRefund = async (req, res) => {
 // booking cancellation, so this backend never creates a PayMongo refund itself. Needs two env vars (same value on both
 // backends for the secret): ADMIN_API_URL (e.g. https://admin-api.example.com) and INTERNAL_API_SECRET.
 // Never throws: on any failure the request stays Pending + autoApprove and the admin cron approves it on its next run.
+// Returns { ok, error }. When it did not work, WHY is saved on the request (autoApproveError) so staff can see it on the
+// Refunds page without reading server logs.
 const triggerAutoApprove = async (refundRequestID) => {
   const base = process.env.ADMIN_API_URL;
   const secret = process.env.INTERNAL_API_SECRET;
+  let error = null;
   if (!base || !secret) {
+    error = `Not sent: ${!base ? "ADMIN_API_URL" : "INTERNAL_API_SECRET"} is not set on the customer backend.`;
     console.error("[REFUND] auto-approve not triggered: ADMIN_API_URL / INTERNAL_API_SECRET not set. The admin cron will pick it up.");
-    return false;
+  } else {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      const r = await fetch(`${base.replace(/\/$/, "")}/api/internal/refund-requests/${encodeURIComponent(refundRequestID)}/auto-approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-internal-secret": secret },
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (r.ok) return { ok: true, error: null };
+      const body = await r.text().catch(() => "");
+      let detail = body;
+      try { detail = JSON.parse(body).message || body; } catch { /* not JSON */ }
+      error = `Admin backend answered ${r.status}${detail ? `: ${String(detail).slice(0, 200)}` : ""}${r.status === 401 ? " (the two INTERNAL_API_SECRET values differ)" : r.status === 503 ? " (INTERNAL_API_SECRET is not set on the admin backend)" : r.status === 404 ? " (check ADMIN_API_URL)" : ""}`;
+      console.error("[REFUND] auto-approve call failed:", r.status, body);
+    } catch (e) {
+      error = `Could not reach the admin backend: ${e.name === "AbortError" ? "no answer within 8 seconds" : e.message}`;
+      console.error("[REFUND] auto-approve call error:", e.message);
+    }
   }
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 8000);
-    const r = await fetch(`${base.replace(/\/$/, "")}/api/internal/refund-requests/${encodeURIComponent(refundRequestID)}/auto-approve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-internal-secret": secret },
-      signal: ctrl.signal,
-    });
-    clearTimeout(timer);
-    if (!r.ok) console.error("[REFUND] auto-approve call failed:", r.status, await r.text().catch(() => ""));
-    return r.ok;
+    await db.collection("refundRequests").doc(refundRequestID).update({ autoApproveError: error, autoApproveFailedAt: new Date() });
   } catch (e) {
-    console.error("[REFUND] auto-approve call error:", e.message);
-    return false;
+    console.error("[REFUND] could not save the auto-approve error:", e.message);
   }
+  return { ok: false, error };
 };
 
 const requestRefund = async (req, res) => {
@@ -1220,6 +1234,11 @@ const requestRefund = async (req, res) => {
       return res.status(409).json({ message: "A refund request for this payment is already in progress." });
     }
 
+    // Inside the grace window: ask the admin backend to approve it now (it cancels the booking and, for a payment made
+    // today, schedules the money for the next day). If the call fails, the admin cron picks the request up on its next run.
+    const auto = autoApprove ? await triggerAutoApprove(refundRef.id) : null;
+    const approvedNow = !!(auto && auto.ok);
+
     const feeNote = plan.gatewayFeeKept > 0 ? `; ${peso(plan.gatewayFeeKept)} gateway fee kept` : "";
     const tierNote = policy.graceApplied
       ? ` (under ${policy.windowHours}h before pickup, but asked within ${policy.graceHours}h of booking; deposit returned${feeNote})`
@@ -1244,20 +1263,20 @@ const requestRefund = async (req, res) => {
       refID: refundRef.id,
       refCollection: "refundRequests",
       title: "Refund Request",
-      message: autoApprove
-        ? `A refund request for ${peso(plan.total)} was made within ${policy.graceHours} hours of booking and is being approved automatically${tierNote}.`
-        : `A refund request for ${peso(plan.total)} is awaiting review${tierNote}.`,
+      message: approvedNow
+        ? `A refund request for ${peso(plan.total)} was made within ${policy.graceHours} hours of booking and was approved automatically${tierNote}.`
+        : autoApprove
+          ? `A refund request for ${peso(plan.total)} was made within ${policy.graceHours} hours of booking, but the automatic approval did not go through (${auto.error || "unknown reason"}). Please approve it on the Refunds page${tierNote}.`
+          : `A refund request for ${peso(plan.total)} is awaiting review${tierNote}.`,
     });
-
-    // Inside the grace window: ask the admin backend to approve it now (it cancels the booking and, for a payment made
-    // today, schedules the money for the next day). If the call fails, the admin cron picks the request up on its next run.
-    if (autoApprove) await triggerAutoApprove(refundRef.id);
 
     const sendAfterNote = schedule.deferred
       ? ` Because the payment was made today, the refund will be sent on ${schedule.sendAfter.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric" })}.`
       : "";
     return res.status(201).json({
-      message: autoApprove
+      message: autoApprove && !approvedNow
+        ? `Your refund request was received. Because you asked within ${policy.graceHours} hours of booking it will be approved without review, but that hasn't finished yet. ${peso(plan.total)} will be returned to you${plan.gatewayFeeKept > 0 ? `; the ${peso(plan.gatewayFeeKept)} online payment (gateway) fee is non-refundable` : ""}.${sendAfterNote} We'll notify you as soon as it is approved.`
+      : autoApprove
         ? `Refund approved automatically because you asked within ${policy.graceHours} hours of booking. ${peso(plan.total)} will be returned to you${plan.gatewayFeeKept > 0 ? `; the ${peso(plan.gatewayFeeKept)} online payment (gateway) fee is non-refundable` : ""}.${sendAfterNote}`
       : policy.forfeit > 0
         ? `Refund request sent. Because it was made ${policy.tier === "no_show" ? "after your pickup time" : `less than ${policy.windowHours} hours before pickup`}, your ${peso(policy.forfeit)} deposit is non-refundable. ${peso(plan.total)} will be returned once it's reviewed.`
@@ -1265,6 +1284,7 @@ const requestRefund = async (req, res) => {
           ? `Refund request sent. The ${peso(plan.gatewayFeeKept)} online payment (gateway) fee is non-refundable. ${peso(plan.total)} will be returned once it's reviewed.`
           : "Refund request sent. We'll notify you once it's reviewed.",
       autoApprove,
+      approvedNow,                 // true = the admin backend confirmed the approval; false on a grace-window request = it is still waiting
       sendAfter: schedule.sendAfter,
       ...(plan.qrphAmount > 0 ? { notice: qrphRefundNotice(plan.qrphAmount), inStoreOnly: true, qrphAmount: plan.qrphAmount } : {}),
       ...(plan.unrefundableAmount > 0 ? { warning: `${peso(plan.unrefundableAmount)} of this payment has no payment reference on record and can't be refunded automatically — our staff will review it.` } : {}),
