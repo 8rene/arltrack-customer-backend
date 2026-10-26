@@ -6,7 +6,9 @@ const createUserAddress = (userID, data = {}) => ({
   municipality: data.municipality || "",
   barangay:     data.barangay     || "",
   street:       data.street       || "",
-  postalCode:   data.postalCode   || "",
+  // zipCode is the only postal field now. postalCode was merged into it; data.postalCode is still read
+  // so an older client that sends it does not lose the value.
+  zipCode:      data.zipCode      || data.postalCode || "",
   createdAt:    new Date(),
 });
 
