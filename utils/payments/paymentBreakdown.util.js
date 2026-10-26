@@ -383,18 +383,25 @@ const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false,
   // made) and the pickup hasn't passed. Unknown bookedAt means no grace.
   const booked = toDate(bookedAt);
   const hoursSinceBooked = booked ? (requested.getTime() - booked.getTime()) / HOUR_MS : null;
-  const graceApplied = tier === "late" && hoursSinceBooked !== null && hoursSinceBooked >= 0 && hoursSinceBooked < REFUND_GRACE_HOURS;
+  // inGraceWindow: asked within REFUND_GRACE_HOURS of paying, pickup not passed. Whatever the tier, the gateway fee is
+  // NOT kept inside this window. graceApplied is the narrower case that also rescues the deposit (under 48h).
+  const inGraceWindow = tier !== "no_show" && hoursSinceBooked !== null && hoursSinceBooked >= 0 && hoursSinceBooked < REFUND_GRACE_HOURS;
+  const graceApplied = tier === "late" && inGraceWindow;
 
   const wouldForfeit = (tier === "full" || graceApplied) ? 0 : Math.min(depositAmount, amountPaid);
   const forfeit = waiveForfeit ? 0 : wouldForfeit;
 
-  // The deposit goes back (full tier, or the 2-hour grace) -> the gateway fee is kept. A staff waiver keeps neither.
+  // The deposit goes back (full tier, or the 2-hour grace) -> the gateway fee is kept, EXCEPT inside the 2-hour grace
+  // window, where nothing is deducted. A staff waiver keeps neither.
   const depositReturned = (tier === "full" || graceApplied) && !waiveForfeit;
-  const gatewayFeeKept = depositReturned ? getGatewayFeeShare(payment) : 0;
+  const gatewayFeeKept = depositReturned && !inGraceWindow ? getGatewayFeeShare(payment) : 0;
+  const gatewayFeeWaivedByGrace = depositReturned && inGraceWindow ? getGatewayFeeShare(payment) : 0; // fee that would have been kept
 
   return {
     graceApplied,
+    inGraceWindow,
     gatewayFeeKept,
+    gatewayFeeWaivedByGrace,
     graceHours: REFUND_GRACE_HOURS,
     tier,
     hoursBeforePickup: Math.round(hoursBeforePickup * 100) / 100,

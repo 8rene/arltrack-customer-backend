@@ -1098,6 +1098,7 @@ const previewRefund = async (req, res) => {
       tier: policy.tier,                           // "full" | "late" | "no_show"
       graceApplied: !!policy.graceApplied,         // asked within graceHours of booking: deposit goes back even though it's "late"
       graceHours: policy.graceHours,
+      graceFeeWaived: policy.gatewayFeeWaivedByGrace || 0, // gateway fee NOT deducted because the request is inside the grace window
       windowHours: policy.windowHours,             // 48
       hoursBeforePickup: policy.hoursBeforePickup, // null when the pickup time is unknown
       pickupAt,
