@@ -363,6 +363,19 @@ const createBooking = async (req, res) => {
     return res.status(400).json({ message: "carID is required." });
   }
 
+  // Hiding a car on the Booking page is not enough on its own: anyone can call this endpoint directly. An Inactive car
+  // or one under Maintenance cannot be booked. (The Booking page already hides them; this is the server's own check.)
+  {
+    const carCheck = await db.collection("cars").doc(carID).get();
+    const carStatus = carCheck.exists ? String(carCheck.data().status || "").trim().toLowerCase() : "";
+    if (!carCheck.exists || carStatus === "inactive") {
+      return res.status(404).json({ message: "This vehicle is no longer available." });
+    }
+    if (carStatus === "maintenance") {
+      return res.status(409).json({ message: "This vehicle is currently under maintenance and can't be booked right now." });
+    }
+  }
+
   // ── Terms & Conditions acceptance ──
   // The browser sends the termsVersionID of the text it displayed. It must be the CURRENT
   // version published in the admin (termsVersions), otherwise the customer is asked to re-read
@@ -797,30 +810,10 @@ const createBooking = async (req, res) => {
     try {
       await db.runTransaction(async (tx) => {
         // ---- all reads first ----
-        // Only bookings that can possibly clash are read: every check below
-        // needs  booking.end + 1-day buffer > requested start, so anything that
-        // ended before (start - 1 day) can never matter. Needs a composite index
-        // (carID + endDateTime). Until it exists Firestore rejects the query
-        // (FAILED_PRECONDITION) — we log its create-index link once and fall
-        // back to reading the car's full list, so booking never breaks.
-        const BUFFER_READ_MS = 24 * 60 * 60 * 1000;
-        const carBookingsQuery = db.collection("bookings")
-          .where("carID", "==", carID)
-          .where("endDateTime", ">", new Date(startDateTime.getTime() - BUFFER_READ_MS));
-        const readCarBookings = async () => {
-          try {
-            return await tx.get(carBookingsQuery);
-          } catch (e) {
-            if (e && (e.code === 9 || /FAILED_PRECONDITION|requires an index/i.test(String(e.message)))) {
-              if (!global.__carBookingsIndexWarned) {
-                global.__carBookingsIndexWarned = true;
-                console.warn("[createBooking] Create this Firestore index to speed up booking (bookings: carID asc, endDateTime asc):", e.message);
-              }
-              return tx.get(db.collection("bookings").where("carID", "==", carID));
-            }
-            throw e;
-          }
-        };
+        // Reads all of this car's bookings (equality filter only, so no composite
+        // index is needed). The checks below filter by date themselves.
+        const readCarBookings = () =>
+          tx.get(db.collection("bookings").where("carID", "==", carID));
         const [carBookingsSnap, maintSnap] = await Promise.all([
           readCarBookings(),
           tx.get(

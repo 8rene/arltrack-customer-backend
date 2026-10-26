@@ -1,6 +1,11 @@
 const crypto = require("crypto");
 const { db } = require("../../config/firebaseConnection/firebase");
 
+// An Inactive car (sold, retired, ...) must not appear anywhere on the customer side -- not in the showroom, the
+// featured cars, the booking page or a direct link. (Maintenance cars are still listed here: the showroom shows them;
+// only the Booking page hides them.) Status casing is not trusted: "Inactive" / "inactive" both count.
+const isInactiveCar = (data) => String((data && data.status) || "").trim().toLowerCase() === "inactive";
+
 // Helper: resolve car details (brand, model, primary image, all pricing)
 const resolveCarDetails = async (carID, carData, brandMap, modelMap) => {
   const brand = brandMap[carData.brandID] || "";
@@ -72,6 +77,7 @@ const getAllCars = async (req, res) => {
 
     carsSnap.docs.forEach((doc) => {
       const d = doc.data();
+      if (isInactiveCar(d)) return;   // Inactive: not shown anywhere
       carsRaw.push({ id: doc.id, data: d });
       if (d.brandID) brandIDs.add(d.brandID);
       if (d.modelID) modelIDs.add(d.modelID);
@@ -117,6 +123,7 @@ const getFeaturedCars = async (req, res) => {
     const allCarIDs  = [];
 
     carsSnap.docs.forEach((doc) => {
+      if (isInactiveCar(doc.data())) return;   // Inactive: never featured
       carDataMap[doc.id] = doc.data();
       allCarIDs.push(doc.id);
       if (doc.data().brandID) brandIDs.add(doc.data().brandID);
@@ -210,6 +217,7 @@ const getCarDetails = async (req, res) => {
     if (!carDoc.exists) return res.status(404).json({ message: "Car not found." });
 
     const carData = carDoc.data();
+    if (isInactiveCar(carData)) return res.status(404).json({ message: "Car not found." });   // Inactive: same as a car that does not exist
 
     // 2. Fetch brand/model
     const [brandDoc, modelDoc] = await Promise.all([
