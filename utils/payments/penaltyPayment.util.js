@@ -20,7 +20,8 @@
 //
 // The online payment (gateway) fee the customer pays on top of the penalty is NOT stored on the pending rows.
 // It is the fee on each row's amount at its penalty's saved gatewayFeeRate (a penalty from before the rate was
-// saved uses the current setting). It is recomputed at checkout and at settlement, and the settled part is kept
+// saved uses the current setting), and ONLY for a penalty whose own amount is higher than PENALTY_FEE_MIN_AMOUNT
+// (pricing.js); a smaller penalty is paid with no fee. It is recomputed at checkout and at settlement, and the settled part is kept
 // on penalties.gatewayFeePaid, nowhere else. A row's amount is the penalty money only.
 //
 // Like settlePayment.util.js, ONE function (settlePenaltyCheckout) settles a checkout no matter who discovers
@@ -208,7 +209,7 @@ const planOnlinePayment = (unpaid = [], { depositCover = 0, fallbackPercent = 0 
     if (left <= 0) break;
     const part = Math.min(owedOn(p), left);
     left = round2(left - part);
-    items.push({ penaltyID: p.penaltyID || (p._ref && p._ref.id) || p.id, owed: part, gatewayFeeRate: p.gatewayFeeRate });
+    items.push({ penaltyID: p.penaltyID || (p._ref && p._ref.id) || p.id, owed: part, gatewayFeeRate: p.gatewayFeeRate, penaltyTotal: p.amount });
   }
   return { unpaidTotal: all, coveredByDeposit, onlineDue, ...computePenaltyCheckoutFees(items, fallbackPercent) };
 };
@@ -285,8 +286,9 @@ const settlePenaltyCheckout = async ({ groupID, paymongoPaymentID = null, charge
       const planned = num(r.amount);
       const apply = p && p.userID === userID ? Math.min(owedOn(p), planned) : 0;
       const rate = p && p.gatewayFeeRate !== undefined && p.gatewayFeeRate !== null && p.gatewayFeeRate !== "" ? p.gatewayFeeRate : settings.gatewayFeePercent;
-      const feeCharged = computePenaltyGatewayFee(planned, rate).gatewayFee;   // what the customer paid on this row
-      const feeKept = apply > 0 ? computePenaltyGatewayFee(apply, rate).gatewayFee : 0;
+      const penaltyTotal = p ? p.amount : null;   // the penalty's own amount decides whether a fee applies at all
+      const feeCharged = computePenaltyGatewayFee(planned, rate, penaltyTotal).gatewayFee;   // what the customer paid on this row
+      const feeKept = apply > 0 ? computePenaltyGatewayFee(apply, rate, penaltyTotal).gatewayFee : 0;
       // A partly-applied row keeps the fee on the applied part only; the rest is returned with the money.
       return { r, p, planned, apply: round2(apply), feeCharged, feeKept: apply >= planned ? feeCharged : feeKept };
     });

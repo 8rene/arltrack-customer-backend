@@ -259,17 +259,26 @@ const computeFeeBreakdown = ({
 };
 
 // ── Online payment (gateway) fee on a PENALTY ───────────────────────────────
-// DISABLED: paying a penalty online no longer adds a gateway fee. Flip this to false to charge it again.
-const PENALTY_GATEWAY_FEE_DISABLED = true;
+// Paying a penalty online adds the gateway fee ONLY when the penalty itself is HIGHER than this many pesos. A penalty of exactly
+// this amount or less carries no fee (the business absorbs PayMongo's cut). The test is on the penalty's own amount, never on
+// the part paid online, so a penalty gets the same answer however it is paid (all online, partly from the deposit, or in
+// several payments). The fee is then charged on the part that IS paid online. The admin backend's receipt.service.js
+// (penaltyFeeOf) has the same number: keep the two equal.
+const PENALTY_FEE_MIN_AMOUNT = 1000;
+// Master switch: set to true to charge NO penalty fee at all, whatever the amount.
+const PENALTY_GATEWAY_FEE_DISABLED = false;
+const penaltyCarriesFee = (penaltyTotal) => !PENALTY_GATEWAY_FEE_DISABLED && (Number(penaltyTotal) || 0) > PENALTY_FEE_MIN_AMOUNT;
 
 // A penalty paid through PayMongo costs the business PayMongo's cut, so the customer is charged the same
 // gatewayFeePercent as the booking (one setting for the owner to manage). Same rounding as computeFeeBreakdown:
 // a whole peso. The fee is NOT part of the penalty: the penalty's amount stays what was charged for the
 // lateness / damage, and the fee exists only on the online checkout (never for in-store or deposit-covered).
 //   gatewayFee = round(penaltyAmount x gatewayFeePercent / 100)      total = penaltyAmount + gatewayFee
-const computePenaltyGatewayFee = (penaltyAmount = 0, gatewayFeePercent = 0) => {
+// penaltyAmount = the money being paid now; penaltyTotal = the penalty's FULL amount, which is what decides whether a fee
+// applies at all (see PENALTY_FEE_MIN_AMOUNT). Without a penaltyTotal the amount being paid stands in for it.
+const computePenaltyGatewayFee = (penaltyAmount = 0, gatewayFeePercent = 0, penaltyTotal = null) => {
   const base = Math.max(0, Math.round((Number(penaltyAmount) || 0) * 100) / 100);
-  const rate = PENALTY_GATEWAY_FEE_DISABLED ? 0 : pct(gatewayFeePercent);
+  const rate = penaltyCarriesFee(penaltyTotal == null ? base : penaltyTotal) ? pct(gatewayFeePercent) : 0;
   const gatewayFee = Math.round(base * rate / 100);
   return { penaltyAmount: base, gatewayFeeRate: rate, gatewayFee, total: Math.round((base + gatewayFee) * 100) / 100 };
 };
@@ -284,12 +293,13 @@ const computePenaltyCheckoutFees = (items = [], fallbackPercent = 0) => {
   const lines = items.map((it) => {
     const stored = it.gatewayFeeRate;
     const hasRate = stored !== undefined && stored !== null && stored !== "" && Number.isFinite(Number(stored));
-    const f = computePenaltyGatewayFee(it.owed, hasRate ? stored : fallbackPercent);
+    const f = computePenaltyGatewayFee(it.owed, hasRate ? stored : fallbackPercent, it.penaltyTotal);
     return { penaltyID: it.penaltyID, amount: f.penaltyAmount, rate: f.gatewayFeeRate, fee: f.gatewayFee };
   });
   const penaltyAmount = r2(lines.reduce((s, l) => s + l.amount, 0));
   const gatewayFee = r2(lines.reduce((s, l) => s + l.fee, 0));
-  const rates = [...new Set(lines.map((l) => l.rate))];
+  // Only lines that really carry a fee have a rate; a penalty under the threshold is charged 0 and does not count here.
+  const rates = [...new Set(lines.filter((l) => l.rate > 0).map((l) => l.rate))];
   return {
     lines, penaltyAmount, gatewayFee, total: r2(penaltyAmount + gatewayFee),
     gatewayFeeRate: rates.length === 1 ? rates[0] : rates.length === 0 ? 0 : null,
@@ -414,6 +424,8 @@ module.exports = {
   computeFeeBreakdown,
   computePenaltyGatewayFee,
   computePenaltyCheckoutFees,
+  PENALTY_FEE_MIN_AMOUNT,
+  penaltyCarriesFee,
   computePaymentSplit,
   derivePaymentStatus,
   getSystemSettings,

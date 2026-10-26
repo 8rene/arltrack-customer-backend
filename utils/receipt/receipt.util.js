@@ -151,11 +151,14 @@ const byTime = (a, b) => whenOf(a).localeCompare(whenOf(b)) || String(a.id).loca
 // The online payment (gateway) fee the customer paid on top of ONE online penalty payment row. It is not stored on the
 // row (a row's amount is penalty money only); it is the fee on that amount at the penalty's saved gatewayFeeRate, or the
 // current System Settings % for a penalty from before the rate was saved -- the same figure the checkout charged.
+// A penalty carries a fee only when its own amount is higher than PENALTY_FEE_MIN_AMOUNT (pricing.js), and a penalty that
+// has no online fee recorded (gatewayFeePaid is 0: it was paid while the fee was off) shows none.
 const penaltyFeeOf = (row, penaltyDoc, settings) => {
   if (!row || row.direction !== "in" || row.phase !== "penalty" || row.source !== "online" || row.status !== "success") return 0;
+  if (penaltyDoc && !(Number(penaltyDoc.gatewayFeePaid) > 0)) return 0;
   const saved = penaltyDoc ? penaltyDoc.gatewayFeeRate : undefined;
   const rate = saved !== undefined && saved !== null && saved !== "" ? saved : settings?.gatewayFeePercent;
-  return computePenaltyGatewayFee(row.amount, rate).gatewayFee;
+  return computePenaltyGatewayFee(row.amount, rate, penaltyDoc ? penaltyDoc.amount : null).gatewayFee;
 };
 
 const labelOf = (e) => {
