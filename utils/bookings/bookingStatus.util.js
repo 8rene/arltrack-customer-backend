@@ -67,6 +67,27 @@ const hasSchedulePassed = (startDateTime) => {
   return start.getTime() <= Date.now();
 };
 
+// ── Minimum notice before pickup ("preparation time") ──────────────────────
+// A car needs time to be prepared, so a pickup that is too soon can't be booked: the earliest pickup is
+// "now + leadHours" (e.g. at 1:00 AM with 12 hours, the earliest is 1:00 PM today; at 1:00 PM it is 1:00 AM tomorrow).
+//   startDate "YYYY-MM-DD" + startTime "HH:MM" are Manila wall-clock (the same way createBooking reads them).
+//   leadHours = the setting (see pricing.js); 0 = no minimum.
+// The earliest pickup is shown rounded UP to the next quarter hour, because that is what the booking page's
+// clock offers. A small grace is allowed so a customer who picked the earliest slot and then spent a few
+// minutes filling in the form (or whose phone clock runs a little slow) isn't refused over minutes.
+const PICKUP_LEAD_GRACE_MS = 10 * 60 * 1000;
+const checkPickupLeadTime = ({ startDate, startTime, leadHours, now = new Date() }) => {
+  const valid = /^\d{4}-\d{2}-\d{2}$/.test(startDate || "") && /^\d{2}:\d{2}$/.test(startTime || "");
+  const pickupAt = valid ? new Date(`${startDate}T${startTime}:00+08:00`) : null;
+  if (!pickupAt || isNaN(pickupAt.getTime())) return { ok: false, reason: "invalid" };
+  if (!(leadHours > 0)) return { ok: true, pickupAt };
+
+  const exact    = now.getTime() + leadHours * 3600000;
+  const earliest = new Date(Math.ceil(exact / 900000) * 900000);
+  if (pickupAt.getTime() < exact - PICKUP_LEAD_GRACE_MS) return { ok: false, reason: "too_soon", earliest };
+  return { ok: true, pickupAt, earliest };
+};
+
 // Has this "to pay" booking been sitting unpaid past the 12h window?
 const isPastToPayWindow = (createdAt) => {
   const created = toDate(createdAt);
@@ -338,6 +359,7 @@ module.exports = {
   BOOKING_STATUS,
   TO_PAY_WINDOW_MS,
   hasSchedulePassed,
+  checkPickupLeadTime,
   isPastToPayWindow,
   isDepositPaid,
   isFullyPaid,

@@ -39,6 +39,10 @@ const SETTINGS_DEFAULTS = {
   baseAreaKeywords: ["manila", "bulacan"],
   // Minimum gap between two chauffeur trips (see utils/drivers/driverCapacity.util.js). Admin-editable.
   driverBufferMinutes: 120,
+  // Minimum notice before a pickup, in hours. A car needs time to be prepared (cleaning, fuel, paperwork,
+  // a driver), so a pickup sooner than this can't be booked: the calendar greys it out and createBooking
+  // refuses it. Admin-editable like the rest of this list (systemSettings.bookingLeadHours); 0 turns it off.
+  bookingLeadHours: 12,
 };
 
 // Short in-memory cache so a burst of live quote requests while the
@@ -167,6 +171,13 @@ const computeAreaFlags = ({ destination, destinationCity, destinationProvince, d
   return { pickupOutside, destinationOutside, outsideArea, outsideDestinationIds };
 };
 
+// The notice a customer must give before pickup — falls back to the default if the setting is missing or not a number.
+const leadHoursFrom = (settings) => {
+  const n = Number(settings.bookingLeadHours);
+  return Number.isFinite(n) && n >= 0 ? n : SETTINGS_DEFAULTS.bookingLeadHours;
+};
+const getBookingLeadHours = async () => leadHoursFrom(await getSystemSettings());
+
 // What the booking page needs to explain the base area up front: the keywords to
 // shade on the map, which location(s) count, and the three amounts that depend on it.
 const getBaseAreaConfig = async () => {
@@ -177,6 +188,7 @@ const getBaseAreaConfig = async () => {
     extraFeeOutsideArea:   Number(settings.extraFeeOutsideArea)   || 0,
     driversFeeBaseArea:    Number(settings.driversFeeBaseArea)    || 0,
     driversFeeOutsideArea: Number(settings.driversFeeOutsideArea) || 0,
+    bookingLeadHours:      leadHoursFrom(settings),
   };
 };
 
@@ -395,6 +407,7 @@ module.exports = {
   isOutsideByPin,
   computeAreaFlags,
   getBaseAreaConfig,
+  getBookingLeadHours,
   BASE_AREA_BASIS,
   calcBillableDays,
   computeBookingFees,
