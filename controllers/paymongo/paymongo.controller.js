@@ -10,6 +10,7 @@ const { computeRefundQuote, getRefundSchedule, resolvePickupAt, getPaymentBreakd
 const { chargeFromPaymentResource, pickPaidPayment } = require("../../utils/payments/paymongoFee.util");
 const { syncPaymentEntries, syncRefundEntries, hydratePaymentData, hydrateRefundRequests } = require("../../utils/payments/paymentEntries.util");
 const { createPendingRefundRow, attachRefundRowInfo } = require("../../utils/bookings/cancellationRequests.util");
+const { approveGraceWindowRefund } = require("../../utils/payments/autoApproveRefund.util");
 const { QRPH_BOOKING_NOTICE, qrphRefundNotice } = require("../../utils/payments/refundNotice.util");
 const { sessionIDForPayment, phaseForSession, findPaymentSnapBySessionID } = require("../../utils/payments/paymentSession.util");
 const { checkPayTimeConflict } = require("../../utils/bookings/payTimeConflict.util");
@@ -1046,7 +1047,7 @@ const loadRefundContext = async (userID, paymentID) => {
     return { error: { status: 400, message: msg } };
   }
 
-  return { payment, booking };
+  return { payment, booking, paymentRef: paymentSnap.docs[0].ref };
 };
 
 // What a refund requested at `requestedAt` is worth under the 48-hour policy
@@ -1129,40 +1130,19 @@ const previewRefund = async (req, res) => {
   }
 };
 
-// Asks the admin backend to approve a grace-window request now. The admin backend owns PayMongo, the approval lock and the
-// booking cancellation, so this backend never creates a PayMongo refund itself. Needs two env vars (same value on both
-// backends for the secret): ADMIN_API_URL (e.g. https://admin-api.example.com) and INTERNAL_API_SECRET.
+// Approves a grace-window request right here, with no staff review and no call to the admin backend. This backend never
+// creates a PayMongo refund itself: for a payment made today the money is only RECORDED (pending) with a `sendAfter`, and the
+// admin backend's cron sends it after midnight. The booking is cancelled now. See utils/payments/autoApproveRefund.util.js.
 // Never throws: on any failure the request stays Pending and staff are told (with the reason) in the notification sent by
-// requestRefund, so they approve it by hand on the Refunds page. Returns { ok, error }.
-const triggerAutoApprove = async (refundRequestID) => {
-  const base = process.env.ADMIN_API_URL;
-  const secret = process.env.INTERNAL_API_SECRET;
-  let error = null;
-  if (!base || !secret) {
-    error = `Not sent: ${!base ? "ADMIN_API_URL" : "INTERNAL_API_SECRET"} is not set on the customer backend.`;
-    console.error("[REFUND] auto-approve not triggered: ADMIN_API_URL / INTERNAL_API_SECRET not set. The admin cron will pick it up.");
-  } else {
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 8000);
-      const r = await fetch(`${base.replace(/\/$/, "")}/api/internal/refund-requests/${encodeURIComponent(refundRequestID)}/auto-approve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-internal-secret": secret },
-        signal: ctrl.signal,
-      });
-      clearTimeout(timer);
-      if (r.ok) return { ok: true, error: null };
-      const body = await r.text().catch(() => "");
-      let detail = body;
-      try { detail = JSON.parse(body).message || body; } catch { /* not JSON */ }
-      error = `Admin backend answered ${r.status}${detail ? `: ${String(detail).slice(0, 200)}` : ""}${r.status === 401 ? " (the two INTERNAL_API_SECRET values differ)" : r.status === 503 ? " (INTERNAL_API_SECRET is not set on the admin backend)" : r.status === 404 ? " (check ADMIN_API_URL)" : ""}`;
-      console.error("[REFUND] auto-approve call failed:", r.status, body);
-    } catch (e) {
-      error = `Could not reach the admin backend: ${e.name === "AbortError" ? "no answer within 8 seconds" : e.message}`;
-      console.error("[REFUND] auto-approve call error:", e.message);
-    }
+// requestRefund, so they approve it by hand on the Refunds page. Returns { ok, error, result }.
+const autoApproveGraceRefund = async (args) => {
+  try {
+    const result = await approveGraceWindowRefund(args);
+    return { ok: true, error: null, result };
+  } catch (e) {
+    console.error("[REFUND] auto-approve failed:", e.message);
+    return { ok: false, error: e.message || "unknown error", result: null };
   }
-  return { ok: false, error };
 };
 
 const requestRefund = async (req, res) => {
@@ -1179,7 +1159,7 @@ const requestRefund = async (req, res) => {
   try {
     const ctx = await loadRefundContext(userID, paymentID);
     if (ctx.error) return res.status(ctx.error.status).json({ message: ctx.error.message });
-    const { payment, booking } = ctx;
+    const { payment, booking, paymentRef } = ctx;
 
     if (await findOpenRefundRequest(paymentID)) {
       return res.status(409).json({ message: "A refund request for this payment is already in progress." });
@@ -1192,8 +1172,7 @@ const requestRefund = async (req, res) => {
     if (plan.total <= 0) {
       return res.status(400).json({ message: nothingToRefundMessage(policy, plan) });
     }
-    const schedule = getRefundSchedule(payment, plan, now);
-    const autoApprove = !!policy.inGraceWindow;   // asked within the grace window: the admin backend approves it by itself
+    const autoApprove = !!policy.inGraceWindow;   // asked within the grace window: this backend approves it by itself, below
     const refundRef = db.collection("refundRequests").doc();
     // Who asked and why (userID / reason / notes) live on the pending cancellation row, not on the refund doc.
     // parts[] / manualRefund / unrefundable[] are written as "out" rows in paymentEntries on staff approval, and
@@ -1227,10 +1206,13 @@ const requestRefund = async (req, res) => {
       return res.status(409).json({ message: "A refund request for this payment is already in progress." });
     }
 
-    // Inside the grace window: ask the admin backend to approve it now (it cancels the booking and, for a payment made
-    // today, schedules the money for the next day). If the call fails the request stays Pending and staff are notified below.
-    const auto = autoApprove ? await triggerAutoApprove(refundRef.id) : null;
+    // Inside the grace window: approve it now (the booking is cancelled and, for a payment made today, the money is scheduled
+    // for the next day). If that fails the request stays Pending and staff are notified below.
+    const auto = autoApprove
+      ? await autoApproveGraceRefund({ refundRequestID: refundRef.id, refundRequest, payment, paymentRef, plan, policy, userID })
+      : null;
     const approvedNow = !!(auto && auto.ok);
+    const sendAfter = approvedNow ? auto.result.sendAfter : null;   // set when the online part waits for tomorrow's send
 
     const feeNote = plan.gatewayFeeKept > 0 ? `; ${peso(plan.gatewayFeeKept)} gateway fee kept` : "";
     const tierNote = policy.graceApplied
@@ -1263,8 +1245,8 @@ const requestRefund = async (req, res) => {
           : `A refund request for ${peso(plan.total)} is awaiting review${tierNote}.`,
     });
 
-    const sendAfterNote = schedule.deferred
-      ? ` Because the payment was made today, the refund will be sent on ${schedule.sendAfter.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric" })}.`
+    const sendAfterNote = sendAfter
+      ? ` The online part of the refund will be sent on ${sendAfter.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", month: "long", day: "numeric", year: "numeric" })}.`
       : "";
     return res.status(201).json({
       message: autoApprove && !approvedNow
@@ -1278,7 +1260,7 @@ const requestRefund = async (req, res) => {
           : "Refund request sent. We'll notify you once it's reviewed.",
       autoApprove,
       approvedNow,                 // true = the admin backend confirmed the approval; false on a grace-window request = it is still waiting
-      sendAfter: schedule.sendAfter,
+      sendAfter,                   // when the online money is sent (the next day for a payment made today); null when nothing is scheduled
       ...(plan.qrphAmount > 0 ? { notice: qrphRefundNotice(plan.qrphAmount), inStoreOnly: true, qrphAmount: plan.qrphAmount } : {}),
       ...(plan.unrefundableAmount > 0 ? { warning: `${peso(plan.unrefundableAmount)} of this payment has no payment reference on record and can't be refunded automatically — our staff will review it.` } : {}),
       // The stored doc is slimmer now; the response still carries what the customer app showed before.
