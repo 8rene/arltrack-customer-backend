@@ -1105,6 +1105,7 @@ const previewRefund = async (req, res) => {
       grossPaid: plan.grossPaid,                   // everything paid
       depositAmount: policy.depositAmount,
       depositForfeited: policy.forfeit,            // kept (0 for a full refund)
+      gatewayFeeKept: plan.gatewayFeeKept,         // online payment fee kept when the deposit goes back (0 when the deposit is kept)
       refundAmount: plan.total,                    // what the customer gets back
       onlineAmount: plan.total - plan.manualAmount,
       manualAmount: plan.manualAmount,
@@ -1162,6 +1163,7 @@ const requestRefund = async (req, res) => {
       returnDeposit: !(policy.forfeit > 0),      // the 48-hour verdict, locked at the moment of the request: false = the deposit is kept
       depositGraceApplied: !!policy.graceApplied, // true = under 48h, but asked within the grace window so the deposit goes back
       depositForfeited: policy.forfeit,          // kept from the refund (0 when the deposit goes back)
+      gatewayFeeKept: plan.gatewayFeeKept,       // online payment (gateway) fee kept: only when the deposit goes back. Locked here so approving later never changes it
       status: "Pending",
       createdAt: now,                            // the moment the customer asked (server time) -- the 48-hour window is measured from it
       updatedAt: now,
@@ -1181,11 +1183,12 @@ const requestRefund = async (req, res) => {
       return res.status(409).json({ message: "A refund request for this payment is already in progress." });
     }
 
+    const feeNote = plan.gatewayFeeKept > 0 ? `; ${peso(plan.gatewayFeeKept)} gateway fee kept` : "";
     const tierNote = policy.graceApplied
-      ? ` (under ${policy.windowHours}h before pickup, but asked within ${policy.graceHours}h of booking; deposit returned)`
+      ? ` (under ${policy.windowHours}h before pickup, but asked within ${policy.graceHours}h of booking; deposit returned${feeNote})`
       : policy.forfeit > 0
       ? ` (${policy.tier === "no_show" ? "after pickup time" : `under ${policy.windowHours}h before pickup`}; ${peso(policy.forfeit)} deposit withheld)`
-      : "";
+      : plan.gatewayFeeKept > 0 ? ` (${peso(plan.gatewayFeeKept)} gateway fee kept)` : "";
 
     recordAudit({
       action: "create",
@@ -1210,7 +1213,9 @@ const requestRefund = async (req, res) => {
     return res.status(201).json({
       message: policy.forfeit > 0
         ? `Refund request sent. Because it was made ${policy.tier === "no_show" ? "after your pickup time" : `less than ${policy.windowHours} hours before pickup`}, your ${peso(policy.forfeit)} deposit is non-refundable. ${peso(plan.total)} will be returned once it's reviewed.`
-        : "Refund request sent. We'll notify you once it's reviewed.",
+        : plan.gatewayFeeKept > 0
+          ? `Refund request sent. The ${peso(plan.gatewayFeeKept)} online payment (gateway) fee is non-refundable. ${peso(plan.total)} will be returned once it's reviewed.`
+          : "Refund request sent. We'll notify you once it's reviewed.",
       ...(plan.qrphAmount > 0 ? { notice: qrphRefundNotice(plan.qrphAmount), inStoreOnly: true, qrphAmount: plan.qrphAmount } : {}),
       ...(plan.unrefundableAmount > 0 ? { warning: `${peso(plan.unrefundableAmount)} of this payment has no payment reference on record and can't be refunded automatically — our staff will review it.` } : {}),
       // The stored doc is slimmer now; the response still carries what the customer app showed before.

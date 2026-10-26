@@ -211,6 +211,25 @@ const refundableOnlyByHand = (payment, phase) => NO_API_REFUND_CHANNELS.includes
 const heldCreditOf = (p) =>
   p && p.discountApplied !== undefined && p.discountApplied !== null ? Math.max(0, num(p.discountCredit)) : 0;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Gateway fee on a refund.
+//
+// The online payment (gateway) fee is charged on top of the booking (payment.gatewayFee). Policy:
+//   deposit goes BACK to the customer (asked 48h+ before pickup, or inside the 2-hour grace) -> the gateway fee is KEPT
+//   deposit is KEPT (late / no-show)                                                         -> the gateway fee is REFUNDED
+//   staff-initiated refunds / cancellations, and a waived forfeit                            -> the gateway fee is REFUNDED
+// Only the part of the fee the customer has actually paid is ever kept: a Partial booking that has only paid its first
+// half has paid only that share of the fee (fee x amountPaid / amount). round2 keeps it to centavos.
+// ─────────────────────────────────────────────────────────────────────────────
+const getGatewayFeeShare = (payment) => {
+  const p = payment || {};
+  const fee = num(p.gatewayFee), amount = num(p.amount);
+  if (!(fee > 0) || !(amount > 0)) return 0;
+  const paid = getPaymentBreakdown(p).amountPaid;
+  if (!(paid > 0)) return 0;
+  return Math.round(fee * Math.min(1, paid / amount) * 100) / 100;
+};
+
 const computeRefundPlan = (payment, opts = {}) => {
   const b   = getPaymentBreakdown(payment);
   const ids = resolvePaymongoIDs(payment);
@@ -220,8 +239,12 @@ const computeRefundPlan = (payment, opts = {}) => {
   const paid       = b.amountPaid + heldCredit;   // everything the customer paid for this booking, before the forfeit
 
   const forfeit = Math.min(Math.max(0, num(opts.forfeit)), paid);
+  // opts.gatewayFeeKept -- pesos of the gateway fee that are NOT refunded (see getGatewayFeeShare). It comes out of the
+  // first payment together with the forfeit, and can never take more than is left after it.
+  const gatewayFeeKept = Math.min(Math.max(0, num(opts.gatewayFeeKept)), Math.max(0, paid - forfeit));
+  const withheld = forfeit + gatewayFeeKept;
 
-  let remaining = paid - forfeit;
+  let remaining = paid - withheld;
   const parts = [];
   const unrefundable = [];
   let manualAmount = 0;
@@ -240,7 +263,7 @@ const computeRefundPlan = (payment, opts = {}) => {
   };
 
   // 1. the first payment (the deposit, or the whole amount for a Full payment)
-  const depositCap = Math.max(0, b.depositCollected - forfeit);
+  const depositCap = Math.max(0, b.depositCollected - withheld);
   if (depositCap > 0 && remaining > 0) {
     const amt = allot(depositCap);
     if (amt > 0) {
@@ -267,8 +290,8 @@ const computeRefundPlan = (payment, opts = {}) => {
   const unrefundableAmount = unrefundable.reduce((s, u) => s + u.amount, 0);
   // total = what can actually be returned (parts + manual). The unrefundable amount is NOT promised to the customer.
   return {
-    total: paid - forfeit - unrefundableAmount,
-    grossPaid: paid, heldCredit, forfeit, parts, manualAmount, qrphAmount,
+    total: paid - withheld - unrefundableAmount,
+    grossPaid: paid, heldCredit, forfeit, gatewayFeeKept, parts, manualAmount, qrphAmount,
     channels: { deposit: channelOfPhase(payment, "deposit") || null, balance: channelOfPhase(payment, "balance") || null },
     unrefundable, unrefundableAmount, breakdown: b,
   };
@@ -348,7 +371,7 @@ const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false,
   // Can't judge the timing without both timestamps → fail OPEN (full refund)
   // and say so, so staff can see why and decide.
   if (!pickup || !requested) {
-    return { tier: "full", hoursBeforePickup: null, depositAmount, forfeit: 0, waived: false, unknownTiming: true, windowHours: REFUND_FULL_WINDOW_HOURS };
+    return { tier: "full", hoursBeforePickup: null, depositAmount, forfeit: 0, gatewayFeeKept: 0, waived: false, unknownTiming: true, windowHours: REFUND_FULL_WINDOW_HOURS };
   }
 
   const hoursBeforePickup = (pickup.getTime() - requested.getTime()) / HOUR_MS;
@@ -365,8 +388,13 @@ const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false,
   const wouldForfeit = (tier === "full" || graceApplied) ? 0 : Math.min(depositAmount, amountPaid);
   const forfeit = waiveForfeit ? 0 : wouldForfeit;
 
+  // The deposit goes back (full tier, or the 2-hour grace) -> the gateway fee is kept. A staff waiver keeps neither.
+  const depositReturned = (tier === "full" || graceApplied) && !waiveForfeit;
+  const gatewayFeeKept = depositReturned ? getGatewayFeeShare(payment) : 0;
+
   return {
     graceApplied,
+    gatewayFeeKept,
     graceHours: REFUND_GRACE_HOURS,
     tier,
     hoursBeforePickup: Math.round(hoursBeforePickup * 100) / 100,
@@ -384,7 +412,7 @@ const getRefundPolicy = (payment, { pickupAt, requestedAt, waiveForfeit = false,
 // returnDeposit: true = the deposit goes back (asked 48h or more before pickup), false = it is kept (asked later, or
 // after the pickup). A missing value is not judged here (callers treat it as a full refund). The late / no-show
 // split is not kept: both are "late" here.
-const getRefundPolicyFromFlag = (payment, { returnDeposit, waiveForfeit = false } = {}) => {
+const getRefundPolicyFromFlag = (payment, { returnDeposit, waiveForfeit = false, gatewayFeeKept = 0 } = {}) => {
   const depositAmount = getDepositAmount(payment);
   const amountPaid    = getPaymentBreakdown(payment).amountPaid;
   const keep = returnDeposit === false;
@@ -393,6 +421,9 @@ const getRefundPolicyFromFlag = (payment, { returnDeposit, waiveForfeit = false 
     tier: keep ? "late" : "full",
     hoursBeforePickup: null,
     depositAmount,
+    // The request stores the gateway fee that was kept when it was made (0 on requests made before this rule existed),
+    // so approving later never changes the amount the customer was shown.
+    gatewayFeeKept: keep || waiveForfeit ? 0 : Math.max(0, num(gatewayFeeKept)),
     forfeit: waiveForfeit ? 0 : wouldForfeit,
     waived: !!waiveForfeit && wouldForfeit > 0,
     waivedAmount: waiveForfeit ? wouldForfeit : 0,
@@ -405,8 +436,8 @@ const getRefundPolicyFromFlag = (payment, { returnDeposit, waiveForfeit = false 
 // Policy + plan in one call: what a refund requested at `requestedAt` is worth.
 const computeRefundQuote = (payment, { pickupAt, requestedAt, waiveForfeit = false, bookedAt = null } = {}) => {
   const policy = getRefundPolicy(payment, { pickupAt, requestedAt, waiveForfeit, bookedAt });
-  const plan   = computeRefundPlan(payment, { forfeit: policy.forfeit });
+  const plan   = computeRefundPlan(payment, { forfeit: policy.forfeit, gatewayFeeKept: policy.gatewayFeeKept });
   return { policy, plan };
 };
 
-module.exports = { PAYMENT_ID_MISSING_NOTE, depositWasOnline, getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getRefundPolicy, getRefundPolicyFromFlag, computeRefundQuote, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS, REFUND_GRACE_HOURS };
+module.exports = { PAYMENT_ID_MISSING_NOTE, depositWasOnline, getPaymentBreakdown, resolvePaymongoIDs, computeRefundPlan, getGatewayFeeShare, getRefundPolicy, getRefundPolicyFromFlag, computeRefundQuote, getDepositAmount, resolvePickupAt, payTypeOf, REFUND_FULL_WINDOW_HOURS, REFUND_GRACE_HOURS };

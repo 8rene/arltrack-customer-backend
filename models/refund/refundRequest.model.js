@@ -45,6 +45,7 @@ const RefundRequest = {
   returnDeposit: true, // the 48-hour rule's verdict when the request was made: true = the deposit goes back, false = it
                        // is kept. Replaces policyTier / pickupAt / hoursBeforePickup. A missing value = a full refund.
   depositForfeited: 0,
+  gatewayFeeKept: 0,   // online payment (gateway) fee kept on this refund: only when the deposit goes back (0 = fully refunded)
   forfeitWaived: false,
   // parts[] (one PayMongo refund per online charge), manualRefund (the in-person hand-back) and unrefundable[]
   // (online money with no PayMongo payment id -- never refunded, never handed back) are NOT stored here any more:
