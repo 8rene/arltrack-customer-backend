@@ -2,7 +2,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { checkTermsAcceptance, termsRequired } = require("../../utils/terms/terms.service");
 const { makeZone } = createBookingSession;
-const { computeBookingFees, computePaymentSplit, derivePaymentStatus, getBaseAreaConfig } = require("../../utils/pricing");
+const { computeBookingFees, computePaymentSplit, derivePaymentStatus, getBaseAreaConfig, getBookingLeadHours } = require("../../utils/pricing");
 const {
   toManila, manilaDayRange, cityMatchesRule, parseCodingTime, parseBannedDigits, fmtCodingMins, ruleDay,
   buildCodingLocations, evaluateCodingRange, codingBlockMessage, codingWarningMessage,
@@ -10,7 +10,7 @@ const {
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { plateForBooking } = require("../../utils/bookings/plateVisibility.util");
 const { getEnRouteMap, bookingKeyOf } = require("../../utils/bookings/enRoute.util");
-const { BOOKING_STATUS, enforceToPayValidity } = require("../../utils/bookings/bookingStatus.util");
+const { BOOKING_STATUS, enforceToPayValidity, checkPickupLeadTime } = require("../../utils/bookings/bookingStatus.util");
 const { notifyStaff } = require("../../services/notification/notification.service");
 const { syncPaymentEntries, hydratePayments, getEntriesForPaymentIDs } = require("../../utils/payments/paymentEntries.util");
 const { buildCustomerDiscount } = require("../../utils/payments/discountView.util");
@@ -456,6 +456,29 @@ const createBooking = async (req, res) => {
     if (!isValidDay(endDate) || endDate < todayManila) {
       return res.status(400).json({ message: "endDate cannot be in the past." });
     }
+  }
+
+  // ── Minimum notice before pickup ("preparation time") ───────────
+  // A car needs time to be prepared, so a pickup that is too soon is refused — however the request got
+  // here. The calendar and clock on the booking page grey these out too, but this is the real rule.
+  if (!startDate || !startTime) {
+    return res.status(400).json({ message: "Pickup date and time are required." });
+  }
+  const leadHours = await getBookingLeadHours();
+  const lead = checkPickupLeadTime({ startDate, startTime, leadHours });
+  if (!lead.ok && lead.reason === "invalid") {
+    return res.status(400).json({ message: "Please choose a valid pickup date and time." });
+  }
+  if (!lead.ok) {
+    const earliestText = lead.earliest.toLocaleString("en-US", {
+      timeZone: "Asia/Manila", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+    });
+    return res.status(400).json({
+      code: "LEAD_TIME",
+      message: `No car is available for pickup in the next ${leadHours} hour${leadHours === 1 ? "" : "s"} — we need that time to prepare it. The earliest pickup right now is ${earliestText} (Philippine time).`,
+      leadHours,
+      earliestPickup: lead.earliest.toISOString(),
+    });
   }
 
   try {
