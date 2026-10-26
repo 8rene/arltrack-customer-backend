@@ -7,7 +7,7 @@
 // changes driverID / assignedAt on the same row, unassigning sets "unassigned", finishing the trip sets "completed".
 //
 // Plain shape only (same convention as models/booking/booking.model.js).
-export const DriverAssignment = {
+const DriverAssignment = {
   assignmentID: "",  // same as the Firestore doc ID
   bookingID:    "",  // FK -> bookings.bookingID (falls back to the booking doc ID for very old bookings)
   driverID:     "",  // FK -> user/{uid}; the driver's first name is read from userDetails/{uid}
@@ -17,3 +17,5 @@ export const DriverAssignment = {
   enRouteAt:    null, // set when the assigned driver taps "On my way"; absent until then, removed on reassign.
                       // Read it ONLY from an "assigned" row (utils/bookings/enRoute.util.js does).
 };
+
+module.exports = { DriverAssignment };

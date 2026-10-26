@@ -14,7 +14,7 @@
 // record — for every type below, refCollection is "bookings" and refID
 // is the booking's own bookingID (== the Firestore doc id bookings are
 // created with in bookings.controller.js's createBooking()).
-export const CustomerNotification = {
+const CustomerNotification = {
   type: "",
   //   "booking_created"    — booking successfully placed
   //   "payment_pending"    — payment still awaiting completion/review
@@ -67,3 +67,5 @@ export const CustomerNotification = {
   createdAt: null,
   resolvedAt: null,
 };
+
+module.exports = { CustomerNotification };
