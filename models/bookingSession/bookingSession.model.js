@@ -66,6 +66,8 @@ const createBookingSession = (bookingSessionID, bookingID, data = {}) => ({
   // admin only READS it. The customer is shown these warnings and continuing the booking
   // counts as accepting them, so no acknowledgement is stored here. Older sessions simply
   // lack it (read as []).
+  // Only rules that fall on the days the booking actually covers are saved (a Wednesday-only booking
+  // saves Wednesday rules only; Wed -> Mon saves Wed..Mon). Holidays are skipped.
   // Entry: { city, plateLastDigit, ruleID, dayOfWeek, startTime, endTime }
   //   ruleID only records WHICH rule matched (codingRules/{ruleID}) — it may no longer
   //   exist; never rely on it. dayOfWeek is 1-7 (Monday = 1).

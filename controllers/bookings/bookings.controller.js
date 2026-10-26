@@ -237,36 +237,40 @@ const findCodingNotices = ({ rules, lastDigit, locations }) => {
 // The Number Coding warnings saved on the booking session (session.codingWarnings): a FLAT
 // array, one entry per matched coding rule, no nested arrays —
 //   { city, plateLastDigit, ruleID, dayOfWeek, startTime, endTime }
-// Same matching as the pre-booking notice (ruleAppliesToLocation: plate digit + city, no date
-// test) over pickup, destination and every extra stop. A rule that matches several stops
-// appears once (deduped by ruleID). It is a snapshot copied from the rule, so it stays
-// readable if the rule is edited or deleted later. Built on the SERVER, never from the
-// browser. Throws on failure (the caller refuses the booking) — it must never
-// silently save an empty warning list.
-const buildCodingWarnings = async ({ carID, destination, destinationCity, codingStops, pickup, pickupCity }) => {
+// Uses the SAME date-aware check as /check-coding and the create-time check
+// (evaluateCodingRange): only the Manila calendar days the booking actually covers are tested
+// (a Wednesday-only booking only saves Wednesday rules; Wed -> Mon saves Wed..Mon), public
+// holidays are skipped, and every location (pickup, destination, extra stops) is tested.
+// A rule that applies on several booked days (e.g. two Wednesdays) is saved once (deduped by
+// ruleID). It is a snapshot copied from the rule, so it stays readable if the rule is edited or
+// deleted later. Built on the SERVER, never from the browser. Throws on failure (the caller
+// refuses the booking) — it must never silently save an empty warning list.
+const buildCodingWarnings = async ({ carID, startDateTime, endDateTime, destination, destinationCity, codingStops, pickup, pickupCity }) => {
   try {
-    const carDoc = await db.collection("cars").doc(carID).get();
-    const plate = carDoc.exists ? (carDoc.data().plateNumber || "").trim().toUpperCase() : "";
-    const lastDigit = parseInt(plate.slice(-1), 10);
-    if (isNaN(lastDigit)) return [];
+    const { notFound, lastDigit } = await getPlateLastDigit(carID);
+    if (notFound || isNaN(lastDigit)) return [];
     const rules = await getCodingRules();
-    const locations = buildCodingLocations({ destination, destinationCity, codingStops, pickup, pickupCity });
+    const holidays = await getHolidayMap(startDateTime, endDateTime);
+    const result = evaluateCodingRange({
+      rules,
+      startDateTime,
+      endDateTime,
+      lastDigit,
+      holidays,
+      locations: buildCodingLocations({ destination, destinationCity, codingStops, pickup, pickupCity }),
+    });
     const byRule = new Map();
-    for (const loc of locations) {
-      for (const rule of rules) {
-        if (!ruleAppliesToLocation(rule, lastDigit, loc)) continue;
-        const ruleID = rule.ruleID || rule.id || null;
-        const key = ruleID || `${rule.city}|${rule.dayOfWeek}|${rule.startTime}|${rule.endTime}`;
-        if (byRule.has(key)) continue;
-        byRule.set(key, {
-          city:           ((rule.city && rule.city.trim()) || loc.destinationCity || "").trim(),
-          plateLastDigit: lastDigit,
-          ruleID,
-          dayOfWeek:      Number(rule.dayOfWeek),
-          startTime:      rule.startTime,
-          endTime:        rule.endTime,
-        });
-      }
+    for (const v of result.violations) {
+      const key = v.ruleID || `${v.city}|${v.dayOfWeek}|${v.startTime}|${v.endTime}`;
+      if (byRule.has(key)) continue;
+      byRule.set(key, {
+        city:           (v.city || "").trim(),
+        plateLastDigit: lastDigit,
+        ruleID:         v.ruleID,
+        dayOfWeek:      v.dayOfWeek,
+        startTime:      v.startTime,
+        endTime:        v.endTime,
+      });
     }
     return [...byRule.values()].sort((x, y) =>
       x.city.localeCompare(y.city) ||
@@ -791,7 +795,7 @@ const createBooking = async (req, res) => {
 
     let codingWarnings;
     try {
-      codingWarnings = await buildCodingWarnings({ carID, destination, destinationCity, codingStops, pickup: pickupLocation, pickupCity });
+      codingWarnings = await buildCodingWarnings({ carID, startDateTime, endDateTime, destination, destinationCity, codingStops, pickup: pickupLocation, pickupCity });
     } catch (e) {
       return res.status(503).json({
         message: "We couldn't verify the Number Coding rules right now. Please try again in a moment.",

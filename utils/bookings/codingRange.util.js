@@ -159,8 +159,8 @@ const manilaDaysBetween = (firstDay, lastDay) => {
  *   A PICKUP location that is coded on the PICKUP date (the Manila day the trip starts) is a hard
  *   block: the car has to be collected there that day. Every other conflict (the destination, extra
  *   stops, later days) stays a warning the customer confirms.
- *   violations: one entry per (day, location, rule) — { id, location, city, date, dayName,
- *   startTime, endTime, bannedDigits, digit }
+ *   violations: one entry per (day, location, rule) — { id, ruleID, location, city, date, dayOfWeek,
+ *   dayName, startTime, endTime, bannedDigits, digit }
  */
 const evaluateCodingRange = ({ rules, startDateTime, endDateTime, lastDigit, locations, holidays = new Map() }) => {
   const start = toManila(startDateTime);
@@ -196,9 +196,11 @@ const evaluateCodingRange = ({ rules, startDateTime, endDateTime, lastDigit, loc
         seen.add(key);
         violations.push({
           id: loc.id,
+          ruleID: rule.ruleID || rule.id || null,
           location: loc.label,
           city: rule.city || "",
           date: day,
+          dayOfWeek: dow,
           dayName: rule.dayName || DAY_NAMES[dow - 1],
           startTime: rule.startTime,
           endTime: rule.endTime,
