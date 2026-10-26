@@ -527,6 +527,7 @@ const buildRefundEntries = (r, docID, opts = {}) => {
       phase, source: "online", method: null,
       amount: num(p.amount), status,
       referenceNumber: nullIfSentinel(p.paymongoRefundID),
+      paymongoPaymentID: nullIfSentinel(p.paymongoPaymentID),   // the PayMongo charge this part refunds (the scheduled send needs it)
       processedBy: nullIfSentinel(r.processedBy), processedAt: orNull(r.processedAt),
       settledAt: status === "success" ? (orNull(p.settledAt) || orNull(r.updatedAt)) : null,
       transactionErrorNote: p.error ? String(p.error) : null,
@@ -573,6 +574,7 @@ const mergeRefundEntry = (existing, built, opts = {}) => {
   const next = { ...built };
   delete next.createdAt;
   delete next.paymentEntryID;
+  if (existing.paymongoPaymentID && !next.paymongoPaymentID) next.paymongoPaymentID = existing.paymongoPaymentID;   // a rebuild must never wipe it
   next.settledAt = existing.settledAt || (built.status === "success" ? (built.settledAt || stamp) : null);
   return next;
 };
@@ -602,7 +604,7 @@ const hydrateRefundRequest = (request, entries, opts = {}) => {
     out.parts = online.map((e) => {
       const hb = e.status === "failed" ? handBacks.get(rowKey(e)) : null;
       return {
-        kind: e.phase === "balance" ? "balance" : "deposit", paymongoPaymentID: null, amount: e.amount,
+        kind: e.phase === "balance" ? "balance" : "deposit", paymongoPaymentID: e.paymongoPaymentID || null, amount: e.amount,
         paymongoRefundID: e.referenceNumber, status: hb || e.status === "success" ? "succeeded" : e.status === "failed" ? "failed" : "pending",
         ...(e.transactionErrorNote ? { error: e.transactionErrorNote } : {}),
         ...(hb ? { handedBack: { method: BALANCE_METHOD_LABEL[hb.method] || null, referenceNumber: hb.referenceNumber || null, issuedBy: hb.processedBy || null, issuedAt: hb.processedAt || null } } : {}),

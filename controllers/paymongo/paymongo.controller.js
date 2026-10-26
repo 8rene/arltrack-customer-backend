@@ -1132,9 +1132,8 @@ const previewRefund = async (req, res) => {
 // Asks the admin backend to approve a grace-window request now. The admin backend owns PayMongo, the approval lock and the
 // booking cancellation, so this backend never creates a PayMongo refund itself. Needs two env vars (same value on both
 // backends for the secret): ADMIN_API_URL (e.g. https://admin-api.example.com) and INTERNAL_API_SECRET.
-// Never throws: on any failure the request stays Pending + autoApprove and the admin cron approves it on its next run.
-// Returns { ok, error }. When it did not work, WHY is saved on the request (autoApproveError) so staff can see it on the
-// Refunds page without reading server logs.
+// Never throws: on any failure the request stays Pending and staff are told (with the reason) in the notification sent by
+// requestRefund, so they approve it by hand on the Refunds page. Returns { ok, error }.
 const triggerAutoApprove = async (refundRequestID) => {
   const base = process.env.ADMIN_API_URL;
   const secret = process.env.INTERNAL_API_SECRET;
@@ -1162,11 +1161,6 @@ const triggerAutoApprove = async (refundRequestID) => {
       error = `Could not reach the admin backend: ${e.name === "AbortError" ? "no answer within 8 seconds" : e.message}`;
       console.error("[REFUND] auto-approve call error:", e.message);
     }
-  }
-  try {
-    await db.collection("refundRequests").doc(refundRequestID).update({ autoApproveError: error, autoApproveFailedAt: new Date() });
-  } catch (e) {
-    console.error("[REFUND] could not save the auto-approve error:", e.message);
   }
   return { ok: false, error };
 };
@@ -1212,7 +1206,6 @@ const requestRefund = async (req, res) => {
       bookingPaid: plan.grossPaid,               // everything the customer had paid
       returnDeposit: !(policy.forfeit > 0),      // the 48-hour verdict, locked at the moment of the request: false = the deposit is kept
       depositGraceApplied: !!policy.graceApplied, // true = under 48h, but asked within the grace window so the deposit goes back
-      autoApprove,                               // true = inside the grace window: the admin backend approves it without staff review (see triggerAutoApprove below)
       depositForfeited: policy.forfeit,          // kept from the refund (0 when the deposit goes back)
       gatewayFeeKept: plan.gatewayFeeKept,       // online payment (gateway) fee kept: only when the deposit goes back. Locked here so approving later never changes it
       status: "Pending",
@@ -1235,7 +1228,7 @@ const requestRefund = async (req, res) => {
     }
 
     // Inside the grace window: ask the admin backend to approve it now (it cancels the booking and, for a payment made
-    // today, schedules the money for the next day). If the call fails, the admin cron picks the request up on its next run.
+    // today, schedules the money for the next day). If the call fails the request stays Pending and staff are notified below.
     const auto = autoApprove ? await triggerAutoApprove(refundRef.id) : null;
     const approvedNow = !!(auto && auto.ok);
 
@@ -1275,7 +1268,7 @@ const requestRefund = async (req, res) => {
       : "";
     return res.status(201).json({
       message: autoApprove && !approvedNow
-        ? `Your refund request was received. Because you asked within ${policy.graceHours} hours of booking it will be approved without review, but that hasn't finished yet. ${peso(plan.total)} will be returned to you${plan.gatewayFeeKept > 0 ? `; the ${peso(plan.gatewayFeeKept)} online payment (gateway) fee is non-refundable` : ""}.${sendAfterNote} We'll notify you as soon as it is approved.`
+        ? `Your refund request was received. Because you asked within ${policy.graceHours} hours of booking it qualifies for approval without review, but that hasn't finished yet. ${peso(plan.total)} will be returned to you${plan.gatewayFeeKept > 0 ? `; the ${peso(plan.gatewayFeeKept)} online payment (gateway) fee is non-refundable` : ""}.${sendAfterNote} Our team has been notified and will approve it shortly. We'll notify you as soon as it is approved.`
       : autoApprove
         ? `Refund approved automatically because you asked within ${policy.graceHours} hours of booking. ${peso(plan.total)} will be returned to you${plan.gatewayFeeKept > 0 ? `; the ${peso(plan.gatewayFeeKept)} online payment (gateway) fee is non-refundable` : ""}.${sendAfterNote}`
       : policy.forfeit > 0

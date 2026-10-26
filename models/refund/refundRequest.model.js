@@ -47,6 +47,17 @@ const RefundRequest = {
   depositForfeited: 0,
   gatewayFeeKept: 0,   // online payment (gateway) fee kept on this refund: only when the deposit goes back (0 = fully refunded)
   forfeitWaived: false,
+  // ── Written by the customer backend when it creates the request (requestRefund) ──
+  // A request made inside the 2-hour grace window is NOT flagged: the customer backend just calls
+  // POST /api/internal/refund-requests/:id/auto-approve right after creating it, and the admin backend approves it without staff
+  // review. If that call fails the request stays Pending, the customer backend notifies staff, and they approve it by hand.
+  depositGraceApplied: false, // true = under 48h before pickup, but asked inside the grace window, so the deposit goes back
+  // ── Same-day rule (PayMongo can't PARTIALLY refund a payment on the day it was made) ──
+  // Written when a request is approved and part of it is smaller than the charge it refunds AND that charge was paid today (Manila).
+  // Nothing is sent to PayMongo at approval; runScheduledRefunds() (admin cron, 16:10 UTC = 00:10 Manila) sends it after sendAfter.
+  // What to send (each part's PayMongo payment id + amount) is on the request's online "out" rows in paymentEntries, not here.
+  sendAfter: null,           // the next Manila midnight; absent when the refund went out immediately, and removed again once it has been sent
+  refundAttempts: 0,         // automatic send attempts so far; at 5 the cron stops and staff use "Retry now" (which resets it). Removed once sent.
   // parts[] (one PayMongo refund per online charge), manualRefund (the in-person hand-back) and unrefundable[]
   // (online money with no PayMongo payment id -- never refunded, never handed back) are NOT stored here any more:
   // they are the "out" rows in paymentEntries (refundReqID = this request, ids <id>_part<n> | _manual | _unrefundable<n>).
