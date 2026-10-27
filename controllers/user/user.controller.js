@@ -263,6 +263,23 @@ const getFullProfile = async (req, res) => {
           fee: plan ? plan.gatewayFee : 0,                      // the online payment fee on that
           total: plan ? plan.total : amount,                    // what the checkout charges
           pending: !!openCheckouts[bookingID],
+          // What each unpaid penalty was for, so the customer can see what they were charged for (oldest first).
+          penalties: (unpaidDocsByBooking[bookingID] || [])
+            .map((pen) => {
+              const created = pen.createdAt?.toDate ? pen.createdAt.toDate() : pen.createdAt?._seconds ? new Date(pen.createdAt._seconds * 1000) : null;
+              const amt = Number(pen.amount) || 0;
+              const items = Array.isArray(pen.lineItems)
+                ? pen.lineItems.filter((i) => i && (i.description || Number(i.amount))).map((i) => ({ description: i.description || "Charge", amount: Number(i.amount) || 0 }))
+                : [];
+              return {
+                penaltyID: pen.penaltyID || pen.id,
+                amount: amt,
+                owed: Math.max(0, amt - (Number(pen.paidAmount) || 0)),
+                createdAt: created && !Number.isNaN(created.getTime()) ? created.toISOString() : null,
+                items: items.length ? items : [{ description: "Penalty charge", amount: amt }],
+              };
+            })
+            .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || ""))),
         };
       });
 
@@ -285,7 +302,7 @@ const getFullProfile = async (req, res) => {
       // Queried live from `penalties` above — see MyBookings.jsx's
       // outstanding-balance banner, which reads this same response field.
       outstandingPenaltyBalance,
-      outstandingPenaltyBookings, // [{ bookingID, amount, coveredByDeposit, onlineDue, fee, total, pending }] — one entry per booking with unpaid penalties
+      outstandingPenaltyBookings, // [{ bookingID, amount, coveredByDeposit, onlineDue, fee, total, pending, penalties: [{ penaltyID, amount, owed, createdAt, items: [{ description, amount }] }] }] — one entry per booking with unpaid penalties
       // referral — this user's own shareable code and how many people
       // they've referred so far. Was already on the "user" doc since
       // signup started writing it, just never surfaced through this

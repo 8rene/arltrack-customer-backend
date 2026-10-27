@@ -205,7 +205,7 @@ const renderStatementEmail = (s, { audience = "staff" } = {}) => {
               ${p.items.map((it) => pair(it.description, peso(it.amount))).join("")}
               ${rule}
               ${pair("Penalty total", peso(p.amount), !p.active)}`)}
-            ${p.active ? lines(`${p.payments.length ? moveRows(p.payments, false, false) : ""}
+            ${p.active ? lines(`${p.payments.map((l) => itemRow(l.label, detailLine(l), peso(l.amount), false) + (Number(l.fee) > 0 ? pair("Online payment fee", peso(l.fee)) : "")).join("")}
               ${p.coveredByDeposit > 0 ? pair("Covered by security deposit", peso(p.coveredByDeposit)) : ""}
               ${rule}
               ${pair("Still owed on this penalty", peso(p.outstanding), true)}`) : (p.reason ? `<div style="${FONT}font-size:13px;line-height:1.5;color:#6b7280;padding-top:6px;">${esc(p.reason)}</div>` : "")}`)).join("")
@@ -237,6 +237,7 @@ const renderStatementEmail = (s, { audience = "staff" } = {}) => {
             ${lines(`
               ${pair("Total charges", peso(o.totalCharges))}
               ${pair("Total paid", peso(o.paidIn))}
+              ${o.onlineFees > 0 ? pair("Online payment fees (not counted above)", peso(o.onlineFees)) : ""}
               ${o.coveredByDeposit > 0 ? pair("Covered by security deposit", peso(o.coveredByDeposit)) : ""}
               ${o.refunded > 0 ? pair("Refunded to you", peso(o.refunded)) : ""}
               ${o.depositReturned > 0 ? pair("Security deposit returned", peso(o.depositReturned)) : ""}

@@ -172,7 +172,10 @@ const renderStatementPdf = (s) => build(`${s.title} ${s.statementNo}`, (doc, k) 
     p.items.forEach((it) => k.line(it.description, php(it.amount)));
     k.line("Penalty total", php(p.amount), { bold: !p.active });
     if (p.active) {
-      p.payments.forEach((l) => k.line("Paid", php(l.amount), { detail: detailLine(l) }));
+      p.payments.forEach((l) => {
+        k.line("Paid", php(l.amount), { detail: detailLine(l) });
+        if (Number(l.fee) > 0) k.line("Online payment fee", php(l.fee));
+      });
       if (p.coveredByDeposit > 0) k.line("Covered by security deposit", php(p.coveredByDeposit));
       k.line("Still owed on this penalty", php(p.outstanding), { bold: true });
     } else if (p.reason) k.note(p.reason);
@@ -203,6 +206,7 @@ const renderStatementPdf = (s) => build(`${s.title} ${s.statementNo}`, (doc, k) 
   k.section("Overall");
   k.line("Total charges", php(o.totalCharges));
   k.line("Total paid", php(o.paidIn));
+  if (o.onlineFees > 0) k.line("Online payment fees (not counted above)", php(o.onlineFees));
   if (o.coveredByDeposit > 0) k.line("Covered by security deposit", php(o.coveredByDeposit));
   if (o.refunded > 0) k.line("Refunded to you", php(o.refunded));
   if (o.depositReturned > 0) k.line("Security deposit returned", php(o.depositReturned));

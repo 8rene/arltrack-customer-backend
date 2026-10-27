@@ -300,8 +300,11 @@ const settlePenaltyCheckout = async ({ groupID, paymongoPaymentID = null, charge
     const feeKeptTotal = round2(plan.reduce((s, x) => s + x.feeKept, 0));
 
     // PayMongo's own fee is for the WHOLE charge; split it across the rows that got money so they add up to the real fee.
+    // PayMongo takes its cut of everything charged, so each row weighs what was charged on it: the penalty money PLUS the
+    // online payment fee on it. (Weighing penalty money alone gave a penalty with no fee, one of P1,000 or less, too big a
+    // share when it was paid in the same checkout as a larger penalty that carries a fee.)
     const hasPaymongoFee = charge && charge.fee !== undefined && charge.fee !== null;
-    const paymongoShares = hasPaymongoFee ? splitProportional(num(charge.fee), appliedPlan.map((x) => x.apply)) : null;
+    const paymongoShares = hasPaymongoFee ? splitProportional(num(charge.fee), appliedPlan.map((x) => x.apply + x.feeKept)) : null;
 
     const applied = [];
     let ai = 0;

@@ -12,10 +12,10 @@ const bookingsRoutes  = require("./routes/bookings.routes");
 const reviewsRoutes   = require("./routes/reviews.routes");
 const locationRoutes  = require("./routes/location.routes");
 const paymongoRoutes  = require("./routes/paymongo.routes"); // ← NEW
+const penaltyRoutes    = require("./routes/penalty.routes"); // GET /api/bookings/:bookingID/penalties
 const policyRoutes    = require("./routes/policy.routes");
 const termsRoutes     = require("./routes/terms.routes");
 const cronRoutes      = require("./routes/cron.routes"); // ← NEW
-const penaltyRoutes    = require("./routes/penalty.routes"); // ← NEW
 
 const app = express();
 
@@ -48,7 +48,7 @@ app.use("/api/services",  servicesRoutes);
 app.use("/api/cars",      carsRoutes);
 app.use("/api/user",      userRoutes);
 app.use("/api/bookings",  bookingsRoutes);
-app.use("/api/bookings",  penaltyRoutes); // ← NEW — adds GET /api/bookings/:bookingID/penalties
+app.use("/api/bookings",  penaltyRoutes); // adds GET /api/bookings/:bookingID/penalties
 app.use("/api/reviews",   reviewsRoutes);
 app.use("/api/location",  locationRoutes);
 app.use("/api/paymongo",  paymongoRoutes); // ← NEW
