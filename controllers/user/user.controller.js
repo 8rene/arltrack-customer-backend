@@ -243,7 +243,7 @@ const getFullProfile = async (req, res) => {
     try {
       const [feeSettings, covers, credits] = await Promise.all([getSystemSettings(), heldDepositCoverByBooking(userID), heldCreditByBooking(userID)]);
       Object.entries(unpaidDocsByBooking).forEach(([bookingID, docs]) => {
-        planByBooking[bookingID] = planOnlinePayment(docs, { depositCover: covers[bookingID] || 0, fallbackPercent: feeSettings.gatewayFeePercent });
+        planByBooking[bookingID] = planOnlinePayment(docs, { depositCover: covers[bookingID] || 0, fallbackPercent: feeSettings.gatewayFeePercent, threshold: feeSettings.penaltyThreshold });
         // The cover is the held deposit plus any discount credit held for the customer (no online payment, no fee on either).
         // The deposit pays first, then the credit: split what the plan says is covered between the two.
         const depositPart = Math.max(0, (covers[bookingID] || 0) - (credits[bookingID] || 0));

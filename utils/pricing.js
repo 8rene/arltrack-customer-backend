@@ -43,6 +43,9 @@ const SETTINGS_DEFAULTS = {
   // a driver), so a pickup sooner than this can't be booked: the calendar greys it out and createBooking
   // refuses it. Admin-editable like the rest of this list (systemSettings.bookingLeadHours); 0 turns it off.
   bookingLeadHours: 12,
+  // Penalty gateway-fee threshold (pesos), admin-editable (systemSettings.penaltyThreshold). Paying a penalty online adds the
+  // gateway fee only when the penalty's own amount is HIGHER than this. Was the hardcoded PENALTY_FEE_MIN_AMOUNT = 1000.
+  penaltyThreshold: 1000,
 };
 
 // Short in-memory cache so a burst of live quote requests while the
@@ -262,12 +265,15 @@ const computeFeeBreakdown = ({
 // Paying a penalty online adds the gateway fee ONLY when the penalty itself is HIGHER than this many pesos. A penalty of exactly
 // this amount or less carries no fee (the business absorbs PayMongo's cut). The test is on the penalty's own amount, never on
 // the part paid online, so a penalty gets the same answer however it is paid (all online, partly from the deposit, or in
-// several payments). The fee is then charged on the part that IS paid online. The admin backend's receipt.service.js
-// (penaltyFeeOf) has the same number: keep the two equal.
-const PENALTY_FEE_MIN_AMOUNT = 1000;
+// several payments). The fee is then charged on the part that IS paid online. The threshold is System Settings'
+// penaltyThreshold (admin-editable); PENALTY_FEE_MIN_AMOUNT is only the fallback for when it isn't available. Receipts do not
+// re-check it: they only show a fee when the penalty's gatewayFeePaid says one was charged.
+const PENALTY_FEE_MIN_AMOUNT = SETTINGS_DEFAULTS.penaltyThreshold;
 // Master switch: set to true to charge NO penalty fee at all, whatever the amount.
 const PENALTY_GATEWAY_FEE_DISABLED = false;
-const penaltyCarriesFee = (penaltyTotal) => !PENALTY_GATEWAY_FEE_DISABLED && (Number(penaltyTotal) || 0) > PENALTY_FEE_MIN_AMOUNT;
+// A usable threshold (a number >= 0), else the fallback. null / undefined / "" are NOT 0: they mean "not set".
+const penaltyThresholdFrom = (v) => (v !== undefined && v !== null && v !== "" && Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : PENALTY_FEE_MIN_AMOUNT);
+const penaltyCarriesFee = (penaltyTotal, threshold = null) => !PENALTY_GATEWAY_FEE_DISABLED && (Number(penaltyTotal) || 0) > penaltyThresholdFrom(threshold);
 
 // A penalty paid through PayMongo costs the business PayMongo's cut, so the customer is charged the same
 // gatewayFeePercent as the booking (one setting for the owner to manage). Same rounding as computeFeeBreakdown:
@@ -276,24 +282,26 @@ const penaltyCarriesFee = (penaltyTotal) => !PENALTY_GATEWAY_FEE_DISABLED && (Nu
 //   gatewayFee = round(penaltyAmount x gatewayFeePercent / 100)      total = penaltyAmount + gatewayFee
 // penaltyAmount = the money being paid now; penaltyTotal = the penalty's FULL amount, which is what decides whether a fee
 // applies at all (see PENALTY_FEE_MIN_AMOUNT). Without a penaltyTotal the amount being paid stands in for it.
-const computePenaltyGatewayFee = (penaltyAmount = 0, gatewayFeePercent = 0, penaltyTotal = null) => {
+// threshold = the current System Settings penaltyThreshold (null / not set = the fallback).
+const computePenaltyGatewayFee = (penaltyAmount = 0, gatewayFeePercent = 0, penaltyTotal = null, threshold = null) => {
   const base = Math.max(0, Math.round((Number(penaltyAmount) || 0) * 100) / 100);
-  const rate = penaltyCarriesFee(penaltyTotal == null ? base : penaltyTotal) ? pct(gatewayFeePercent) : 0;
+  const rate = penaltyCarriesFee(penaltyTotal == null ? base : penaltyTotal, threshold) ? pct(gatewayFeePercent) : 0;
   const gatewayFee = Math.round(base * rate / 100);
   return { penaltyAmount: base, gatewayFeeRate: rate, gatewayFee, total: Math.round((base + gatewayFee) * 100) / 100 };
 };
 
 // The fee for a whole penalty checkout: each unpaid penalty is charged at ITS OWN saved gatewayFeeRate (the % that was
 // in System Settings when the penalty was created), on what it still owes. A penalty with no saved rate (created before
-// this existed) uses the current setting instead. items: [{ penaltyID, owed, gatewayFeeRate }].
+// this existed) uses the current setting instead. items: [{ penaltyID, owed, gatewayFeeRate, penaltyTotal }].
+// threshold = the current System Settings penaltyThreshold, the same for every penalty in the checkout.
 // Returns the per-penalty `lines` (kept on the checkout so settlement can give each penalty its own fee), the totals,
 // and gatewayFeeRate = the one % shared by every line (null when the lines differ, 0 when nothing is charged).
-const computePenaltyCheckoutFees = (items = [], fallbackPercent = 0) => {
+const computePenaltyCheckoutFees = (items = [], fallbackPercent = 0, threshold = null) => {
   const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const lines = items.map((it) => {
     const stored = it.gatewayFeeRate;
     const hasRate = stored !== undefined && stored !== null && stored !== "" && Number.isFinite(Number(stored));
-    const f = computePenaltyGatewayFee(it.owed, hasRate ? stored : fallbackPercent, it.penaltyTotal);
+    const f = computePenaltyGatewayFee(it.owed, hasRate ? stored : fallbackPercent, it.penaltyTotal, threshold);
     return { penaltyID: it.penaltyID, amount: f.penaltyAmount, rate: f.gatewayFeeRate, fee: f.gatewayFee };
   });
   const penaltyAmount = r2(lines.reduce((s, l) => s + l.amount, 0));
@@ -425,6 +433,7 @@ module.exports = {
   computePenaltyGatewayFee,
   computePenaltyCheckoutFees,
   PENALTY_FEE_MIN_AMOUNT,
+  penaltyThresholdFrom,
   penaltyCarriesFee,
   computePaymentSplit,
   derivePaymentStatus,

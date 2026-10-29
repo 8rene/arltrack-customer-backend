@@ -86,6 +86,7 @@ const createPenaltyPaymentLink = async (req, res) => {
     const fee = planOnlinePayment(unpaid, {
       depositCover: await heldDepositCoverForBooking(bookingID),
       fallbackPercent: settings.gatewayFeePercent,
+      threshold: settings.penaltyThreshold,
     });
     if (!(fee.onlineDue > 0)) {
       // The held deposit covers all of it: nothing to pay online, so no checkout and no fee.
@@ -201,7 +202,7 @@ const getMyOutstandingPenalties = async (req, res) => {
     const feeByBooking = {};       // the online payment fee on that
     const payableByBooking = {};   // onlineDue + fee: what the checkout charges
     Object.entries(docsByBooking).forEach(([bookingID, docs]) => {
-      const plan = planOnlinePayment(docs, { depositCover: covers[bookingID] || 0, fallbackPercent: settings.gatewayFeePercent });
+      const plan = planOnlinePayment(docs, { depositCover: covers[bookingID] || 0, fallbackPercent: settings.gatewayFeePercent, threshold: settings.penaltyThreshold });
       byBooking[bookingID] = plan.unpaidTotal;
       coveredByBooking[bookingID] = plan.coveredByDeposit;
       onlineDueByBooking[bookingID] = plan.onlineDue;

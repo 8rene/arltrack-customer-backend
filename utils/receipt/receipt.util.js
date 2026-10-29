@@ -1,7 +1,6 @@
 const { db } = require("../../config/firebaseConnection/firebase");
 const { sendGenericEmail } = require("../../services/email.service");
 const { renderReceiptEmail } = require("./receiptEmail.util");
-const { computePenaltyGatewayFee } = require("../pricing");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Receipts for the customer app.
@@ -151,14 +150,17 @@ const byTime = (a, b) => whenOf(a).localeCompare(whenOf(b)) || String(a.id).loca
 // The online payment (gateway) fee the customer paid on top of ONE online penalty payment row. It is not stored on the
 // row (a row's amount is penalty money only); it is the fee on that amount at the penalty's saved gatewayFeeRate, or the
 // current System Settings % for a penalty from before the rate was saved -- the same figure the checkout charged.
-// A penalty carries a fee only when its own amount is higher than PENALTY_FEE_MIN_AMOUNT (pricing.js), and a penalty that
-// has no online fee recorded (gatewayFeePaid is 0: it was paid while the fee was off) shows none.
+// Whether a fee applied at all (the penalty threshold in System Settings) was already decided at checkout and is recorded as
+// the penalty's gatewayFeePaid, so the receipt does not look at the threshold: a penalty with no online fee recorded
+// (gatewayFeePaid is 0: it was under the threshold, or paid while the fee was off) shows none.
 const penaltyFeeOf = (row, penaltyDoc, settings) => {
   if (!row || row.direction !== "in" || row.phase !== "penalty" || row.source !== "online" || row.status !== "success") return 0;
-  if (penaltyDoc && !(Number(penaltyDoc.gatewayFeePaid) > 0)) return 0;
+  if (!penaltyDoc || !(Number(penaltyDoc.gatewayFeePaid) > 0)) return 0;
   const saved = penaltyDoc ? penaltyDoc.gatewayFeeRate : undefined;
   const rate = saved !== undefined && saved !== null && saved !== "" ? saved : settings?.gatewayFeePercent;
-  return computePenaltyGatewayFee(row.amount, rate, penaltyDoc ? penaltyDoc.amount : null).gatewayFee;
+  const base = Math.max(0, Math.round((Number(row.amount) || 0) * 100) / 100);
+  const pctRate = Number.isFinite(Number(rate)) && Number(rate) >= 0 ? Math.min(Number(rate), 100) : 0;
+  return Math.round(base * pctRate / 100);   // same rounding as the checkout (computePenaltyGatewayFee in pricing.js)
 };
 
 const labelOf = (e) => {

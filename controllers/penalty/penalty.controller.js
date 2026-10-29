@@ -7,8 +7,8 @@
 //
 // The online payment figures come from planOnlinePayment() (penaltyPayment.util.js), the SAME function the checkout
 // (createPenaltyPaymentLink) charges from, so the card can never show a different amount than PayMongo is asked for. That is
-// also where the ₱1,000 rule lives: the online payment fee applies only to a penalty HIGHER than PENALTY_FEE_MIN_AMOUNT
-// (utils/pricing.js). Nothing is worked out in the browser.
+// also where the threshold rule lives: the online payment fee applies only to a penalty HIGHER than the
+// System Settings penaltyThreshold (default ₱1,000 -- see utils/pricing.js). Nothing is worked out in the browser.
 //
 // Read-only. A penalty still under review (UnderReview) or rejected in review (Discarded) is never shown: the customer was
 // not told about it (same rule as the receipts / statement).
@@ -104,7 +104,7 @@ const getMyBookingPenalties = async (req, res) => {
     let gatewayFeeKnown = true;
     try { settings = await getSystemSettings(); } catch (e) { gatewayFeeKnown = false; console.warn("getMyBookingPenalties: could not read settings:", e.message); }
     const cover = payment ? heldDepositCover(payment) : 0;   // held deposit + held credit: paid without going online, so no fee
-    const online = planOnlinePayment(unpaidDocs, { depositCover: cover, fallbackPercent: settings.gatewayFeePercent });
+    const online = planOnlinePayment(unpaidDocs, { depositCover: cover, fallbackPercent: settings.gatewayFeePercent, threshold: settings.penaltyThreshold });
     // The deposit pays first, then the credit: split what the plan says is covered between the two (as /user/profile does).
     const depositPart = Math.max(0, cover - creditHeld);
     const byDeposit = Math.min(depositPart, online.coveredByDeposit);

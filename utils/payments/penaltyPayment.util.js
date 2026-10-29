@@ -198,7 +198,7 @@ const heldDepositCoverByBooking = async (userID) => {
  * onlineDue is put on the penalties OLDEST FIRST, the same order settlement applies online money in. Every penalty
  * therefore carries a fee line for exactly the part of it that is paid online.
  */
-const planOnlinePayment = (unpaid = [], { depositCover = 0, fallbackPercent = 0 } = {}) => {
+const planOnlinePayment = (unpaid = [], { depositCover = 0, fallbackPercent = 0, threshold = null } = {}) => {
   const sorted = [...unpaid].filter((p) => owedOn(p) > 0).sort(byAge);
   const all = unpaidTotal(sorted);
   const coveredByDeposit = round2(Math.min(num(depositCover), all));
@@ -211,7 +211,7 @@ const planOnlinePayment = (unpaid = [], { depositCover = 0, fallbackPercent = 0 
     left = round2(left - part);
     items.push({ penaltyID: p.penaltyID || (p._ref && p._ref.id) || p.id, owed: part, gatewayFeeRate: p.gatewayFeeRate, penaltyTotal: p.amount });
   }
-  return { unpaidTotal: all, coveredByDeposit, onlineDue, ...computePenaltyCheckoutFees(items, fallbackPercent) };
+  return { unpaidTotal: all, coveredByDeposit, onlineDue, ...computePenaltyCheckoutFees(items, fallbackPercent, threshold) };
 };
 
 /**
@@ -287,8 +287,9 @@ const settlePenaltyCheckout = async ({ groupID, paymongoPaymentID = null, charge
       const apply = p && p.userID === userID ? Math.min(owedOn(p), planned) : 0;
       const rate = p && p.gatewayFeeRate !== undefined && p.gatewayFeeRate !== null && p.gatewayFeeRate !== "" ? p.gatewayFeeRate : settings.gatewayFeePercent;
       const penaltyTotal = p ? p.amount : null;   // the penalty's own amount decides whether a fee applies at all
-      const feeCharged = computePenaltyGatewayFee(planned, rate, penaltyTotal).gatewayFee;   // what the customer paid on this row
-      const feeKept = apply > 0 ? computePenaltyGatewayFee(apply, rate, penaltyTotal).gatewayFee : 0;
+      const threshold = settings.penaltyThreshold;   // the same setting the checkout used, so the fee kept equals the fee charged
+      const feeCharged = computePenaltyGatewayFee(planned, rate, penaltyTotal, threshold).gatewayFee;   // what the customer paid on this row
+      const feeKept = apply > 0 ? computePenaltyGatewayFee(apply, rate, penaltyTotal, threshold).gatewayFee : 0;
       // A partly-applied row keeps the fee on the applied part only; the rest is returned with the money.
       return { r, p, planned, apply: round2(apply), feeCharged, feeKept: apply >= planned ? feeCharged : feeKept };
     });
