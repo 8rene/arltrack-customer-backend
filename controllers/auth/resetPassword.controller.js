@@ -66,7 +66,13 @@ const resetPassword = async (req, res) => {
     // shouldn't be the only thing standing between a blocked role and a
     // password reset. Generic message, same reasoning as login.
     const userDoc = await db.collection("user").doc(firebaseUser.uid).get();
-    const roleID  = userDoc.exists ? userDoc.data().roleID : null;
+    // No profile doc = an account an admin deleted (archived): its login is only disabled, so it still resolves above.
+    // Stop here: resetting the password would be pointless, and step 3a below would write a stray user doc for it.
+    if (!userDoc.exists) {
+      await otpRef.delete();
+      return res.status(404).json({ message: "No account found with this email." });
+    }
+    const roleID  = userDoc.data().roleID;
     if (roleID && await isBlockedAdminRole(roleID, db)) {
       await otpRef.delete();
       return res.status(404).json({ message: "No account found with this email." });

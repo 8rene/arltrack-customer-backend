@@ -118,7 +118,12 @@ const sendOTP = async (req, res) => {
       }
 
       const userDoc = await db.collection("user").doc(firebaseUser.uid).get();
-      const roleID  = userDoc.exists ? userDoc.data().roleID : null;
+      // No profile doc = an archived (admin-deleted) account whose login is only disabled: send no code, and answer
+      // exactly like an unknown email so this endpoint still can't be used to probe which emails exist.
+      if (!userDoc.exists) {
+        return res.status(200).json({ emailSent: true });
+      }
+      const roleID  = userDoc.data().roleID;
 
       if (roleID && await isBlockedAdminRole(roleID, db)) {
         return res.status(200).json({ emailSent: true }); // same — don't reveal admin-side accounts

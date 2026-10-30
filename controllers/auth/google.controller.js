@@ -1,7 +1,7 @@
 const { auth, db } = require("../../config/firebaseConnection/firebase");
 const jwt          = require("jsonwebtoken");
 const { createSessionLog, expireStaleSessionsForUser } = require("../../utils/sessionLogs/sessionLogs.util");
-const { checkAccountStatus } = require("../../utils/accountStatus/accountStatus.util");
+const { checkAccountStatus, ARCHIVED_MESSAGE, isArchivedEmail } = require("../../utils/accountStatus/accountStatus.util");
 const { isBlockedAdminRole } = require("../../utils/roles/role.util");
 
 // Admin-side role blocking (Owner/Admin/Supervisor/Driver) now lives in one
@@ -29,6 +29,7 @@ const googleLogin = async (req, res) => {
       .get();
 
     if (userQuery.empty) {
+      if (await isArchivedEmail(email)) return res.status(403).json({ message: ARCHIVED_MESSAGE });
       return res.status(403).json({
         message: "No account found for this Google email. Please register first.",
       });

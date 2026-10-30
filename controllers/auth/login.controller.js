@@ -2,7 +2,7 @@ const axios = require("axios");
 const { db }  = require("../../config/firebaseConnection/firebase");
 const jwt     = require("jsonwebtoken");
 const { createSessionLog, expireStaleSessionsForUser } = require("../../utils/sessionLogs/sessionLogs.util");
-const { checkAccountStatus } = require("../../utils/accountStatus/accountStatus.util");
+const { checkAccountStatus, ARCHIVED_MESSAGE, isArchivedUid } = require("../../utils/accountStatus/accountStatus.util");
 const { isBlockedAdminRole } = require("../../utils/roles/role.util");
 
 // Admin-side role blocking (Owner/Admin/Supervisor/Driver) now lives in one
@@ -37,6 +37,8 @@ const login = async (req, res) => {
     const userDoc = await db.collection("user").doc(uid).get();
 
     if (!userDoc.exists) {
+      // an account an admin deleted: its login still exists (disabled) but the profile sits in the archive
+      if (await isArchivedUid(uid)) return res.status(403).json({ message: ARCHIVED_MESSAGE });
       return res.status(404).json({ message: "User record not found." });
     }
 
@@ -111,7 +113,7 @@ const login = async (req, res) => {
       return res.status(401).json({ message: "Invalid email or password." });
     }
     if (code.includes("USER_DISABLED")) {
-      return res.status(403).json({ message: "Your account has been disabled." });
+      return res.status(403).json({ message: "Your account has been archived or disabled. Please contact the administrator." });
     }
     if (code.includes("TOO_MANY_ATTEMPTS_TRY_LATER") || code.includes("TOO_MANY_ATTEMPTS")) {
       return res.status(429).json({ message: "Too many failed attempts. Please try again later." });

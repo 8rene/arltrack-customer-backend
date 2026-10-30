@@ -6,6 +6,7 @@ const createUserAddress  = require("../../models/user/userAddress.model");
 const createUserDocument = require("../../models/user/userDocument.model");
 const createReferral     = require("../../models/referral/referral.model");
 const { recordAudit }    = require("../../utils/auditLogs/auditLogs.util");
+const { isArchivedUid }  = require("../../utils/accountStatus/accountStatus.util");
 const { checkTermsAcceptance, termsRequired } = require("../../utils/terms/terms.service");
 const { generateUniqueReferralCode, findUserByReferralCode } = require("../../utils/referrals/referral.util");
 
@@ -106,6 +107,18 @@ const uploadBase64Image = async (base64DataUrl, destPath) => {
     // Log the FULL error so it's visible in the backend console
     console.error(`❌ uploadBase64Image FAILED (${destPath}):`, err);
     return ""; // non-fatal — registration still proceeds
+  }
+};
+
+// An archived (admin-deleted) account keeps its Firebase Auth login, only disabled, so its email and phone number stay
+// taken. This finds out whether the Auth user that owns a taken email/phone is one of those, so the customer is told to
+// contact the administrator instead of a plain "already in use". `lookup` returns the Auth user. Never throws.
+const ownerIsArchived = async (lookup) => {
+  try {
+    const owner = await lookup();
+    return await isArchivedUid(owner.uid);
+  } catch {
+    return false;
   }
 };
 
@@ -360,15 +373,29 @@ const signup = async (req, res) => {
 
   } catch (error) {
     console.error("Signup error:", error);
-    if (error.code === "auth/email-already-exists")
+    if (error.code === "auth/email-already-exists") {
+      if (await ownerIsArchived(() => auth.getUserByEmail(email))) {
+        return res.status(409).json({
+          code: "ACCOUNT_ARCHIVED",
+          message: "This email belongs to an archived account. Please contact the administrator to have it restored.",
+        });
+      }
       return res.status(409).json({ message: "Email is already in use." });
+    }
     if (error.code === "auth/invalid-phone-number")
       return res.status(400).json({ message: "Invalid phone number format." });
     // check-availability only looks at email + username, so a phone number that is already on another
     // account is first discovered here — it used to fall through to the generic 500 below.
     // (createUser runs before any upload, so nothing is left behind when this fires.)
-    if (error.code === "auth/phone-number-already-exists")
+    if (error.code === "auth/phone-number-already-exists") {
+      if (await ownerIsArchived(() => auth.getUserByPhoneNumber(phone))) {
+        return res.status(409).json({
+          code: "ACCOUNT_ARCHIVED",
+          message: "This phone number belongs to an archived account. Please contact the administrator to have it restored.",
+        });
+      }
       return res.status(409).json({ message: "Phone number is already in use." });
+    }
     if (error.code === "auth/weak-password")
       return res.status(400).json({ message: "Password is too weak." });
     return res.status(500).json({ message: "Server error. Please try again." });
@@ -382,13 +409,14 @@ const signup = async (req, res) => {
 const checkAvailability = async (req, res) => {
   const email    = (req.query.email    || "").trim().toLowerCase();
   const username = (req.query.username || "").trim().toLowerCase();
-  const result   = { email: false, username: false };
+  const result   = { email: false, username: false, emailArchived: false };
 
   try {
     if (email) {
       try {
-        await auth.getUserByEmail(email);
+        const owner = await auth.getUserByEmail(email);
         result.email = true;
+        result.emailArchived = await isArchivedUid(owner.uid); // taken by an account an admin archived
       } catch (err) {
         if (err.code !== "auth/user-not-found") throw err;
       }

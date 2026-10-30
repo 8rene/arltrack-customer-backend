@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const { db } = require("../config/firebaseConnection/firebase");
+const { ARCHIVED_MESSAGE, isArchivedUid } = require("../utils/accountStatus/accountStatus.util");
 
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers["authorization"];
@@ -28,6 +29,8 @@ const verifyToken = async (req, res, next) => {
     const userDoc = await db.collection("user").doc(verified.userID).get();
 
     if (!userDoc.exists) {
+      // deleted by an admin (archived) vs. gone entirely
+      if (await isArchivedUid(verified.userID)) return res.status(403).json({ message: ARCHIVED_MESSAGE });
       return res.status(403).json({ message: "Account not found. Please log in again." });
     }
 

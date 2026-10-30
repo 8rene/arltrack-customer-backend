@@ -1,4 +1,33 @@
 const { recordBlockedAttempt } = require("../sessionLogs/sessionLogs.util");
+const { db } = require("../../config/firebaseConnection/firebase");
+
+// When an admin deletes a customer the account is ARCHIVED: its Firebase Auth login is only DISABLED (same uid, email,
+// phone, password) and the profile moves to the `userArchives` collection (document ID = the uid). These helpers let
+// every auth path tell "archived" apart from "never existed" and show the right message.
+const ARCHIVED_MESSAGE = "Your account has been archived. Please contact the administrator to have it restored.";
+
+// true when this uid is in the admin's archive. Never throws: a lookup problem just means "not known to be archived".
+const isArchivedUid = async (uid) => {
+  if (!uid) return false;
+  try {
+    return (await db.collection("userArchives").doc(uid).get()).exists;
+  } catch (err) {
+    console.error("isArchivedUid failed:", err.message);
+    return false;
+  }
+};
+
+// same, looked up by the (lowercase) email stored on the archived copy
+const isArchivedEmail = async (email) => {
+  if (!email) return false;
+  try {
+    const snap = await db.collection("userArchives").where("email", "==", email).limit(1).get();
+    return !snap.empty;
+  } catch (err) {
+    console.error("isArchivedEmail failed:", err.message);
+    return false;
+  }
+};
 
 // "locked"   = pending admin approval
 // "inactive" = deactivated by an admin
@@ -43,4 +72,4 @@ const checkAccountStatus = (userData, uid, { logPrefix = "Blocked login attempt"
   };
 };
 
-module.exports = { checkAccountStatus };
+module.exports = { checkAccountStatus, ARCHIVED_MESSAGE, isArchivedUid, isArchivedEmail };
