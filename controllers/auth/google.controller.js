@@ -29,7 +29,7 @@ const googleLogin = async (req, res) => {
       .get();
 
     if (userQuery.empty) {
-      if (await isArchivedEmail(email)) return res.status(403).json({ message: ARCHIVED_MESSAGE });
+      if (await isArchivedEmail(email)) return res.status(403).json({ message: ARCHIVED_MESSAGE, archived: true });
       return res.status(403).json({
         message: "No account found for this Google email. Please register first.",
       });

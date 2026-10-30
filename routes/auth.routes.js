@@ -7,6 +7,7 @@ const { sendOTP, verifyOTP } = require("../controllers/auth/otp.controller");
 const { resetPassword } = require("../controllers/auth/resetPassword.controller"); // ← NEW
 const { googleLogin } = require("../controllers/auth/google.controller"); // ← add
 const { logout } = require("../controllers/auth/logout.controller"); // ← NEW
+const { requestArchivedReview } = require("../controllers/auth/archivedReview.controller");
 const validateSignup = require("../middlewares/signup.middleware");
 const validateLogin  = require("../middlewares/login.middleware");
 const verifyToken    = require("../middlewares/auth.middleware");
@@ -34,5 +35,8 @@ router.post("/verify-otp",        authLimit("verify-otp", 30),      verifyOTP);
 router.post("/reset-password",    authLimit("reset-password", 15),  resetPassword); // ← NEW
 router.post("/google",            authLimit("google-login", 30),    googleLogin); // ← add
 router.post("/logout",            verifyToken, logout); // ← NEW
+// "Ask the administrator to check my account" (the button under the archived-login message). No login needed
+// (an archived account can't sign in) and always answers the same; see the controller. Tight limit on purpose.
+router.post("/archived-review",   authLimit("archived-review", 5),  requestArchivedReview);
 
 module.exports = router;
