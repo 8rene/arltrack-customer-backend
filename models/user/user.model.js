@@ -1,6 +1,3 @@
-// NOT written here: mergedFromUserIDs / mergedAt / mergedBy. The ADMIN backend adds them to the SURVIVING account when an
-// archived account is merged into it (mergeUserArchive in its userArchives.service.js). Present only on an account that has
-// had at least one merge; this backend never writes or reads them.
 const createUser = (userID, data) => ({
   userID,
   username:     data.username    || "",
