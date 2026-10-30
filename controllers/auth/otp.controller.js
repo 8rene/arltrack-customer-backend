@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const { db, auth } = require("../../config/firebaseConnection/firebase");
 const generateOTP = require("../../utils/generateOTP");
 const { isBlockedAdminRole } = require("../../utils/roles/role.util");
+const { ARCHIVED_MESSAGE, isArchivedUid } = require("../../utils/accountStatus/accountStatus.util");
 
 const OTP_EXPIRY_MS  = 5 * 60 * 1000;  // 5 minutes
 const OTP_COOLDOWN_MS = 60 * 1000;     // 1 minute cooldown between requests
@@ -118,10 +119,15 @@ const sendOTP = async (req, res) => {
       }
 
       const userDoc = await db.collection("user").doc(firebaseUser.uid).get();
-      // No profile doc = an archived (admin-deleted) account whose login is only disabled: send no code, and answer
-      // exactly like an unknown email so this endpoint still can't be used to probe which emails exist.
+      // No profile doc = an account an admin deleted (archived): its login is only disabled. Send no code, and tell the
+      // person plainly why (instead of a silent "code sent" that never arrives) so the screen can offer the
+      // "Ask the administrator to check my account" button. Trade-off: unlike an unknown email, this does confirm
+      // that this email belongs to an archived account; the route's per-IP limit is what keeps that from being scripted.
       if (!userDoc.exists) {
-        return res.status(200).json({ emailSent: true });
+        if (await isArchivedUid(firebaseUser.uid)) {
+          return res.status(403).json({ message: ARCHIVED_MESSAGE, archived: true });
+        }
+        return res.status(200).json({ emailSent: true }); // not archived, just no profile: look like a real send
       }
       const roleID  = userDoc.data().roleID;
 

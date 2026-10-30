@@ -11,15 +11,20 @@ const { createNotification } = require("../../services/notification/notification
 //
 // - Same answer for every e-mail (archived or not, known or not), so this can't be used to find out which e-mails exist.
 // - No free text is accepted, so there is nothing to read, filter or abuse.
-// - One bell notification per Owner/Admin per archived account: createNotification() skips a copy that is still
-//   active, so pressing the button again does nothing until staff resolve it (the admin app resolves it on
-//   restore / permanent delete, or they dismiss it from the bell). No extra field or table is needed for that.
+// - ONE request per archived account, ever: the first press writes a marker doc in `archiveAppeals` (doc ID = the
+//   archived uid) with create(), which Firestore rejects if it already exists, so even two presses at the same
+//   instant send only one. Later presses (any device, any session) get { alreadySent: true } and notify nobody.
+//   The marker lives in its own collection so the admin app's archive documents are never touched. If the account
+//   is restored and archived again later, delete its `archiveAppeals` doc to let the person ask again.
+// - On top of that, createNotification() still skips a copy that is still active for a staff member.
 // - The per-IP limit is on the route (see routes/auth.routes.js).
 // Notification shape (must match the admin app's Header.jsx / UserArchivePage.jsx): type "archive_appeal",
 // refCollection "userArchives", refID = the archived uid (the archive document's ID).
 // ================================================================
 
 const SENT_MESSAGE = "Request sent. Staff will review your account and contact you.";
+const ALREADY_SENT_MESSAGE = "You already sent a request for this account. Staff will contact you after they review it.";
+const FIRESTORE_ALREADY_EXISTS = 6; // gRPC code for create() on a doc that exists
 
 const requestArchivedReview = async (req, res) => {
   try {
@@ -42,22 +47,42 @@ const requestArchivedReview = async (req, res) => {
       const data = archiveDoc.data();
       const who = data.username || data.email || archiveDoc.id;
 
-      const staffSnap = await db.collection("user")
-        .where("roleID", "in", [ROLE_IDS.OWNER, ROLE_IDS.ADMIN])
-        .get();
+      // Claim the one allowed request. create() fails with ALREADY_EXISTS if someone (this person, earlier) already sent it.
+      const appealRef = db.collection("archiveAppeals").doc(archiveDoc.id);
+      try {
+        await appealRef.create({
+          email: data.email || typed.toLowerCase(),
+          requestedAt: new Date(),
+        });
+      } catch (err) {
+        if (err.code === FIRESTORE_ALREADY_EXISTS) {
+          return res.status(200).json({ message: ALREADY_SENT_MESSAGE, alreadySent: true });
+        }
+        throw err;
+      }
 
-      await Promise.all(
-        staffSnap.docs.map((d) =>
-          createNotification({
-            type: "archive_appeal",
-            refID: archiveDoc.id,
-            refCollection: "userArchives",
-            title: "Archived Account Review",
-            message: `${who} (${data.email || typed}) is asking staff to check their archived account.`,
-            userID: d.id,
-          })
-        )
-      );
+      try {
+        const staffSnap = await db.collection("user")
+          .where("roleID", "in", [ROLE_IDS.OWNER, ROLE_IDS.ADMIN])
+          .get();
+
+        await Promise.all(
+          staffSnap.docs.map((d) =>
+            createNotification({
+              type: "archive_appeal",
+              refID: archiveDoc.id,
+              refCollection: "userArchives",
+              title: "Archived Account Review",
+              message: `${who} (${data.email || typed}) is asking staff to check their archived account.`,
+              userID: d.id,
+            })
+          )
+        );
+      } catch (err) {
+        // Nobody was notified, so give the person their one request back and let them try again.
+        await appealRef.delete().catch(() => {});
+        throw err;
+      }
     }
 
     return res.status(200).json({ message: SENT_MESSAGE });

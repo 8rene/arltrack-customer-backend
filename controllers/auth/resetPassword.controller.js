@@ -1,6 +1,7 @@
 const { db, auth } = require("../../config/firebaseConnection/firebase");
 const { isBlockedAdminRole } = require("../../utils/roles/role.util");
 const { verifyAndConsumeOTP, normalizeEmail } = require("./otp.controller");
+const { ARCHIVED_MESSAGE, isArchivedUid } = require("../../utils/accountStatus/accountStatus.util");
 
 // Same strength rule enforced client-side at signup (SignUpModal.jsx) —
 // checked again here since this is a new, separate entry point.
@@ -70,6 +71,9 @@ const resetPassword = async (req, res) => {
     // Stop here: resetting the password would be pointless, and step 3a below would write a stray user doc for it.
     if (!userDoc.exists) {
       await otpRef.delete();
+      if (await isArchivedUid(firebaseUser.uid)) {
+        return res.status(403).json({ message: ARCHIVED_MESSAGE, archived: true });
+      }
       return res.status(404).json({ message: "No account found with this email." });
     }
     const roleID  = userDoc.data().roleID;
