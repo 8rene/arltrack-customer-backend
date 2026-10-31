@@ -1,4 +1,5 @@
 const { db } = require("../../config/firebaseConnection/firebase");
+const { getSelfDriveEligibility } = require("../../utils/user/selfDriveEligibility");
 const admin  = require("firebase-admin");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
 const { generateUniqueReferralCode } = require("../../utils/referrals/referral.util");
@@ -80,8 +81,14 @@ const getUserDetails = async (req, res) => {
     if (!userDoc.exists) return res.status(404).json({ message: "User not found." });
     const user    = userDoc.data();
     const details = detailsDoc.exists ? detailsDoc.data() : {};
+    // Whether this customer may book "Without Driver" (license on file, not expired, 21+). The booking page reads this
+    // to grey that option out; createBooking enforces the same rule on the server.
+    let drivingEligibility = null;
+    try { drivingEligibility = await getSelfDriveEligibility(userID); }
+    catch (eligErr) { console.error("getUserDetails: eligibility check failed:", eligErr.message); }
     return res.status(200).json({
       userID,
+      drivingEligibility,
       email:        user.email        || "",
       phone:        user.phone        || "",
       username:     user.username     || "",

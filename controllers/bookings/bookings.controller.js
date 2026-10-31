@@ -8,6 +8,7 @@ const {
   buildCodingLocations, evaluateCodingRange, codingBlockMessage, codingWarningMessage,
 } = require("../../utils/bookings/codingRange.util");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
+const { getSelfDriveEligibility } = require("../../utils/user/selfDriveEligibility");
 const { plateForBooking } = require("../../utils/bookings/plateVisibility.util");
 const { getEnRouteMap, bookingKeyOf } = require("../../utils/bookings/enRoute.util");
 const { BOOKING_STATUS, enforceToPayValidity, checkPickupLeadTime } = require("../../utils/bookings/bookingStatus.util");
@@ -498,6 +499,20 @@ const createBooking = async (req, res) => {
     const endDateTime = endDate && endTime
       ? new Date(`${endDate}T${endTime}:00+08:00`)
       : startDateTime;
+
+    // ── Without Driver (self-drive) needs a valid driver's license and a renter aged 21+ ──
+    // A customer who signed up without a license can still book With Driver. Anything that is not "chauffeur" is a
+    // self-drive booking (see modeOfDriving below), so this is checked for all of them — whatever the booking page showed.
+    if (driveType !== "chauffeur") {
+      const elig = await getSelfDriveEligibility(userID, { pickupAt: startDateTime, returnAt: endDateTime });
+      if (!elig.canSelfDrive) {
+        return res.status(403).json({
+          code: "SELF_DRIVE_NOT_ELIGIBLE",
+          reason: elig.reason,
+          message: elig.message,
+        });
+      }
+    }
 
     // ── Authoritative fee calculation — never trust client-sent totals ──
     const pricePerDay = await getPricePerDay(carID, duration);

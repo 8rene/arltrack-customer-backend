@@ -174,6 +174,19 @@ const signup = async (req, res) => {
       return res.status(400).json({ message: `You must be at least ${MIN_SIGNUP_AGE} years old to register.` });
     }
 
+    // 0-b. The driver's license is OPTIONAL. Without one the customer can still register, but can only book
+    // With Driver (Without Driver needs a license — see utils/user/selfDriveEligibility.js). The number and the photo
+    // go together: one without the other is a half-filled form, not "no license".
+    const hasLicenseNumber = typeof driversLicenseNumber === "string" && driversLicenseNumber.trim() !== "";
+    const hasLicensePhoto  = !!driverLicenseBase64;
+    if (hasLicenseNumber !== hasLicensePhoto) {
+      return res.status(400).json({
+        message: hasLicenseNumber
+          ? "Please upload a photo of your driver's license, or clear the license number to continue without one."
+          : "Please enter your driver's license number, or remove the photo to continue without one.",
+      });
+    }
+
     // 0. Reject bad ID images BEFORE creating anything (otherwise the account would
     // be created and the image silently dropped).
     for (const [value, label] of [
