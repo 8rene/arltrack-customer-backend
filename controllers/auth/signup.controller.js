@@ -32,7 +32,8 @@ const STAFF_NOTIFY_ROLE_IDS = [
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // decoded size per image (3 images ≈ 16 MB < 20 MB body limit)
 
 // Minimum age to register. Keep in sync with MIN_AGE in SignUpModal.jsx.
-const MIN_SIGNUP_AGE = 21;
+// (Booking Without Driver still needs 21+ — see MIN_SELF_DRIVE_AGE in utils/user/selfDriveEligibility.js.)
+const MIN_SIGNUP_AGE = 18;
 
 // Age in whole years from an ISO "YYYY-MM-DD" birthdate, counted as of today in the Philippines
 // (the business runs on PH time, so someone turning 21 today is 21 for the whole PH day,
