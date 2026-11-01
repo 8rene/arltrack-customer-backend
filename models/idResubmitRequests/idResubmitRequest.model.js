@@ -8,11 +8,14 @@ const IdResubmitRequest = {
   // documentKind === "license":
   currentLicenseUrl: "",
   newLicenseUrl: "",
+  driversLicenseNumber: "",
   // documentKind === "document":
   currentDocumentUrl: "",
   newDocumentUrl: "",
   documentType: "",
   documentNumber: "",
+  currentSelfieUrl: "",   // the selfie holding the ID that was on file
+  newSelfieUrl: "",       // required with a government ID
   status: "pending",   // "pending" until staff review it
   requestedBy: "",     // same as userID
   reviewedBy: null,

@@ -344,6 +344,7 @@ const getFullProfile = async (req, res) => {
       documentNumber:    primaryDocument.documentNumber   || "",
       documentImageUrl:  primaryDocument.documentImageUrl || "",
       driverLicenseUrl:  primaryDocument.driverLicenseUrl || "",
+      driversLicenseNumber: primaryDocument.driversLicenseNumber || "",
       selfieWithIdUrl:   primaryDocument.selfieWithIdUrl  || "",
       documentVerified:  user.isVerified                  || false, // sourced from user collection
       // all documents array
@@ -475,9 +476,26 @@ const updateAvatar = async (req, res) => {
 
 module.exports = { getUserDetails, updateUserDetails, getFullProfile, updateFullProfile, updateAvatar, submitIdResubmitRequest };
 
+// A photo URL sent by the browser must be a Firebase Storage upload in the given folder, named for this user, so it
+// cannot be an arbitrary or external image. Same rule as admin-backend's profileRequests.service.js (assertOwnUpload).
+// The selfie holding the ID goes in the same "documentResubmit" folder as the ID photo; only its file name tells them apart.
+function isOwnUpload(url, folder, userID) {
+  try {
+    const parsed = new URL(String(url || ""));
+    const objectPath = decodeURIComponent(parsed.pathname.split("/o/")[1] || "");
+    return parsed.protocol === "https:"
+      && parsed.hostname === "firebasestorage.googleapis.com"
+      && objectPath.startsWith(`${folder}/${userID}_`);
+  } catch { return false; }
+}
+
 // ─────────────────────────────────────────────────────────────
 // POST /api/user/id-resubmit-requests
-// Body: { documentKind, currentUrl, newUrl, documentType?, documentNumber? }
+// Body: { documentKind, currentUrl, newUrl,
+//         license:  driversLicenseNumber,
+//         document: documentType, documentNumber, newSelfieUrl, currentSelfieUrl? }
+// Same rules as the admin side's createIdResubmitRequest: a license needs its number; a government ID needs its
+// type, number and the selfie holding it.
 // documentKind: "license" | "document". newUrl is the downloadURL from a
 // Storage upload the frontend already did (same pattern as updateAvatar
 // above) — this endpoint only writes the Firestore doc.
@@ -498,7 +516,7 @@ module.exports = { getUserDetails, updateUserDetails, getFullProfile, updateFull
 // ─────────────────────────────────────────────────────────────
 async function submitIdResubmitRequest(req, res) {
   const userID = req.user.userID;
-  const { documentKind, currentUrl, newUrl, documentType, documentNumber } = req.body || {};
+  const { documentKind, currentUrl, newUrl, documentType, documentNumber, newSelfieUrl, currentSelfieUrl, driversLicenseNumber } = req.body || {};
 
   if (!["license", "document"].includes(documentKind)) {
     return res.status(400).json({ message: "documentKind must be 'license' or 'document'." });
@@ -506,18 +524,33 @@ async function submitIdResubmitRequest(req, res) {
   if (!newUrl) {
     return res.status(400).json({ message: "newUrl is required." });
   }
-  if (documentKind === "document" && (!documentType || !documentNumber)) {
+  if (documentKind === "license" && !String(driversLicenseNumber || "").trim()) {
+    return res.status(400).json({ message: "driversLicenseNumber is required for a driver's license resubmission." });
+  }
+  if (documentKind === "document" && (!String(documentType || "").trim() || !String(documentNumber || "").trim())) {
     return res.status(400).json({ message: "documentType and documentNumber are required for a document resubmission." });
+  }
+  if (documentKind === "document" && !newSelfieUrl) {
+    return res.status(400).json({ message: "A selfie holding the ID is required when submitting a government ID." });
+  }
+  const uploadFolder = documentKind === "license" ? "driverLicenseResubmit" : "documentResubmit";
+  if (!isOwnUpload(newUrl, uploadFolder, userID)) {
+    return res.status(400).json({ message: "newUrl must be a Firebase Storage upload for this user." });
+  }
+  if (documentKind === "document" && !isOwnUpload(newSelfieUrl, "documentResubmit", userID)) {
+    return res.status(400).json({ message: "newSelfieUrl must be a Firebase Storage upload for this user." });
   }
 
   try {
     const urlFields = documentKind === "license"
-      ? { currentLicenseUrl: currentUrl || "", newLicenseUrl: newUrl }
+      ? { currentLicenseUrl: currentUrl || "", newLicenseUrl: newUrl, driversLicenseNumber: String(driversLicenseNumber).trim() }
       : {
           currentDocumentUrl: currentUrl || "",
           newDocumentUrl: newUrl,
-          documentType: documentType.trim(),
-          documentNumber: documentNumber.trim(),
+          documentType: String(documentType).trim(),
+          documentNumber: String(documentNumber).trim(),
+          currentSelfieUrl: currentSelfieUrl || "",
+          newSelfieUrl,
         };
 
     const now = admin.firestore.FieldValue.serverTimestamp();
