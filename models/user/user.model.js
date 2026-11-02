@@ -13,6 +13,7 @@ const createUser = (userID, data) => ({
   status:       "locked",          // always locked on signup — admin unlocks after review
   isVerified:   false,             // always false on signup — admin verifies manually
   isFlagged:    false,
+  idStatus: null,
   profileImage: "",
   roleID:       process.env.DEFAULT_ROLE_ID || "9vD6ZU1s2qUtmyu0RXKD",
   createdAt:    new Date(),
