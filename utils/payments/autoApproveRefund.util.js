@@ -200,7 +200,7 @@ const approveGraceWindowRefund = async ({ refundRequestID, refundRequest, paymen
 
     recordAudit({
       action: "update",
-      description: `Refund ${refundRequestID} AUTO-APPROVED for ${peso(plan.total)}${creditReturned > 0 ? ` (includes ${peso(creditReturned)} held discount credit)` : ""} (${peso(onlineAmount)} ${sendAfter ? `SCHEDULED for PayMongo after ${fmtManilaDate(sendAfter)}` : "online"} in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${plan.unrefundableAmount > 0 ? ` — ${peso(plan.unrefundableAmount)} NOT refunded: ${PAYMENT_ID_MISSING_NOTE}` : ""} — requested inside the grace window, nothing kept. Booking ${refundRequest.bookingID}: ${bookingCancelled ? "cancelled" : "NOT cancelled (staff must check it)"}.`,
+      description: `Refund ${refundRequestID} AUTO-APPROVED for ${peso(plan.total)}${creditReturned > 0 ? ` (includes ${peso(creditReturned)} held discount credit)` : ""} (${peso(onlineAmount)} ${sendAfter ? `SCHEDULED for PayMongo after ${fmtManilaDate(sendAfter)}` : "online"} in ${parts.length} refund(s)${manualRefund ? `, ${peso(plan.manualAmount)} to hand back manually` : ""})${plan.unrefundableAmount > 0 ? ` — ${peso(plan.unrefundableAmount)} NOT refunded: ${PAYMENT_ID_MISSING_NOTE}` : ""} — requested inside the grace window, ${plan.gatewayFeeKept > 0 ? `${peso(plan.gatewayFeeKept)} online payment fee kept (deposit returned)` : "nothing kept"}. Booking ${refundRequest.bookingID}: ${bookingCancelled ? "cancelled" : "NOT cancelled (staff must check it)"}.`,
       userID: SYSTEM_USER,
       bookingID: refundRequest.bookingID,
       paymentID: refundRequest.paymentID,
