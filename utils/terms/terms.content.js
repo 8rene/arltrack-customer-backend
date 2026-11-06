@@ -38,17 +38,17 @@ const buildTermsSections = ({ depositText, serviceFeePercent, gatewayFeePercent,
   },
   {
     title: "Cancellation & Refund Policy",
-    body: `Renters who wish to cancel must notify ARL Car Rental through official channels as early as possible. The ${fullRefundHours} hours are counted from the moment you send your refund request, not from the moment it is reviewed. Service and gateway fees are refunded together with your booking amount; when a refund falls under the ${fullRefundHours}-hour limit, only the ${depositText} deposit is withheld.`,
+    body: `Renters who wish to cancel must notify ARL Car Rental through official channels as early as possible. The ${fullRefundHours} hours are counted from the moment you send your refund request, not from the moment it is reviewed. The online payment gateway fee is non-refundable in every cancellation; when a refund falls under the ${fullRefundHours}-hour limit, the ${depositText} deposit is also withheld.`,
     list: [
-      { label: `${fullRefundHours} hours or more before pickup`, value: "Full refund of everything you paid" },
-      { label: `Less than ${fullRefundHours} hours before pickup`, value: `Everything refunded except the ${depositText} deposit` },
-      { label: "No-show on pickup date", value: `${depositText} deposit forfeited; everything else refunded` },
+      { label: `${fullRefundHours} hours or more before pickup`, value: "Refund of everything you paid, except the online payment gateway fee" },
+      { label: `Less than ${fullRefundHours} hours before pickup`, value: `Everything refunded except the ${depositText} deposit and the online payment gateway fee` },
+      { label: "No-show on pickup date", value: `${depositText} deposit forfeited and online payment gateway fee kept; everything else refunded` },
     ],
     footer: `Rescheduling is allowed with at least 24 hours' notice, subject to vehicle availability. The ${depositText} deposit may be applied to the rescheduled booking at management's discretion.`,
   },
   {
     title: "Vehicle Pickup & Customer Identification",
-    body: "On the scheduled pickup date, the renter is required to present a valid government-issued identification card to verify identity, confirm booking details, and serve as a security measure. Failure to provide valid identification may result in cancellation without refund of the deposit.",
+    body: "On the scheduled pickup date, the renter is required to present a valid government-issued identification card to verify identity, confirm booking details, and serve as a security measure. Failure to provide valid identification may result in cancellation of the booking, treated as a no-show.",
   },
   {
     title: "Driver Requirements (Self-Drive Rentals)",
