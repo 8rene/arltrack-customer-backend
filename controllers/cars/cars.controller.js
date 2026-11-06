@@ -6,6 +6,26 @@ const { db } = require("../../config/firebaseConnection/firebase");
 // only the Booking page hides them.) Status casing is not trusted: "Inactive" / "inactive" both count.
 const isInactiveCar = (data) => String((data && data.status) || "").trim().toLowerCase() === "inactive";
 
+// A flagged customer's reviews are not shown to anyone (car page, review counts, "most reviewed" ranking). Staff still see
+// them in the admin Reviews page, marked Flagged. Returns the Set of userIDs (from the given list) whose account is flagged
+// RIGHT NOW, read from the live user record, so un-flagging someone brings their reviews back on its own.
+// If the lookup itself fails the reviews are left visible (and the error logged) rather than breaking the page.
+const flaggedUserIDs = async (userIDs) => {
+  const ids = [...new Set((userIDs || []).filter(Boolean).map(String))];
+  const flagged = new Set();
+  if (!ids.length) return flagged;
+  try {
+    for (let i = 0; i < ids.length; i += 300) {
+      const refs = ids.slice(i, i + 300).map((id) => db.collection("user").doc(id));
+      const snaps = await db.getAll(...refs);
+      snaps.forEach((s) => { if (s.exists && s.data().isFlagged === true) flagged.add(s.id); });
+    }
+  } catch (err) {
+    console.error("flaggedUserIDs error:", err.message);
+  }
+  return flagged;
+};
+
 // Helper: resolve car details (brand, model, primary image, all pricing)
 const resolveCarDetails = async (carID, carData, brandMap, modelMap) => {
   const brand = brandMap[carData.brandID] || "";
@@ -148,8 +168,11 @@ const getFeaturedCars = async (req, res) => {
     const reviewCount  = {};
     const bookingCount = {};
 
+    // Reviews from flagged customers don't count towards "most reviewed".
+    const flaggedReviewers = await flaggedUserIDs(reviewsDocs.flat().flatMap(snap => snap.docs.map(doc => doc.data().userID)));
     reviewsDocs.flat().forEach(snap =>
       snap.docs.forEach(doc => {
+        if (flaggedReviewers.has(String(doc.data().userID))) return;
         const cid = doc.data().carID;
         if (cid) reviewCount[cid] = (reviewCount[cid] || 0) + 1;
       })
@@ -240,7 +263,9 @@ const getCarDetails = async (req, res) => {
 
     // 4. Fetch all reviews for this car
     const reviewsSnap = await db.collection("reviews").where("carID", "==", carID).get();
-    const reviews = reviewsSnap.docs.map((doc) => {
+    // Hide reviews written by a flagged customer (they stay visible to staff in the admin Reviews page).
+    const flaggedReviewers = await flaggedUserIDs(reviewsSnap.docs.map((d) => d.data().userID));
+    const reviews = reviewsSnap.docs.filter((doc) => !flaggedReviewers.has(String(doc.data().userID))).map((doc) => {
       const r = doc.data();
       // Public endpoint: never send the reviewer's real userID. A short one-way hash gives the
       // same reviewer the same label ("Customer 3fa9c1") without revealing who they are.
