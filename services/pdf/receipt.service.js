@@ -143,6 +143,20 @@ const renderStatementPdf = (s) => build(`${s.title} ${s.statementNo}`, (doc, k) 
   if (s.booking.vehicle) k.line("Vehicle", s.booking.vehicle);
   if (period) k.line("Rental period", period);
 
+  // booking fee: what the booking is made of. Zero fees are left out (Rental fee always shows).
+  if (s.charges?.fees) {
+    const f = s.charges.fees;
+    k.section("Booking fee");
+    k.line("Rental fee", php(f.rental));
+    if (f.service > 0) k.line("Service fee", php(f.service));
+    if (f.gateway > 0) k.line("Gateway fee", php(f.gateway));
+    if (f.extra > 0) k.line("Extra fee (outside base area)", php(f.extra));
+    if (f.driver > 0) k.line(`Driver's fee (${php(f.driver / f.days)} x ${f.days} day${f.days > 1 ? "s" : ""})`, php(f.driver));
+    if (s.charges.securityDeposit > 0) k.line("Security deposit (refundable)", php(s.charges.securityDeposit));
+    k.rule();
+    k.line("Total fee", php(s.charges.gross), { bold: true });
+  }
+
   // 1. payments
   k.section("Payments");
   if (!s.payments.length) k.note("No payments have been recorded yet.");

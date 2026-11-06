@@ -181,6 +181,21 @@ const renderStatementEmail = (s, { audience = "staff" } = {}) => {
   const period = day(s.booking.startDateTime) ? `${day(s.booking.startDateTime)} – ${day(s.booking.endDateTime) || "—"}` : null;
   const o = s.overall;
 
+  // ---- booking fee: what the booking is made of. Zero fees are left out (Rental fee always shows).
+  // "Total fee" is the booking's grand total before any discount.
+  const f = s.charges?.fees;
+  const feeCard = f ? card(`
+            ${boxTitle("Booking fee")}
+            ${lines(`
+              ${pair("Rental fee", peso(f.rental))}
+              ${f.service > 0 ? pair("Service fee", peso(f.service)) : ""}
+              ${f.gateway > 0 ? pair("Gateway fee", peso(f.gateway)) : ""}
+              ${f.extra > 0 ? pair("Extra fee (outside base area)", peso(f.extra)) : ""}
+              ${f.driver > 0 ? pair(`Driver's fee (${peso(f.driver / f.days)} × ${f.days} day${f.days > 1 ? "s" : ""})`, peso(f.driver)) : ""}
+              ${s.charges.securityDeposit > 0 ? pair("Security deposit (refundable)", peso(s.charges.securityDeposit)) : ""}
+              ${rule}
+              ${pair("Total fee", peso(s.charges.gross), true)}`)}`) + gap(22) : "";
+
   // ---- payments
   const paymentsCard = card(`
             ${boxTitle("Payments")}
@@ -274,6 +289,7 @@ const renderStatementEmail = (s, { audience = "staff" } = {}) => {
           ${row("Booking", s.booking.bookingID)}${row("Vehicle", s.booking.vehicle)}${row("Rental period", period)}
         </table>
         ${gap(22)}
+        ${feeCard}
         ${paymentsCard}
         ${pendingCard}
         ${gap(22)}
