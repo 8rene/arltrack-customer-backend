@@ -179,6 +179,11 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
     // paymongoFeeTotal by summing the rows' fees (hydratePayment), so it can never drift from them.
     const { paymongoFeeTotal: _derivedTotal, ...feeFields } = feePatch;
     const idField = phase === "balance" ? "balancePaymongoPaymentID" : "depositPaymongoPaymentID";
+    // A balance is only paid by its OWN PayMongo payment: if the payment id is the one that paid the deposit, this is
+    // the deposit's event arriving late or twice, and must not turn the balance into "paid".
+    if (phase === "balance" && paymongoPaymentID && view.depositPaymongoPaymentID && paymongoPaymentID === view.depositPaymongoPaymentID) {
+      return { state: "mismatch" };
+    }
     if (isPhasePaid(p, phase)) {
       // Already settled by another path — the fee (if it was missing) is filled into the row via `fields` below;
       // nothing is written to the payment document.
@@ -216,6 +221,10 @@ const settlePhasePayment = async ({ paymentRef, phase, paymongoPaymentID = null,
   });
 
   if (tx.state === "missing") return { settled: false, alreadyPaid: false, bookingStatus: null, phase };
+  if (tx.state === "mismatch") {
+    console.warn(`[settle] ignored a balance settlement for ${paymentRef.id}: the PayMongo payment is the deposit's own.`);
+    return { settled: false, alreadyPaid: false, bookingStatus: null, phase };
+  }
 
   // Mirror the settled state into paymentEntries (re-derived from the document; never throws, never
   // blocks the payment). Also runs when another path already settled it, so a missing row is filled in.

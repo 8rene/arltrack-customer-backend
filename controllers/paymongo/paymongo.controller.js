@@ -772,7 +772,10 @@ const handleWebhook = async (req, res) => {
 
       const paymentDoc = paymentSnap.docs[0];
       // The phase comes from WHICH checkout paid, not from the payment's current phase (see phaseForSession).
-      const phase      = (await phaseForSession(paymentDoc, sessionID)) || phaseOf(paymentDoc.data());
+      // If the session id isn't one we know (an old, replaced checkout), read the phase off the checkout itself
+      // (its line item says "(Balance)" for a balance checkout) before ever guessing from the payment's CURRENT
+      // phase. Guessing "balance" for a deposit checkout is what marked a balance paid with no balance payment.
+      const phase      = (await phaseForSession(paymentDoc, sessionID)) || phaseFromSessionPayload(session) || phaseOf(paymentDoc.data());
 
       // The checkout_session payload embeds the underlying PayMongo payment
       // under attributes.payments — that payment's own id (not the session id)
@@ -803,7 +806,7 @@ const handleWebhook = async (req, res) => {
       if (paymentSnap && !paymentSnap.empty) {
         const failedDoc     = paymentSnap.docs[0];
         const failedPayment = failedDoc.data();
-        const phase         = (await phaseForSession(failedDoc, sessionID)) || phaseOf(failedPayment);
+        const phase         = (await phaseForSession(failedDoc, sessionID)) || phaseFromSessionPayload(session) || phaseOf(failedPayment);
 
         // A "failed" event can arrive after the customer already retried
         // successfully on the same checkout page — never downgrade a paid phase.
@@ -976,6 +979,14 @@ const VALID_REFUND_REASONS = [
 // refunded; an unpaid ("to pay") booking has nothing to refund and is simply
 // cancelled instead.
 // ─────────────────────────────────────────────────────────────────────────────
+// "deposit" | "balance" judged from the checkout session's own line items (createPaymentLink names a balance checkout
+// "... (Balance)"), or null when the event carries no line items.
+const phaseFromSessionPayload = (session) => {
+  const names = (session?.attributes?.line_items || []).map((li) => String(li?.name || ""));
+  if (!names.length) return null;
+  return names.some((n) => /\(balance\)/i.test(n)) ? "balance" : "deposit";
+};
+
 const peso = (n) => `₱${Number(n || 0).toLocaleString()}`;
 
 // An open (Pending/Approved) refund request for this payment, if any.
