@@ -12,7 +12,9 @@ const loadOwnedBooking = async (userID, bookingID) => {
   const doc = await db.collection("bookings").doc(String(bookingID)).get();
   if (!doc.exists) return null;
   const booking = doc.data();
-  return booking.userID === userID ? { ...booking, bookingID: doc.id } : null;
+  // storedBookingID = the bookingID field as saved in the document (normally the same as the doc id; the admin app
+  // may have filed older records under either, so the inspection lookup tries both).
+  return booking.userID === userID ? { ...booking, bookingID: doc.id, storedBookingID: booking.bookingID || null } : null;
 };
 
 // The REAL pickup/return instants. Newer bookings store the exact pickup (`pickupAt`); older

@@ -209,7 +209,9 @@ const planOnlinePayment = (unpaid = [], { depositCover = 0, fallbackPercent = 0,
     if (left <= 0) break;
     const part = Math.min(owedOn(p), left);
     left = round2(left - part);
-    items.push({ penaltyID: p.penaltyID || (p._ref && p._ref.id) || p.id, owed: part, gatewayFeeRate: p.gatewayFeeRate, penaltyTotal: p.amount });
+    // penaltyTotal = what decides whether the fee applies: the money paid ONLINE for this penalty (`part`), not the penalty's
+    // full amount. A penalty of P1,500 with P700 covered by the deposit pays P800 online, which is not above the threshold.
+    items.push({ penaltyID: p.penaltyID || (p._ref && p._ref.id) || p.id, owed: part, gatewayFeeRate: p.gatewayFeeRate, penaltyTotal: part });
   }
   return { unpaidTotal: all, coveredByDeposit, onlineDue, ...computePenaltyCheckoutFees(items, fallbackPercent, threshold) };
 };
@@ -286,7 +288,7 @@ const settlePenaltyCheckout = async ({ groupID, paymongoPaymentID = null, charge
       const planned = num(r.amount);
       const apply = p && p.userID === userID ? Math.min(owedOn(p), planned) : 0;
       const rate = p && p.gatewayFeeRate !== undefined && p.gatewayFeeRate !== null && p.gatewayFeeRate !== "" ? p.gatewayFeeRate : settings.gatewayFeePercent;
-      const penaltyTotal = p ? p.amount : null;   // the penalty's own amount decides whether a fee applies at all
+      const penaltyTotal = planned;   // the money paid online on this row decides whether a fee applies (same test as the checkout)
       const threshold = settings.penaltyThreshold;   // the same setting the checkout used, so the fee kept equals the fee charged
       const feeCharged = computePenaltyGatewayFee(planned, rate, penaltyTotal, threshold).gatewayFee;   // what the customer paid on this row
       const feeKept = apply > 0 ? computePenaltyGatewayFee(apply, rate, penaltyTotal, threshold).gatewayFee : 0;

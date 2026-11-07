@@ -262,10 +262,10 @@ const computeFeeBreakdown = ({
 };
 
 // ── Online payment (gateway) fee on a PENALTY ───────────────────────────────
-// Paying a penalty online adds the gateway fee ONLY when the penalty itself is HIGHER than this many pesos. A penalty of exactly
-// this amount or less carries no fee (the business absorbs PayMongo's cut). The test is on the penalty's own amount, never on
-// the part paid online, so a penalty gets the same answer however it is paid (all online, partly from the deposit, or in
-// several payments). The fee is then charged on the part that IS paid online. The threshold is System Settings'
+// Paying a penalty online adds the gateway fee ONLY when the money paid online for that penalty is HIGHER than this many
+// pesos. Exactly this amount or less carries no fee (the business absorbs PayMongo's cut). The test is on the part paid
+// ONLINE, not on the penalty's full amount: a P1,500 penalty with P700 covered by the deposit pays P800 online and carries
+// no fee. The fee is then charged on that online part. The threshold is System Settings'
 // penaltyThreshold (admin-editable); PENALTY_FEE_MIN_AMOUNT is only the fallback for when it isn't available. Receipts do not
 // re-check it: they only show a fee when the penalty's gatewayFeePaid says one was charged.
 const PENALTY_FEE_MIN_AMOUNT = SETTINGS_DEFAULTS.penaltyThreshold;

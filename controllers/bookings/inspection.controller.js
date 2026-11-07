@@ -34,6 +34,11 @@ const PHOTO_COLLECTION = { before: "vehicleDocumentationBeforeTrip", after: "veh
 // cancellation_request = an ONGOING trip with a pending cancel request, so it counts as ongoing here.
 const SHOWN_STATUSES = new Set(["upcoming", "ongoing", "cancellation_request", "completed"]);
 const SIGNED_URL_TTL_MS = 60 * 60 * 1000; // 1 hour
+// Staff confirming an inspection is the moment the customer is told "your car was checked" (and a driver, if there
+// is one, can already see it). So a CONFIRMED inspection is shown straight away; before this the photos stayed hidden
+// until the plate-reveal time, which left the customer with a notification and nothing to open. Set to false to go
+// back to "nothing until the plate-reveal time" (the exterior photos can show the plate).
+const SHOW_CONFIRMED_BEFORE_REVEAL = true;
 const EXTERIOR_FIELDS = [["frontViewUrl", "Front"], ["sideViewUrl", "Side"], ["backViewUrl", "Back"]];
 
 const isSelfDrive = (booking) => /self/i.test(String(booking?.modeOfDriving || ""));
@@ -145,18 +150,26 @@ const getBookingInspection = async (req, res) => {
     // treated like a self-drive one here — the chauffeur "plate shows when the driver is on the way" rule can never
     // be met without a driver.
     const reveal = plateForBooking({ ...booking, modeOfDriving: "Self Drive", status: status === "cancellation_request" ? "ongoing" : status }, "X");
-    if (!reveal.plateNumber) return res.json({ applicable: false, availableFrom: reveal.plateRevealsAt });
+    const revealed = !!reveal.plateNumber;
 
-    const id = booking.bookingID;
+    // Records are looked up under BOTH ids, like the driver's view does: the admin app may have filed them under the
+    // booking's own bookingID field or under the document id.
+    const keys = [...new Set([booking.bookingID, booking.storedBookingID].filter(Boolean).map(String))];
+    const byKey = (col) => (keys.length === 1 ? db.collection(col).where("bookingID", "==", keys[0]) : db.collection(col).where("bookingID", "in", keys));
     const [bPhoto, aPhoto] = await Promise.all([
-      db.collection(PHOTO_COLLECTION.before).where("bookingID", "==", id).get(),
-      db.collection(PHOTO_COLLECTION.after).where("bookingID", "==", id).get(),
+      byKey(PHOTO_COLLECTION.before).get(),
+      byKey(PHOTO_COLLECTION.after).get(),
     ]);
 
+    // From the plate-reveal time everything recorded is shown. Before it, only an inspection staff have CONFIRMED
+    // (the customer has been notified of exactly that); a half-finished upload stays hidden.
+    const shown = (doc) => (doc && (revealed || (SHOW_CONFIRMED_BEFORE_REVEAL && doc.inspectionConfirmed)) ? doc : null);
     const [before, after] = await Promise.all([
-      buildPhase(mergePhotoDocs(bPhoto)),
-      buildPhase(mergePhotoDocs(aPhoto)),
+      buildPhase(shown(mergePhotoDocs(bPhoto))),
+      buildPhase(shown(mergePhotoDocs(aPhoto))),
     ]);
+
+    if (!revealed && !before && !after) return res.json({ applicable: false, availableFrom: reveal.plateRevealsAt });
 
     return res.json({ applicable: true, before, after, linksExpireInMinutes: SIGNED_URL_TTL_MS / 60000 });
   } catch (error) {
