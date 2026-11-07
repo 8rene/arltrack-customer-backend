@@ -54,7 +54,6 @@ const sendGenericEmail = async ({ toEmail, subject, bodyHtml }) => {
       payload,
       { headers: { "Content-Type": "application/json" } }
     );
-    console.log(`✅ Email sent to ${toEmail}: ${subject}`);
     return { success: true };
   } catch (error) {
     const detail = error.response?.data || error.message;

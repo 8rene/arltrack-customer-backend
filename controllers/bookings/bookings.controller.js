@@ -4,7 +4,7 @@ const { checkTermsAcceptance, termsRequired } = require("../../utils/terms/terms
 const { makeZone } = createBookingSession;
 const { computeBookingFees, computePaymentSplit, derivePaymentStatus, getBaseAreaConfig, getBookingLeadHours } = require("../../utils/pricing");
 const {
-  toManila, manilaDayRange, cityMatchesRule, parseCodingTime, parseBannedDigits, fmtCodingMins, ruleDay,
+  toManila, manilaDayRange, cityMatchesRule, parseCodingTime, parseBannedDigits, fmtCodingMins,
   buildCodingLocations, evaluateCodingRange, codingBlockMessage, codingWarningMessage,
 } = require("../../utils/bookings/codingRange.util");
 const { recordAudit } = require("../../utils/auditLogs/auditLogs.util");
@@ -1501,37 +1501,7 @@ const checkCodingRule = async (req, res) => {
     });
 
     if (!result.violations.length) {
-      // TEMPORARY DIAGNOSTIC (non-production only): why did no rule match? Shows up in the
-      // Network tab response as `debug`. Remove once the coding check is confirmed working.
-      let debug;
-      if (process.env.NODE_ENV !== "production") {
-        const locs = buildCodingLocations({ destination, destinationCity, codingStops, pickup, pickupCity });
-        const dayInfo = toManila(bookingStart);
-        const dow = new Date(`${dayInfo.day}T00:00:00Z`).getUTCDay() || 7;
-        debug = {
-          note: "temporary diagnostic — no rule matched",
-          plateLastDigit: lastDigit,
-          rulesLoaded: codingRules.length,
-          bookingStartManila: dayInfo.day,
-          bookingStartWeekday_Mon1_Sun7: dow,
-          locationsChecked: locs.map((l) => ({ id: l.id, city: l.destinationCity, address: l.destination })),
-          // every rule that falls on the start day, with the result of each test
-          rulesOnThatWeekday: codingRules
-            .filter((r) => ruleDay(r) === dow)
-            .slice(0, 40)
-            .map((r) => ({
-              city: r.city,
-              dayOfWeek: r.dayOfWeek,
-              startTime: JSON.stringify(r.startTime),
-              endTime: JSON.stringify(r.endTime),
-              bannedDigits: r.bannedDigits,
-              timeParsed: parseCodingTime(r.startTime) !== null && parseCodingTime(r.endTime) !== null,
-              digitBanned: parseBannedDigits(r.bannedDigits).includes(lastDigit),
-              cityMatchesAnyLocation: locs.some((l) => cityMatchesRule(r.city, l.destinationCity, l.destination)),
-            })),
-        };
-      }
-      return res.status(200).json({ blocked: false, holidays: holidayList, holidaysSkipped: result.holidaysSkipped, ...legacyHoliday, ...(debug ? { debug } : {}) });
+      return res.status(200).json({ blocked: false, holidays: holidayList, holidaysSkipped: result.holidaysSkipped, ...legacyHoliday });
     }
 
     if (result.mode === "block") {

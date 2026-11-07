@@ -84,37 +84,6 @@ const loadDriverRoster = async () => {
 const loadEligibleDrivers = async () =>
   (await loadDriverRoster()).filter((d) => !d.blocked).map(({ id, expiry }) => ({ id, expiry }));
 
-// ── Debug log ─────────────────────────────────────────────────────────────────
-// One readable block per calendar / clock request: which Driver accounts exist, which of them count on the
-// first day and why (blocked status, license expired before that day, ...), and every chauffeur booking that
-// is using up a driver (assigned or not). Server console only, never returned to the customer.
-// Throttled to once every 10 s per label so a busy calendar does not flood the log.
-const lastSnapshotAt = {};
-const iso = (d) => (d ? asDate(d).toISOString().slice(0, 16).replace("T", " ") + "Z" : "-");
-const logSnapshot = (label, { roster, bookings, bufferMs, at, result }) => {
-  if (Date.now() - (lastSnapshotAt[label] || 0) < 10 * 1000) return;
-  lastSnapshotAt[label] = Date.now();
-  try {
-    const counted = (d) => !d.blocked;
-    const reason = (d) => {
-      if (d.blocked) return `NOT counted (status ${d.status})`;
-      if (d.expiry && d.expiry < at) return `counted (WARNING: license expired ${iso(d.expiry)}; admin only warns, so still counted)`;
-      return d.expiry ? `counted (license valid until ${iso(d.expiry)})` : "counted (no license date on file)";
-    };
-    const lines = [
-      `[driverCapacity] ${label} | checked for ${iso(at)} | buffer ${Math.round(bufferMs / MINUTE_MS)} min`,
-      `  Driver accounts: ${roster.length} | counted: ${roster.filter(counted).length}`,
-      ...roster.map((d) => `    - ${d.id} status=${d.status} -> ${reason(d)}`),
-      `  Chauffeur bookings using a driver (to pay / upcoming / ongoing): ${bookings.length}`,
-      ...bookings.map((b) => `    - ${b.bookingID || "?"} car=${b.carID || "?"} ${b.status} ${iso(b.startDateTime)} -> ${iso(b.endDateTime)}`),
-    ];
-    if (result) lines.push(`  Result: ${result}`);
-    console.log(lines.join("\n"));
-  } catch (err) {
-    console.warn("[driverCapacity] snapshot log failed:", err.message);
-  }
-};
-
 // Drivers who could take a trip ending at `tripEnd`. Same rule as the admin dispatch board: every Driver
 // account that is not inactive / locked. License expiry is a warning on the admin side, not a block, so it
 // is not used here (see the note at the top of this file).
@@ -229,7 +198,6 @@ const checkChauffeurCapacity = async ({ startDateTime, endDateTime, tx = null, e
 
   const bookings = await readChauffeurBookings(tx);
   const peak = computePeakOverlap(bookings, start, end, buffer, now);
-  console.log(`[driverCapacity] trip check ${iso(start)} -> ${iso(end)}${tx ? " (booking transaction)" : ""}: drivers counted=${capacity}, busiest overlap=${peak}, bookings with driver=${bookings.length} -> ${peak < capacity ? "AVAILABLE" : "FULL"}`);
   return { available: peak < capacity, capacity, peak };
 };
 
@@ -373,7 +341,6 @@ const getFullChauffeurDays = async ({ fromDay, toDay, now = new Date() }) => {
   const drivers = roster.filter((d) => !d.blocked);
   const capacityAt = () => drivers.length; // license expiry does not reduce capacity (admin only warns)
   const fullDays = computeFullDays(bookings, days, capacityAt, bufferMs, now);
-  if (days.length) logSnapshot(`calendar(full) ${fromDay}..${toDay}`, { roster, bookings, bufferMs, at: manilaDayStart(days[0]), result: `full days = ${fullDays.length ? fullDays.join(", ") : "none"}` });
   return fullDays;
 };
 
@@ -390,15 +357,6 @@ const getChauffeurDayAvailability = async ({ fromDay, toDay, now = new Date() })
     if (blocks[day].full) fullDays.push(day);
     else if (blocks[day].blocked.length) partialDays.push(day);
   }
-  if (days.length) {
-    // A day with 0 drivers counted is shaded full even with no bookings -- say so, it is the usual "whole month orange" cause.
-    const noDriverDays = days.filter((d) => capacityAt(manilaDayStart(d)) <= 0);
-    logSnapshot(`calendar ${fromDay}..${toDay}`, {
-      roster, bookings, bufferMs, at: manilaDayStart(days[0]),
-      result: `full=${fullDays.length} partial=${partialDays.length}` +
-        (noDriverDays.length ? ` | ${noDriverDays.length} day(s) have ZERO drivers counted (${noDriverDays[0]}..${noDriverDays[noDriverDays.length - 1]}), so they show full with no bookings needed` : ""),
-    });
-  }
   return { fullDays, partialDays };
 };
 
@@ -408,7 +366,6 @@ const getChauffeurPickupTimes = async ({ day, hours, now = new Date() }) => {
   const drivers = roster.filter((d) => !d.blocked);
   const capacityAtEnd = () => drivers.length; // license expiry does not reduce capacity (admin only warns)
   const times = computePickupTimes(bookings, day, hours, capacityAtEnd, bufferMs, now);
-  logSnapshot(`pickup times ${day} (${hours}h)`, { roster, bookings, bufferMs, at: manilaDayStart(day), result: `${times.length} pickup time(s) offered` });
   return times;
 };
 
