@@ -66,7 +66,7 @@ const createReview = async (req, res) => {
     const reviewCarID = bookedCarID || (typeof carID === "string" ? carID : "");
     if (!reviewCarID) return res.status(400).json({ message: "carID is required." });
 
-    const alreadyMessage = "You already reviewed this booking. Edit your existing review instead.";
+    const alreadyMessage = "You already reviewed this booking. A booking can only be reviewed once.";
 
     // Reviews written before the ID scheme above have random IDs — catch those by lookup.
     const existing = await db.collection("reviews")
@@ -103,38 +103,10 @@ const createReview = async (req, res) => {
 };
 
 // PUT /api/reviews/:reviewID
+// A booking can be reviewed ONCE and the review is final, so editing is refused. (The route stays so an old
+// copy of the app gets a clear message instead of a 404.)
 const updateReview = async (req, res) => {
-  const { reviewID } = req.params;
-  const userID = req.user.userID; // from verified JWT — never trust body
-  const { rating, comment } = req.body || {};
-  if (!reviewID) return res.status(400).json({ message: "reviewID is required." });
-
-  // Validate before converting — Number(undefined) = NaN which Firestore silently stores
-  let parsedRating;
-  if (rating !== undefined) {
-    parsedRating = parseRating(rating);
-    if (parsedRating === null) {
-      return res.status(400).json({ message: "rating must be a whole number between 1 and 5." });
-    }
-  }
-  const cleaned = cleanComment(comment);
-  if (cleaned.error) return res.status(400).json({ message: cleaned.error });
-
-  try {
-    const doc = await db.collection("reviews").doc(reviewID).get();
-    if (!doc.exists) return res.status(404).json({ message: "Review not found." });
-    if (doc.data().userID !== userID) return res.status(403).json({ message: "Not authorized." });
-
-    const updateData = { comment: cleaned.value, updatedAt: new Date() };
-    // Only overwrite rating if one was actually provided
-    if (parsedRating !== undefined) updateData.rating = parsedRating;
-
-    await db.collection("reviews").doc(reviewID).update(updateData);
-    return res.status(200).json({ message: "Review updated." });
-  } catch (err) {
-    console.error("updateReview error:", err);
-    return res.status(500).json({ message: "Failed to update review." });
-  }
+  return res.status(403).json({ message: "Reviews can't be edited once they are submitted." });
 };
 
 // GET /api/reviews/user/:userID
