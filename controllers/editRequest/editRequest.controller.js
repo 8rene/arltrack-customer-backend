@@ -23,12 +23,28 @@ const STAFF_NOTIFY_ROLE_IDS = [
 // admin's applyProfileChanges only buckets into user/userDetails/userAddress,
 // so bundling a "userDocument" field would crash the admin's approve button.
 const FIELD_META = {
+  username:     { label: "Username",             collection: "user" },
+  firstName:    { label: "First Name",           collection: "userDetails" },
+  middleName:   { label: "Middle Name",          collection: "userDetails" },
+  lastName:     { label: "Last Name",            collection: "userDetails" },
+  suffix:       { label: "Suffix",               collection: "userDetails" },
+  street:       { label: "Street / House No.",   collection: "userAddress" },
   email:        { label: "Email",               collection: "user" },
   phone:        { label: "Phone",                collection: "user" },
   birthDate:    { label: "Birth Date",           collection: "userDetails" },
   province:     { label: "Province",             collection: "userAddress" },
   municipality: { label: "Municipality / City",  collection: "userAddress" },
   barangay:     { label: "Barangay",             collection: "userAddress" },
+};
+
+// Length rules for the text fields (min 1 = required).
+const TEXT_RULES = {
+  username:   { label: "Username",           min: 3, max: 30  },
+  firstName:  { label: "First name",         min: 1, max: 50  },
+  middleName: { label: "Middle name",        min: 0, max: 50  },
+  lastName:   { label: "Last name",          min: 1, max: 50  },
+  suffix:     { label: "Suffix",             min: 0, max: 10  },
+  street:     { label: "Street / house no.", min: 1, max: 120 },
 };
 
 const toMillis = (t) => t?.toDate?.() ? t.toDate().getTime() : (t ? new Date(t).getTime() : 0);
@@ -48,6 +64,12 @@ const getCurrentValues = async (userID) => {
   const primaryAddress = addresses.find((a) => a.isDefault) || addresses[0] || {};
 
   return {
+    username:     user.username             || "",
+    firstName:    details.firstName         || "",
+    middleName:   details.middleName        || "",
+    lastName:     details.lastName          || "",
+    suffix:       details.suffix            || "",
+    street:       primaryAddress.street     || "",
     email:        user.email                || "",
     phone:        user.phone                || "",
     birthDate:    details.birthDate         || "",
@@ -97,6 +119,25 @@ const createEditRequest = async (req, res) => {
 
     if (cleanChanges.length === 0) {
       return res.status(400).json({ message: "No valid changes were submitted." });
+    }
+
+    // The same rules the profile used when it saved these directly (names and street can't be blanked;
+    // middle name and suffix may be), checked here so the API can't be used to skip them.
+    for (const c of cleanChanges) {
+      const rule = TEXT_RULES[c.field];
+      if (!rule) continue;
+      if (c.newValue.length === 0 && rule.min > 0) return res.status(400).json({ message: `${rule.label} is required.` });
+      if (c.newValue.length < rule.min) return res.status(400).json({ message: `${rule.label} must be at least ${rule.min} characters.` });
+      if (c.newValue.length > rule.max) return res.status(400).json({ message: `${rule.label} must be ${rule.max} characters or fewer.` });
+    }
+    // Usernames are stored lowercase and must be unique (same rule as signup).
+    const usernameChange = cleanChanges.find((c) => c.field === "username");
+    if (usernameChange) {
+      usernameChange.newValue = usernameChange.newValue.toLowerCase();
+      const taken = await db.collection("user").where("username", "==", usernameChange.newValue).limit(2).get();
+      if (taken.docs.some((d) => d.id !== userID)) {
+        return res.status(409).json({ message: "Username is already taken." });
+      }
     }
 
     const now = admin.firestore.FieldValue.serverTimestamp();

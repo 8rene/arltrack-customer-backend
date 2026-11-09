@@ -23,14 +23,16 @@ const STAFF_NOTIFY_ROLE_IDS = [
 // Identity / contact / address fields are checked by staff against the ID the
 // customer submitted at signup, so they can ONLY change through the admin-approved
 // edit-request flow (POST /api/user/edit-requests — see editRequest.controller.js).
-// These endpoints used to accept them directly, which skipped that approval.
+// That now includes the username, the name fields and the street: the profile page no
+// longer has any inline edit, so these two endpoints refuse every profile field.
 // ────────────────────────────────────────────────────────────
 const APPROVAL_REQUIRED_FIELDS = [
   "email", "phone", "birthDate",
-  "region", "province", "city", "municipality", "barangay", "postalCode", "zipCode",
+  "username", "firstName", "lastName", "middleName", "suffix",
+  "region", "province", "city", "municipality", "barangay", "street", "village", "postalCode", "zipCode",
 ];
 const APPROVAL_MESSAGE =
-  "Email, phone, birth date and address (province / city / barangay) changes need admin approval. " +
+  "Profile changes (username, name, email, phone, birth date and address) need admin approval. " +
   "Please submit an edit request from your profile instead.";
 const hasApprovalField = (body) =>
   !!body && APPROVAL_REQUIRED_FIELDS.some((f) => body[f] !== undefined);
