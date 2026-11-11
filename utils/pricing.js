@@ -8,7 +8,7 @@
 // means anyone could open devtools and submit a booking — or a PayMongo
 // checkout — for any amount they wanted.
 //
-// Fee AMOUNTS (SERVICE_FEE, GATEWAY_FEE, extraFeeOutsideArea,
+// Fee AMOUNTS (SERVICE_FEE, GATEWAY_FEE,
 // driversFeeBaseArea, driversFeeOutsideArea, baseAreaKeywords) now come from
 // the same systemSettings Firestore doc the admin panel's System Settings
 // page writes to (arltrack-admin-backend/services/systemSettings). This is
@@ -29,7 +29,6 @@ const SETTINGS_DEFAULTS = {
   // Percentages (0-100), NOT flat pesos — see computeFeeBreakdown() below.
   serviceFeePercent: 5,
   gatewayFeePercent: 5,
-  extraFeeOutsideArea: 500,
   // Refundable security deposit — same field the admin System Settings page
   // edits (systemSettings.securityDepositAmount). Now collected as part of
   // the booking's grand total, not separately at pickup.
@@ -132,10 +131,10 @@ const isBaseArea = (destination, { destinationCity, destinationProvince, destina
 // How the "outside the base area" charge works — it is ONE yes/no flag (like a checkbox):
 // if the PICKUP or ANY destination (the main one or an additional stop) is outside the
 // base area, the surcharge applies ONCE. More locations outside never add it again.
-//   - Self-drive (no driver): the surcharge is the separate EXTRA FEE (+extraFeeOutsideArea).
-//   - With a driver: the surcharge is already inside the DRIVER'S FEE — it is
-//     driversFeeBaseArea normally and driversFeeOutsideArea when the flag is on
-//     (e.g. 1,000 -> 1,500). No separate extra fee is added on top, so it is never charged twice.
+//   - The surcharge is INSIDE the DRIVER'S FEE: driversFeeBaseArea normally and driversFeeOutsideArea when
+//     the flag is on (e.g. 1,000 -> 1,500 per day), so the "extra" is the difference of the two rates.
+//   - There is no separate extra fee any more (the old extraFeeOutsideArea setting is no longer read), and a
+//     self-drive booking is never charged for being outside the area.
 // Pickup itself can be anywhere in the Philippines; the base area only changes fees.
 const BASE_AREA_BASIS = "either";
 
@@ -188,7 +187,6 @@ const getBaseAreaConfig = async () => {
   return {
     baseAreaKeywords: (Array.isArray(settings.baseAreaKeywords) ? settings.baseAreaKeywords : []).map((k) => String(k).trim()).filter(Boolean),
     basis: BASE_AREA_BASIS,
-    extraFeeOutsideArea:   Number(settings.extraFeeOutsideArea)   || 0,
     driversFeeBaseArea:    Number(settings.driversFeeBaseArea)    || 0,
     driversFeeOutsideArea: Number(settings.driversFeeOutsideArea) || 0,
     bookingLeadHours:      leadHoursFrom(settings),
@@ -334,16 +332,16 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   // to slip through even with days === 0 and show a phantom price before
   // the customer had picked any dates.
   if (days === 0) {
-    return { ...areaFlags, extraFeeOutsideArea: Number(settings.extraFeeOutsideArea) || 0, driversFeeBaseArea: Number(settings.driversFeeBaseArea) || 0, driversFeeOutsideArea: Number(settings.driversFeeOutsideArea) || 0, days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, gatewayFeeBase: 0, serviceFeeRate: pct(settings.serviceFeePercent), gatewayFeeRate: pct(settings.gatewayFeePercent), securityDeposit: 0, grandTotal: 0 };
+    return { ...areaFlags, driversFeeBaseArea: Number(settings.driversFeeBaseArea) || 0, driversFeeOutsideArea: Number(settings.driversFeeOutsideArea) || 0, days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, gatewayFeeBase: 0, serviceFeeRate: pct(settings.serviceFeePercent), gatewayFeeRate: pct(settings.gatewayFeePercent), securityDeposit: 0, grandTotal: 0 };
   }
 
   const rentalFee = days * (Number(pricePerDay) || 0);
 
-  // ONE outside-area surcharge, charged once (pickup OR any destination outside):
-  //   with a driver -> it is the higher driver's fee (no separate extra fee on top)
-  //   self-drive    -> it is the separate extra fee
+  // ONE outside-area surcharge, charged once (pickup OR any destination outside): it is the higher driver's fee
+  // below. There is no separate extra fee any more; extraFee stays in the result (always 0) so stored payments,
+  // receipts and older bookings keep the same shape.
   const isChauffeur = driveType === "chauffeur";
-  const extraFee   = (areaFlags.outsideArea && !isChauffeur) ? settings.extraFeeOutsideArea : 0;
+  const extraFee   = 0;
   // The driver is paid PER DAY: each billable day costs the base-area rate (e.g. 1,000) or the outside-area rate
   // (e.g. 1,500), and the days add up (3 days x 1,000 = 3,000). The outside-area flag is still one yes/no for the booking.
   const driversFeePerDay = isChauffeur ? (areaFlags.outsideArea ? settings.driversFeeOutsideArea : settings.driversFeeBaseArea) : 0;
@@ -365,7 +363,6 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
     // Where the "outside the base area" charge came from — the booking page uses
     // these to say WHICH location is outside (pickup and/or destination).
     ...areaFlags,
-    extraFeeOutsideArea: Number(settings.extraFeeOutsideArea) || 0,
     // Both rates are always returned (even before dates/destination are picked)
     // so the booking page can show what "With Driver" costs up front.
     driversFeeBaseArea:    Number(settings.driversFeeBaseArea)    || 0,

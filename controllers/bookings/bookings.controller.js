@@ -1678,7 +1678,7 @@ const getDriverPickupTimes = async (req, res) => {
 // GET /api/bookings/base-area   (no auth — read-only, same data the quote already reveals)
 // Returns the admin's base-area keywords + the out-of-area fee amounts so the map can
 // shade the base area and the booking page can explain the extra charges up front.
-// { baseAreaKeywords, basis, extraFeeOutsideArea, driversFeeBaseArea, driversFeeOutsideArea }
+// { baseAreaKeywords, basis, driversFeeBaseArea, driversFeeOutsideArea }
 // ─────────────────────────────────────────────────────────────────────────────
 const getBaseArea = async (req, res) => {
   try {

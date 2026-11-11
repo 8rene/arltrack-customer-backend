@@ -95,6 +95,9 @@ const createReview = async (req, res) => {
       }
       throw err;
     }
+    // Keep the booking's isReviewed flag true (it was created as false and nothing ever flipped it). Best effort: the
+    // review itself is already saved, so a failure here must not make the request fail.
+    try { await bookingSnap.docs[0].ref.update({ isReviewed: true }); } catch (e) { console.error("createReview isReviewed flag:", e); }
     return res.status(201).json({ message: "Review created.", reviewID });
   } catch (err) {
     console.error("createReview error:", err);
