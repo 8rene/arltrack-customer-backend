@@ -59,7 +59,7 @@ const createNotification = async ({ type, userID, refID, title, message, refColl
  * Never throws — a notification failure must not fail the booking/refund
  * action that triggered it.
  */
-const notifyStaff = async ({ type, refID, refCollection = "bookings", title, message }) => {
+const notifyStaff = async ({ type, refID, refCollection = "bookings", title, message, dedupeKey = null }) => {
   try {
     const staffSnap = await db.collection("user")
       .where("roleID", "in", [ROLE_IDS.OWNER, ROLE_IDS.ADMIN, ROLE_IDS.SUPERVISOR])
@@ -67,7 +67,7 @@ const notifyStaff = async ({ type, refID, refCollection = "bookings", title, mes
 
     await Promise.all(
       staffSnap.docs.map((d) =>
-        createNotification({ type, refID, refCollection, title, message, userID: d.id })
+        createNotification({ type, refID, refCollection, title, message, userID: d.id, dedupeKey })
       )
     );
   } catch (err) {

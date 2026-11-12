@@ -38,7 +38,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const { buildPenaltyPaymentEntry } = require("./paymentEntries.mapper");
 const { recordTransactionLog } = require("../transactionLogs/transactionLogs.util");
 const { recordAudit } = require("../auditLogs/auditLogs.util");
-const { createNotification } = require("../../services/notification/notification.service");
+const { createNotification, notifyStaff } = require("../../services/notification/notification.service");
 const { getSystemSettings, computePenaltyGatewayFee, computePenaltyCheckoutFees } = require("../pricing");
 const { getDepositView } = require("./depositView.util");
 const { getDiscountFigures } = require("./discountLedger.util");
@@ -375,6 +375,33 @@ const settlePenaltyCheckout = async ({ groupID, paymongoPaymentID = null, charge
     message: `We received your online payment of ₱${co.applied.toLocaleString()} for the penalties on booking ${co.bookingID}`
       + `${co.gatewayFee > 0 ? ` (plus a ₱${co.gatewayFee.toLocaleString()} online payment fee)` : ""}. Thank you!`,
   }).catch((e) => console.error("[penalty-pay] notification failed:", e.message));
+
+  // Staff (Owner / Admin / Supervisor) hear about it too, like a paid booking does. Opens the penalty on the admin
+  // Penalties page (a checkout can cover several penalties: the first one is linked). dedupeKey = the checkout, so a
+  // second payment on the same booking is its own notification instead of being swallowed by the first one's.
+  // If none of the money could be applied (the penalties were settled meanwhile) the title says a refund is needed.
+  try {
+    let who = "A customer";
+    try {
+      const d = await db.collection("userDetails").doc(co.userID).get();
+      const { firstName = "", lastName = "" } = d.exists ? d.data() : {};
+      who = [firstName, lastName].filter(Boolean).join(" ").trim() || who;
+    } catch { /* the name is only for the message */ }
+    const nothingApplied = !(co.applied > 0);
+    await notifyStaff({
+      type: "penalty_paid",
+      refID: firstApplied.penaltyID || co.bookingID,
+      refCollection: firstApplied.penaltyID ? "penalties" : "bookings",
+      dedupeKey: co.groupID,
+      title: nothingApplied ? "Penalty payment needs a refund" : "Penalty paid online",
+      message: nothingApplied
+        ? `${who} paid ₱${returnDue.toLocaleString()} online via ${label} for booking ${co.bookingID}, but the penalties were already settled. It needs a manual refund.`
+        : `${who} paid ₱${co.applied.toLocaleString()} of penalties${co.gatewayFee > 0 ? ` (+ ₱${co.gatewayFee.toLocaleString()} online payment fee)` : ""} on booking ${co.bookingID} online via ${label}.`
+          + `${returnDue > 0 ? ` ₱${returnDue.toLocaleString()} could not be applied (already settled) and needs a manual refund.` : ""}`,
+    });
+  } catch (e) {
+    console.error("[penalty-pay] staff notification failed:", e.message);
+  }
 
   return result;
 };
