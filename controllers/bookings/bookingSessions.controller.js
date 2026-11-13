@@ -206,6 +206,9 @@ const getBookingDetails = async (req, res) => {
         // (see getUserBookings, which does the exact same thing). 0 only
         // if there's genuinely no payment yet.
         totalFee:       payment?.amount        || 0,
+        // When the booking was made (shown as "Booked On"), and whether the customer already reviewed the trip.
+        createdAt:      booking.createdAt      || null,
+        isReviewed:     !!booking.isReviewed,
       },
       // Pins — null if this booking predates the coordinate-capture change,
       // or if the customer typed an address without using the map.
@@ -303,3 +306,4 @@ const getArrival = async (req, res) => {
 };
 
 module.exports = { getBookingDetails, getArrival };
+WWWWWWWWWWWWWWWWWWWWWWWWESD
