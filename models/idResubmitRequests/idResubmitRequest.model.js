@@ -1,7 +1,8 @@
 // idResubmitRequests/{requestID} -- a customer sending a new driver's license or ID document for staff review.
-// Shape only: created by submitIdResubmitRequest in controllers/user/user.controller.js (auto-generated doc ID, not a field);
+// Shape only: created by submitIdResubmitRequest in controllers/user/user.controller.js (auto-generated doc ID, also stored as the idResubmitRequestID field; requests created before that field existed don't have it);
 // reviewed by the admin backend (services/profileRequests).
 const IdResubmitRequest = {
+  idResubmitRequestID: "", // this document's own ID (same value as the document ID)
   userID: "",
   role: "Customer",
   documentKind: "",    // "license" | "document"

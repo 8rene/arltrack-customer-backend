@@ -65,9 +65,9 @@ const sendPdf = (res, buffer, name) => {
 
 // One email send, with the shared limit: claimed in a transaction BEFORE sending (two quick taps, or a staff member and the
 // customer at the same time, cannot both pass) and handed back if the send fails.
-const emailDocument = async (res, { key, toEmail, subject, bodyHtml, userID, sentLabel, masked }) => {
+const emailDocument = async (res, { key, toEmail, subject, bodyHtml, userID, sentLabel, masked, meta }) => {
   if (!toEmail) return res.status(422).json({ message: "There is no email address on your account." });
-  const slot = await emailLimiter.claim(key, userID);
+  const slot = await emailLimiter.claim(key, userID, meta);
   if (!slot.ok) {
     return res.status(429).json({
       message: `This ${sentLabel} was just emailed. Please wait ${Math.ceil(slot.wait / 60)} more minute(s) before sending it again.`,
@@ -100,6 +100,7 @@ const emailStatement = async (req, res) => {
     return emailDocument(res, {
       key: emailKeyFor.statement(built.booking.bookingID), toEmail: built._email, subject, bodyHtml,
       userID: req.user.userID, sentLabel: "statement", masked: built.customer.emailMasked,
+      meta: { type: "statement", bookingID: built.booking.bookingID },
     });
   } catch (err) { return fail(res, err, "statement-email"); }
 };
@@ -122,6 +123,7 @@ const emailReceipt = async (req, res) => {
     return emailDocument(res, {
       key: emailKeyFor.receipt(built.receiptNo), toEmail: built._email, subject, bodyHtml,
       userID: req.user.userID, sentLabel: "receipt", masked: built.customer.emailMasked,
+      meta: { type: built.kind, bookingID: built.booking.bookingID, receiptNo: built.receiptNo },
     });
   } catch (err) { return fail(res, err, "receipt-email"); }
 };

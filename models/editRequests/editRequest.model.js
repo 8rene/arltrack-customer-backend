@@ -1,7 +1,8 @@
 // editRequests/{requestID} -- a customer asking staff to change profile fields they cannot edit themselves.
-// Shape only: created by controllers/editRequest/editRequest.controller.js (auto-generated doc ID, not stored as a field);
+// Shape only: created by controllers/editRequest/editRequest.controller.js (auto-generated doc ID, also stored as the editRequestID field; requests created before that field existed don't have it);
 // reviewed by the admin backend (services/profileRequests).
 const EditRequest = {
+  editRequestID: "",   // this document's own ID (same value as the document ID)
   userID: "",          // the customer the change is for
   role: "Customer",
   status: "pending",   // "pending" until staff review it (approved / rejected values are set by the admin backend)

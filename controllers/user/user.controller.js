@@ -556,7 +556,10 @@ async function submitIdResubmitRequest(req, res) {
         };
 
     const now = admin.firestore.FieldValue.serverTimestamp();
-    const ref = await db.collection("idResubmitRequests").add({
+    // Create the ref first so the generated ID is both the document ID and the idResubmitRequestID field.
+    const ref = db.collection("idResubmitRequests").doc();
+    await ref.set({
+      idResubmitRequestID: ref.id,
       userID,
       role: "Customer",
       documentKind,

@@ -141,7 +141,10 @@ const createEditRequest = async (req, res) => {
     }
 
     const now = admin.firestore.FieldValue.serverTimestamp();
-    const docRef = await db.collection("editRequests").add({
+    // Create the ref first so the generated ID is both the document ID and the editRequestID field.
+    const docRef = db.collection("editRequests").doc();
+    await docRef.set({
+      editRequestID: docRef.id,
       userID,
       role:        "Customer",
       status:      "pending",
