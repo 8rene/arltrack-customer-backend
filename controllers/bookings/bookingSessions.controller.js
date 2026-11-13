@@ -306,4 +306,3 @@ const getArrival = async (req, res) => {
 };
 
 module.exports = { getBookingDetails, getArrival };
-WWWWWWWWWWWWWWWWWWWWWWWWESD
