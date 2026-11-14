@@ -14,7 +14,7 @@
 // request has no body), and the 5-minute email limit is shared with the admin side (collection receiptEmails).
 // PDFs are built in memory and streamed to the owner; nothing is stored or made public.
 const { db } = require("../../config/firebaseConnection/firebase");
-const { buildReceipt, buildStatement, toCustomerView, emailLimiter, emailKeyFor } = require("../../utils/receipt/receipt.util");
+const { buildReceipt, buildStatement, toCustomerView, emailLimiter } = require("../../utils/receipt/receipt.util");
 const { renderReceiptEmail, renderStatementEmail } = require("../../utils/receipt/receiptEmail.util");
 const { renderReceiptPdf, renderStatementPdf } = require("../../services/pdf/receipt.service");
 const { sendGenericEmail } = require("../../services/email.service");
@@ -64,10 +64,11 @@ const sendPdf = (res, buffer, name) => {
 };
 
 // One email send, with the shared limit: claimed in a transaction BEFORE sending (two quick taps, or a staff member and the
-// customer at the same time, cannot both pass) and handed back if the send fails.
-const emailDocument = async (res, { key, toEmail, subject, bodyHtml, userID, sentLabel, masked, meta }) => {
+// customer at the same time, cannot both pass) and handed back if the send fails. `number` is the printed receipt no. or
+// statement no.; the record is found by it.
+const emailDocument = async (res, { number, toEmail, subject, bodyHtml, userID, sentLabel, masked, meta }) => {
   if (!toEmail) return res.status(422).json({ message: "There is no email address on your account." });
-  const slot = await emailLimiter.claim(key, userID, meta);
+  const slot = await emailLimiter.claim(number, userID, meta);
   if (!slot.ok) {
     return res.status(429).json({
       message: `This ${sentLabel} was just emailed. Please wait ${Math.ceil(slot.wait / 60)} more minute(s) before sending it again.`,
@@ -76,7 +77,7 @@ const emailDocument = async (res, { key, toEmail, subject, bodyHtml, userID, sen
   }
   const sent = await sendGenericEmail({ toEmail, subject, bodyHtml });
   if (!sent.success) {
-    await emailLimiter.release(key, slot.previous);
+    await emailLimiter.release(slot.id, slot.previous);
     return res.status(502).json({ message: "Couldn't send the email. Please try again in a bit." });
   }
   return res.status(200).json({ message: `Sent to ${masked || "your email"}.`, nextAllowedAt: new Date(Date.now() + 5 * 60 * 1000).toISOString() });
@@ -98,7 +99,7 @@ const emailStatement = async (req, res) => {
     const built = await loadStatement(req);
     const { subject, bodyHtml } = renderStatementEmail(toCustomerView(built), { audience: "customer" });
     return emailDocument(res, {
-      key: emailKeyFor.statement(built.booking.bookingID), toEmail: built._email, subject, bodyHtml,
+      number: built.statementNo, toEmail: built._email, subject, bodyHtml,
       userID: req.user.userID, sentLabel: "statement", masked: built.customer.emailMasked,
       meta: { type: "statement", bookingID: built.booking.bookingID },
     });
@@ -121,9 +122,9 @@ const emailReceipt = async (req, res) => {
     const built = await loadReceipt(req);
     const { subject, bodyHtml } = renderReceiptEmail(toCustomerView(built), { audience: "customer" });
     return emailDocument(res, {
-      key: emailKeyFor.receipt(built.receiptNo), toEmail: built._email, subject, bodyHtml,
+      number: built.receiptNo, toEmail: built._email, subject, bodyHtml,
       userID: req.user.userID, sentLabel: "receipt", masked: built.customer.emailMasked,
-      meta: { type: built.kind, bookingID: built.booking.bookingID, receiptNo: built.receiptNo },
+      meta: { type: built.kind, bookingID: built.booking.bookingID, paymentEntryID: built.entryID },
     });
   } catch (err) { return fail(res, err, "receipt-email"); }
 };

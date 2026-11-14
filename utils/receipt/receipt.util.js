@@ -549,47 +549,52 @@ const toCustomerView = (doc) => {
 // doesn't lock the customer out.
 const EMAIL_COOLDOWN_MS = 5 * 60 * 1000;
 const EMAIL_LIMIT_COLLECTION = "receiptEmails";
-const safeKey = (k) => String(k).replace(/[\/\s]/g, "_");
-// receipts are keyed by receipt number (stable for an entry); statements by booking (the number carries today's date)
-const emailKeyFor = {
-  receipt: (receiptNo) => safeKey(`receipt_${receiptNo}`),
-  statement: (bookingID) => safeKey(`statement_${bookingID}`),
-};
-
-// What every receiptEmails document holds (same record the admin backend writes). The document ID stays the key (the limit needs a
-// known ID to claim inside a transaction), but the record also says what it is. `meta` comes from the receipt / statement being
-// emailed: { type: receipt kind or "statement", bookingID, receiptNo (receipts only) }.
-const emailRecordFor = (key, by, atMs, meta = {}) => ({
-  receiptEmailID: key,                                                                 // = the document ID
-  type: meta.type || (String(key).startsWith("statement_") ? "statement" : null),      // "payment" | "penalty" | "refund" | "deposit_return" | "statement"
+// What every receiptEmails document holds. The document ID is a random auto ID (like every other collection); the record
+// is FOUND by `receiptNo`, which holds the number printed on the document: the receipt number (RC-/PN-/RF-/DR-...) for a
+// receipt, the statement number (BS-...) for a statement. `meta` comes from the receipt / statement being emailed:
+// { type: receipt kind or "statement", bookingID, paymentEntryID (receipts only) }.
+const emailRecordFor = (id, receiptNo, by, atMs, meta = {}) => ({
+  emailRequestID: id,                                  // = the document ID (random)
+  type: meta.type || null,                             // "payment" | "penalty" | "refund" | "deposit_return" | "statement"
   bookingID: meta.bookingID || null,
-  receiptNo: meta.receiptNo || null,                                                   // null for a statement
+  paymentEntryID: meta.paymentEntryID || null,         // the entry a receipt was built from; null for a statement
+  receiptNo: String(receiptNo),                        // the printed number (receipt no. or statement no.): how the record is found
   lastSentAt: new Date(atMs),
   lastSentBy: by,
 });
 
 const makeEmailLimiter = (db, { now = () => Date.now(), cooldownMs = EMAIL_COOLDOWN_MS } = {}) => {
-  const ref = (key) => db.collection(EMAIL_LIMIT_COLLECTION).doc(key);
+  const col = () => db.collection(EMAIL_LIMIT_COLLECTION);
+  const byNo = (receiptNo) => col().where("receiptNo", "==", String(receiptNo));
   const waitFrom = (rec) => Math.max(0, Math.ceil((toMs(rec?.lastSentAt) + cooldownMs - now()) / 1000));
+  // If a number somehow has more than one document, the most recently sent one decides.
+  const newest = (docs) => docs.slice().sort((a, b) => toMs(b.data().lastSentAt) - toMs(a.data().lastSentAt))[0] || null;
 
-  // -> { ok: true, previous } | { ok: false, wait }   (wait = seconds left)
-  const claim = (key, by = null, meta = {}) => db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref(key));
-    const prev = snap.exists ? snap.data() : null;
+  // -> { ok: true, id, previous } | { ok: false, wait }   (wait = seconds left; id = the document, previous = what it held before, null if new)
+  const claim = (receiptNo, by = null, meta = {}) => db.runTransaction(async (tx) => {
+    const snap = await tx.get(byNo(receiptNo));
+    const found = newest(snap.docs);
+    const prev = found ? found.data() : null;
     const wait = waitFrom(prev);
     if (wait > 0) return { ok: false, wait };
-    tx.set(ref(key), emailRecordFor(key, by, now(), meta));
-    return { ok: true, previous: prev };
+    const ref = found ? found.ref : col().doc();
+    tx.set(ref, emailRecordFor(ref.id, receiptNo, by, now(), meta));
+    return { ok: true, id: ref.id, previous: prev };
   });
-  const release = async (key, previous) => {
-    try { previous ? await ref(key).set(previous) : await ref(key).delete(); } catch { /* best effort */ }
+  // the send failed: put the document back as it was, or remove it if this claim created it
+  const release = async (id, previous) => {
+    try { previous ? await col().doc(id).set(previous) : await col().doc(id).delete(); } catch { /* best effort */ }
   };
   // for an email that was just sent outside the claim flow (the automatic one after a payment settles)
-  const record = async (key, by = null, meta = {}) => {
-    try { await ref(key).set(emailRecordFor(key, by, now(), meta)); } catch { /* best effort */ }
+  const record = async (receiptNo, by = null, meta = {}) => {
+    try {
+      const found = newest((await byNo(receiptNo).get()).docs);
+      const ref = found ? found.ref : col().doc();
+      await ref.set(emailRecordFor(ref.id, receiptNo, by, now(), meta));
+    } catch { /* best effort */ }
   };
-  const cooldownLeft = async (key) => {
-    try { const s = await ref(key).get(); return s.exists ? waitFrom(s.data()) : 0; } catch { return 0; }
+  const cooldownLeft = async (receiptNo) => {
+    try { const found = newest((await byNo(receiptNo).get()).docs); return found ? waitFrom(found.data()) : 0; } catch { return 0; }
   };
   return { claim, release, record, cooldownLeft };
 };
@@ -651,8 +656,8 @@ const buildAndSendReceipt = async ({ payment, phase }) => {
     const sent = await sendGenericEmail({ toEmail: built._email, subject, bodyHtml });
     // count it toward the shared 5-minute limit, so tapping "email me" right after paying doesn't send a duplicate
     if (sent.success) {
-      await emailLimiter.record(emailKeyFor.receipt(built.receiptNo), payment.userID || null, {
-        type: built.kind, bookingID: built.booking?.bookingID, receiptNo: built.receiptNo,
+      await emailLimiter.record(built.receiptNo, payment.userID || null, {
+        type: built.kind, bookingID: built.booking?.bookingID, paymentEntryID: built.entryID,
       });
     }
     return sent;
@@ -663,6 +668,6 @@ const buildAndSendReceipt = async ({ payment, phase }) => {
 };
 
 module.exports = {
-  buildAndSendReceipt, buildReceipt, buildStatement, emailLimiter, emailKeyFor, toCustomerView,
+  buildAndSendReceipt, buildReceipt, buildStatement, emailLimiter, toCustomerView,
   resolveCarName, asDate,
 };
