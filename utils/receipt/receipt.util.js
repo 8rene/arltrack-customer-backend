@@ -554,7 +554,7 @@ const EMAIL_LIMIT_COLLECTION = "receiptEmails";
 // receipt, the statement number (BS-...) for a statement. `meta` comes from the receipt / statement being emailed:
 // { type: receipt kind or "statement", bookingID, paymentEntryID (receipts only) }.
 const emailRecordFor = (id, receiptNo, by, atMs, meta = {}) => ({
-  emailRequestID: id,                                  // = the document ID (random)
+  receiptEmailID: id,                                  // = the document ID (random)
   type: meta.type || null,                             // "payment" | "penalty" | "refund" | "deposit_return" | "statement"
   bookingID: meta.bookingID || null,
   paymentEntryID: meta.paymentEntryID || null,         // the entry a receipt was built from; null for a statement

@@ -2,7 +2,7 @@
 // change the admin file first, then copy it here.
 // Written by BOTH backends (utils/receipt/receipt.util.js on this side).
 //
-// receiptEmails/{emailRequestID}
+// receiptEmails/{receiptEmailID}
 //
 // Email rate limiter AND a record of what was emailed. One doc per receipt number or statement number that has been emailed.
 // It remembers when it was last emailed, so the same one can't be emailed again within the 5-minute cooldown
@@ -23,7 +23,7 @@
 // Re-emailing the same number overwrites that document (lastSentAt moves), so the collection only grows with the number of
 // distinct receipts/statements ever emailed.
 const ReceiptEmail = {
-  emailRequestID: "",   // this document's own ID (same value as the document ID; random)
+  receiptEmailID: "",   // this document's own ID (same value as the document ID; random)
   type: "",             // "payment" | "penalty" | "refund" | "deposit_return" | "statement"
   bookingID: "",        // the booking it belongs to
   paymentEntryID: null, // the payment entry a receipt was built from (null for a statement). For penalties paid together this is the
