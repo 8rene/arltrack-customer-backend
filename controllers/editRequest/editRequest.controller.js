@@ -37,6 +37,9 @@ const FIELD_META = {
   barangay:     { label: "Barangay",             collection: "userAddress" },
 };
 
+// Minimum age (keep in sync with MIN_SIGNUP_AGE in signup.controller.js and MIN_AGE in SignUpModal.jsx / ProfilePage.jsx).
+const MIN_AGE = 18;
+
 // Length rules for the text fields (min 1 = required).
 const TEXT_RULES = {
   username:   { label: "Username",           min: 3, max: 30  },
@@ -130,6 +133,19 @@ const createEditRequest = async (req, res) => {
       if (c.newValue.length < rule.min) return res.status(400).json({ message: `${rule.label} must be at least ${rule.min} characters.` });
       if (c.newValue.length > rule.max) return res.status(400).json({ message: `${rule.label} must be ${rule.max} characters or fewer.` });
     }
+    // A birth date must be a real date that makes the customer at least MIN_AGE (the same rule as signup).
+    const birthChange = cleanChanges.find((c) => c.field === "birthDate");
+    if (birthChange) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(birthChange.newValue);
+      const d = m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])) : null;
+      if (!d || d.getUTCFullYear() !== +m[1] || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3] || +m[1] < 1900) {
+        return res.status(400).json({ message: "Birth date is not valid." });
+      }
+      const now = new Date();
+      let age = now.getUTCFullYear() - +m[1];
+      if (now.getUTCMonth() < +m[2] - 1 || (now.getUTCMonth() === +m[2] - 1 && now.getUTCDate() < +m[3])) age--;
+      if (age < MIN_AGE) return res.status(400).json({ message: `You must be at least ${MIN_AGE} years old.` });
+    }
     // Usernames are stored lowercase and must be unique (same rule as signup).
     const usernameChange = cleanChanges.find((c) => c.field === "username");
     if (usernameChange) {
@@ -141,10 +157,7 @@ const createEditRequest = async (req, res) => {
     }
 
     const now = admin.firestore.FieldValue.serverTimestamp();
-    // Create the ref first so the generated ID is both the document ID and the editRequestID field.
-    const docRef = db.collection("editRequests").doc();
-    await docRef.set({
-      editRequestID: docRef.id,
+    const docRef = await db.collection("editRequests").add({
       userID,
       role:        "Customer",
       status:      "pending",
