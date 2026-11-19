@@ -209,6 +209,17 @@ const getBaseAreaConfig = async () => {
 // constant on purpose (see systemSettings model comment on the admin side)
 // — it's a unit definition Booking.jsx's date pickers already hardcode
 // separately, not an adjustable price.
+// ── HOURLY rental ────────────────────────────────────────────────
+// The customer picks a NUMBER OF HOURS (durationType "Hourly") and pays per hour instead of per day:
+//   rental = round(price of a 22-hour block / 22 x hours)   (so 22 hours still costs exactly the car's "22 Hours" price)
+// Hours are billed rounded UP to the next whole hour, with a minimum of MIN_HOURLY_HOURS. A "day" is then only what
+// the DRIVER'S fee is counted in: every started 24 hours = 1 day.
+const HOURLY_DURATION    = "Hourly";
+const HOURLY_BASIS_HOURS = 22;   // the car's "22 Hours" price spread over its 22 hours = the hourly rate
+const MIN_HOURLY_HOURS   = 12;
+const hourlyRentalFee = (pricePerBlock, billedHours) =>
+  Math.round((Number(pricePerBlock) || 0) * Math.max(0, Number(billedHours) || 0) / HOURLY_BASIS_HOURS);
+
 const calcBillableDays = (startDateTime, endDateTime, durationType) => {
   if (!startDateTime || !endDateTime) return { days: 0, diffHrs: 0 };
   const startDT = new Date(startDateTime);
@@ -217,6 +228,11 @@ const calcBillableDays = (startDateTime, endDateTime, durationType) => {
 
   const diffHrs = (endDT - startDT) / 3600000;
   if (diffHrs <= 0) return { days: 0, diffHrs: 0 };
+
+  if (durationType === HOURLY_DURATION) {
+    const billedHours = Math.ceil(diffHrs - 1e-9);
+    return { days: Math.max(1, Math.ceil(billedHours / 24)), diffHrs, billedHours };
+  }
 
   const days = durationType === "22 Hours"
     ? Math.max(1, Math.ceil((diffHrs + 2) / 24))
@@ -325,7 +341,8 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
   const areaFlags = driveType === "chauffeur"
     ? computeAreaFlags({ destination, destinationCity, destinationProvince, destinationCounty, pickupCity, pickupProvince, pickupCounty, extraDestinations }, settings.baseAreaKeywords)
     : { pickupOutside: false, destinationOutside: false, outsideArea: false, outsideDestinationIds: [] };
-  const { days, diffHrs } = calcBillableDays(startDateTime, endDateTime, durationType);
+  const { days, diffHrs, billedHours = 0 } = calcBillableDays(startDateTime, endDateTime, durationType);
+  const isHourly = durationType === HOURLY_DURATION;
 
   // No valid date range selected yet — nothing should be charged at all,
   // not even the "flat" fees (service/gateway/driver's), since those used
@@ -335,7 +352,8 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
     return { ...areaFlags, driversFeeBaseArea: Number(settings.driversFeeBaseArea) || 0, driversFeeOutsideArea: Number(settings.driversFeeOutsideArea) || 0, days: 0, diffHrs: 0, rentalFee: 0, extraFee: 0, driversFee: 0, serviceFee: 0, gatewayFee: 0, gatewayFeeBase: 0, serviceFeeRate: pct(settings.serviceFeePercent), gatewayFeeRate: pct(settings.gatewayFeePercent), securityDeposit: 0, grandTotal: 0 };
   }
 
-  const rentalFee = days * (Number(pricePerDay) || 0);
+  // Hourly: pricePerDay is the price of a 22-hour block and the rental is that rate x the billed hours.
+  const rentalFee = isHourly ? hourlyRentalFee(pricePerDay, billedHours) : days * (Number(pricePerDay) || 0);
 
   // ONE outside-area surcharge, charged once (pickup OR any destination outside): it is the higher driver's fee
   // below. There is no separate extra fee any more; extraFee stays in the result (always 0) so stored payments,
@@ -360,6 +378,9 @@ const computeBookingFees = async ({ pricePerDay, startDateTime, endDateTime, dur
 
   return {
     days, diffHrs, rentalFee, extraFee, driversFee, driversFeePerDay,
+    // Hourly rentals: the hours billed and the rate per hour (shown on the booking page)
+    billedHours: isHourly ? billedHours : 0,
+    pricePerHour: isHourly ? Math.round((Number(pricePerDay) || 0) / HOURLY_BASIS_HOURS * 100) / 100 : 0,
     // Where the "outside the base area" charge came from — the booking page uses
     // these to say WHICH location is outside (pickup and/or destination).
     ...areaFlags,
@@ -418,6 +439,7 @@ const derivePaymentStatus = (payment) => {
 };
 
 module.exports = {
+  HOURLY_DURATION, HOURLY_BASIS_HOURS, MIN_HOURLY_HOURS, hourlyRentalFee,
   isBaseArea,
   isOutsideByPin,
   computeAreaFlags,

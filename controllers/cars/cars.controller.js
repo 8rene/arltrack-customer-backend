@@ -59,6 +59,11 @@ const resolveCarDetails = async (carID, carData, brandMap, modelMap) => {
     }
   } catch (_) {}
 
+  // Rentals are billed per hour: the "22 Hours" price spread over 22 hours (or the "12 Hours" price over 12).
+  const p22 = pricing.find((p) => p.durationType === "22 Hours");
+  const p12 = pricing.find((p) => p.durationType === "12 Hours");
+  const hourly = p22 && Number(p22.price) > 0 ? Number(p22.price) / 22 : (p12 && Number(p12.price) > 0 ? Number(p12.price) / 12 : null);
+
   return {
     carID,
     name:             `${brand} ${model}`.trim(),
@@ -78,6 +83,7 @@ const resolveCarDetails = async (carID, carData, brandMap, modelMap) => {
     pricing,
     startingPrice:    pricing.length ? pricing[0].price        : null,
     durationType:     pricing.length ? pricing[0].durationType : null,
+    pricePerHour:     hourly == null ? null : Math.round(hourly * 100) / 100,
   };
 };
 

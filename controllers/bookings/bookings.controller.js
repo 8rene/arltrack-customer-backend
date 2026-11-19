@@ -2,7 +2,7 @@ const { db } = require("../../config/firebaseConnection/firebase");
 const createBookingSession = require("../../models/bookingSession/bookingSession.model");
 const { checkTermsAcceptance, termsRequired } = require("../../utils/terms/terms.service");
 const { makeZone } = createBookingSession;
-const { computeBookingFees, computePaymentSplit, derivePaymentStatus, getBaseAreaConfig, getBookingLeadHours } = require("../../utils/pricing");
+const { computeBookingFees, computePaymentSplit, derivePaymentStatus, getBaseAreaConfig, getBookingLeadHours, HOURLY_DURATION, HOURLY_BASIS_HOURS, MIN_HOURLY_HOURS } = require("../../utils/pricing");
 const {
   toManila, manilaDayRange, cityMatchesRule, parseCodingTime, parseBannedDigits, fmtCodingMins,
   buildCodingLocations, evaluateCodingRange, codingBlockMessage, codingWarningMessage,
@@ -19,11 +19,25 @@ const { STARTED_TRIP_MESSAGE } = require("../../utils/payments/refundNotice.util
 const { recordDirectCancellation, getCancellationReasons, getCancellationInfo } = require("../../utils/bookings/cancellationRequests.util");
 const { checkChauffeurCapacity, countEligibleDrivers, getDriverBufferMs, getFullChauffeurDays, getChauffeurDayAvailability, getChauffeurPickupTimes, NO_DRIVER_MESSAGE } = require("../../utils/drivers/driverCapacity.util");
 
+// Every rental is priced per hour, by the ACTUAL hours between the start and the end. An older copy of the booking page, or
+// a hand-made request, may still send the retired "12 Hours" / "22 Hours" types: they are treated as hourly too, so a short
+// package can never be stretched over a long date range to pay less. Anything else is refused (empty = "duration required").
+const normalizeDuration = (d) => (d === "12 Hours" || d === "22 Hours" || d === HOURLY_DURATION ? HOURLY_DURATION : "");
+
 // Look up a car's price-per-day for a given durationType straight from
 // Firestore — this is the one place pricing numbers are allowed to come
 // from. Never trust a price sent by the client.
 const getPricePerDay = async (carID, durationType) => {
   if (!carID || !durationType) return 0;
+  // Hourly rentals: the hourly rate is the car's "22 Hours" price spread over those 22 hours, so this returns the price of
+  // a 22-hour block (computeBookingFees divides it by 22). A car with only a "12 Hours" price falls back to that price
+  // spread over 12 hours.
+  if (durationType === HOURLY_DURATION) {
+    const p22 = await getPricePerDay(carID, "22 Hours");
+    if (p22 > 0) return p22;
+    const p12 = await getPricePerDay(carID, "12 Hours");
+    return p12 > 0 ? (p12 * HOURLY_BASIS_HOURS) / 12 : 0;
+  }
   const snap = await db.collection("carPricing")
     .where("carID", "==", carID)
     .where("durationType", "==", durationType)
@@ -161,8 +175,9 @@ const getCodingCities = async (req, res) => {
 // computing pricing itself.
 // ─────────────────────────────────────────────────────────────────────────────
 const getBookingQuote = async (req, res) => {
-  const { carID, duration, startDate, startTime, endDate, endTime, destination, destinationCity, destinationProvince, destinationCounty, extraDestinations, pickupCity, pickupProvince, pickupCounty, driveType, paymentAmount } = req.body;
+  const { carID, duration: rawDuration, startDate, startTime, endDate, endTime, destination, destinationCity, destinationProvince, destinationCounty, extraDestinations, pickupCity, pickupProvince, pickupCounty, driveType, paymentAmount } = req.body;
 
+  const duration = normalizeDuration(rawDuration);
   if (!carID || !duration) {
     return res.status(400).json({ message: "carID and duration are required." });
   }
@@ -319,7 +334,7 @@ const createBooking = async (req, res) => {
     carID,
     serviceType,
     serviceTypeID,
-    duration,
+    duration: rawDuration,
     startDate,
     startTime,
     endDate,
@@ -364,8 +379,13 @@ const createBooking = async (req, res) => {
     destinationCounty,
   } = req.body;
 
+  const duration = normalizeDuration(rawDuration);   // always "Hourly" (see normalizeDuration)
+
   if (!carID) {
     return res.status(400).json({ message: "carID is required." });
+  }
+  if (!duration) {
+    return res.status(400).json({ message: "duration is required." });
   }
 
   // Hiding a car on the Booking page is not enough on its own: anyone can call this endpoint directly. An Inactive car
@@ -552,6 +572,10 @@ const createBooking = async (req, res) => {
     // computed above from the server's own start/end datetimes, so this
     // can't be bypassed by sending a different `duration`/date combo than
     // what the calendar UI would allow.
+    // Hourly rentals have a minimum number of hours (the booking page won't offer less; this is the real check).
+    if (duration === HOURLY_DURATION && fees.diffHrs < MIN_HOURLY_HOURS) {
+      return res.status(400).json({ message: `The minimum rental is ${MIN_HOURLY_HOURS} hours.` });
+    }
     const MAX_BOOKING_DAYS = 10;
     if (fees.days >= MAX_BOOKING_DAYS) {
       return res.status(400).json({
@@ -731,6 +755,8 @@ const createBooking = async (req, res) => {
       // refund policy's 48-hour window is measured from this.
       pickupAt:      startDateTime,
       totalDays:     fees.days || 1,
+      // Hourly rentals: the hours billed (the rental fee = the hourly rate x these hours)
+      ...(duration === HOURLY_DURATION ? { totalHours: fees.billedHours } : {}),
       location:      destination || "",
       modeOfDriving: driveType === "chauffeur" ? "With Chauffeur" : "Self Drive",
       notesUser:     specialNotes || "",
@@ -1086,6 +1112,7 @@ const getUserBookings = async (req, res) => {
         startDateTime: b.startDateTime             || null,
         endDateTime:   b.endDateTime               || null,
         totalDays:     b.totalDays                 || 1,
+        totalHours:    b.totalHours                || null,   // hourly rentals: the hours billed
         totalFee:      0,
         rentalFee:     0,
         status:               (b.status || "upcoming").toLowerCase(),
@@ -1644,7 +1671,7 @@ const getDriverFullDays = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/bookings/driver-availability/times   (no auth, writes nothing)
-// Body: { date: "YYYY-MM-DD" (Manila), hours: 12 | 22 }  -- the shortest trip the customer's duration allows.
+// Body: { date: "YYYY-MM-DD" (Manila), hours: the length of the trip the customer picked (12 to 216) }.
 // Returns { times: ["07:00", "07:15", ...] } = the pickup times (15-minute steps) on that day from which a driver is
 // still free for the whole trip, or { times: null } when there is no limit. A driver who finishes a trip at 7:00
 // is free again from 9:00 (the buffer), so 9:00 is listed and 8:45 is not. Only times come back: no drivers, no
@@ -1657,8 +1684,8 @@ const getDriverPickupTimes = async (req, res) => {
   const { date } = req.body || {};
   const hours = Number(req.body?.hours);
   const okDay = typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(new Date(`${date}T00:00:00+08:00`).getTime());
-  if (!okDay || !Number.isFinite(hours) || hours < 1 || hours > 72) {
-    return res.status(400).json({ message: "date must be YYYY-MM-DD and hours a number between 1 and 72." });
+  if (!okDay || !Number.isFinite(hours) || hours < 1 || hours > 240) {
+    return res.status(400).json({ message: "date must be YYYY-MM-DD and hours a number between 1 and 240." });
   }
   try {
     const key = `${date}|${hours}`;
